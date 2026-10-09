@@ -149,6 +149,44 @@ fun AuthoredTraversalSamplePreview() {
     }
 }
 
+@PreviewTest
+@Preview(name = "09_release_review_sample", widthDp = 412, heightDp = 915, locale = "zh-rCN", showBackground = true)
+@Composable
+fun ReleaseReviewSamplePreview() {
+    val state = remember { ReleasePreviewFixture.reviewState }
+    ReviewSurface(sample = true) {
+        ReleaseReviewContent(state, 3L, {}, {}, {}, {}, {}, {}, {}, {})
+    }
+}
+
+@PreviewTest
+@Preview(name = "10_offline_library_sample", widthDp = 412, heightDp = 915, locale = "zh-rCN", showBackground = true)
+@Composable
+fun OfflineLibrarySamplePreview() {
+    ReviewSurface(sample = true) {
+        ReleaseLibraryContent(ReleasePreviewFixture.libraryState, {}, {}, {}, {}, {})
+    }
+}
+
+@PreviewTest
+@Preview(name = "11_offline_player_sample", widthDp = 412, heightDp = 915, locale = "zh-rCN", showBackground = true)
+@Composable
+fun OfflinePlayerSamplePreview() {
+    val state = remember { ReleasePreviewFixture.playerState }
+    ReviewSurface(sample = true) {
+        ReleasePlayerContent(state, {}, { _, _ -> }, {}, {}, {}, {})
+    }
+}
+
+@PreviewTest
+@Preview(name = "12_offline_import_failure_sample", widthDp = 412, heightDp = 915, locale = "zh-rCN", showBackground = true)
+@Composable
+fun OfflineImportFailureSamplePreview() {
+    ReviewSurface(sample = true) {
+        OfflineImportContent(com.tapscene.ui.ReleaseUiState(message = "布局样例：观看包缺少一张图片，未加入演示库。"), {}, {})
+    }
+}
+
 @Composable
 private fun SampleProjectFrame(tab: ProjectTab, content: @Composable () -> Unit) {
     ProjectWorkspaceFrame(

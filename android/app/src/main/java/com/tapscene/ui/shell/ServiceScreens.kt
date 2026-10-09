@@ -32,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.tapscene.data.ProjectSnapshot
+import com.tapscene.data.ReleaseSummary
 import com.tapscene.ui.ProjectIssue
 import java.util.Locale
 
@@ -170,6 +171,9 @@ fun DeliveryCheckScreen(
     onReview: () -> Unit,
     onDelivery: () -> Unit,
     showTopBar: Boolean = true,
+    onBuildCandidate: (() -> Unit)? = null,
+    busy: Boolean = false,
+    buildEnabled: Boolean = true,
 ) {
     var showMediaDetails by rememberSaveable(project?.project?.id) { mutableStateOf(false) }
     ServicePage("检查与交付", onBack, showTopBar = showTopBar) {
@@ -208,7 +212,7 @@ fun DeliveryCheckScreen(
             ShellActionRow("试走点击路径", "确认每个动作到达预期画面或结束结果。", onClick = onPreview, enabled = project?.steps?.isNotEmpty() == true)
         }
         DetailSection("隐私与文字") {
-            Text("生成实际成品后，逐项复核图片、完整过渡、标题、讲解与裁片。", style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
+            Text("生成固定修订后，逐项检查实际图片、标题、讲解与动作标签。当前观看包只含静态画面。", style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
         }
         Column {
             ShellDivider()
@@ -225,8 +229,23 @@ fun DeliveryCheckScreen(
             ShellDivider()
         }
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("完整交付检查与版本生成尚未接入，本机结构检查不代表已可交付。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-            OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = {}, enabled = false, modifier = Modifier.heightIn(min = 48.dp)) { Text("生成待复核成品") }
+            Text(
+                when {
+                    busy -> "正在生成固定候选，请稍候。"
+                    !buildEnabled -> "先保存当前修改，再生成固定候选。"
+                    issues.isNotEmpty() -> "先修正结构与路径问题，再生成候选。"
+                    onBuildCandidate == null -> "生成入口尚不可用；已保存内容不受影响。"
+                    else -> "固定当前图片与文字，完成逐项复核和实际试走后封存。"
+                },
+                style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted,
+            )
+            if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            Button(
+                shape = RoundedCornerShape(8.dp),
+                onClick = { onBuildCandidate?.invoke() },
+                enabled = onBuildCandidate != null && !busy && buildEnabled && project?.steps?.isNotEmpty() == true && issues.isEmpty(),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+            ) { Text(if (busy) "正在生成" else "生成待复核成品") }
         }
         Column {
             ShellDivider()
@@ -261,18 +280,26 @@ fun DeliveryOptionsScreen(
     onAi: () -> Unit,
     onAccount: () -> Unit,
     onVersions: () -> Unit,
+    sealedSummary: ReleaseSummary? = null,
+    onExport: (() -> Unit)? = null,
+    busy: Boolean = false,
 ) {
     ServicePage("交付方式", onBack) {
         WorkflowLine(2, listOf("检查", "成品复核", "交付"))
         Column {
-            ShellLabelValue("封存版本", "尚未生成")
-            ShellLabelValue("封存时间 / 体积", "等待完成复核")
+            ShellLabelValue("固定版本", sealedSummary?.title ?: "尚未生成")
+            if (sealedSummary != null) {
+                ShellLabelValue("版本标识", sealedSummary.id.take(12))
+                ShellLabelValue("${if (sealedSummary.origin == "local") "封存" else "导入"}时间", formatReleaseDate(sealedSummary.sealedAt))
+                ShellLabelValue("包内文件", "${sealedSummary.stepCount} 个步骤 · ${formatShellBytes(sealedSummary.byteLength)}")
+            } else ShellLabelValue("封存时间 / 体积", "等待完成复核")
         }
         DetailSection("离线观看包", "保存为文件，交给另一台设备离线观看。") {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = {}, enabled = false, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("保存到文件") }
+                Button(shape = RoundedCornerShape(8.dp), onClick = { onExport?.invoke() }, enabled = sealedSummary != null && onExport != null && !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text(if (busy) "正在准备" else "保存到文件") }
                 OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = {}, enabled = false, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("系统分享") }
             }
+            Text("接收设备安装 TapScene 后导入。已保存或发出的副本无法远程收回。系统分享尚未接入。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
         }
         DetailSection("托管链接", "主动上传封存后的安全内容，由持链者观看。") {
             ShellLabelValue("有效期选项", "1 天 / 7 天 / 30 天")
@@ -282,7 +309,7 @@ fun DeliveryOptionsScreen(
         DetailSection("AI 工程包", "导出完整图与有限渲染计划，在独立环境中制作动画。") {
             ShellActionRow("查看工程包配置", "路径、画布、停留时间与可见区域。", onClick = onAi)
         }
-        StatusNote("封存、导出与托管尚未接入。交付需先完成真实成品复核。")
+        StatusNote(if (sealedSummary == null) "先完成成品复核与封存，再保存离线观看包。托管和 AI 工程包尚未接入。" else "此文件保留当前固定版本。托管和 AI 工程包尚未接入。")
         Column {
             ShellActionRow("返回成品复核", onClick = onReview)
             ShellDivider()

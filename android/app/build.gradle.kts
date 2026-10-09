@@ -14,8 +14,8 @@ android {
         applicationId = "com.tapscene"
         minSdk = 26
         targetSdk = 36
-        versionCode = 7
-        versionName = "0.5.0-path-dev"
+        versionCode = 8
+        versionName = "0.6.0-offline-dev"
         testInstrumentationRunner = "com.tapscene.media.MediaCompatibilityInstrumentation"
         manifestPlaceholders["appLabel"] = "TapScene"
     }
