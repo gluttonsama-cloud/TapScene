@@ -221,4 +221,3 @@ internal fun visibleSize(format: MediaFormat, horizontal: Boolean): Int {
     if (start < 0 || end < start || end >= size) throw MediaImportException("录屏裁切范围无效。")
     return end - start + 1
 }
-
