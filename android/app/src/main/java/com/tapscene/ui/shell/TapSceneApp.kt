@@ -57,12 +57,19 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     var pendingCandidateSource by rememberSaveable { mutableStateOf<String?>(null) }
     var autoAnalyzeSource by rememberSaveable { mutableStateOf<String?>(null) }
     var reviewQueue by rememberSaveable { mutableStateOf(arrayListOf<String>()) }
+    var reviewedStepIds by rememberSaveable { mutableStateOf(arrayListOf<String>()) }
+    var pathStepIds by rememberSaveable { mutableStateOf<ArrayList<String>?>(null) }
+    var pathMarkLastTerminal by rememberSaveable { mutableStateOf<Boolean?>(null) }
+    var pendingPathProject by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingPathIds by rememberSaveable { mutableStateOf(arrayListOf<String>()) }
+    var pendingPathRevision by rememberSaveable { mutableStateOf(0L) }
+    var pendingPathTerminal by rememberSaveable { mutableStateOf(false) }
     var reviewIndex by rememberSaveable { mutableStateOf(0) }
     var preparedCandidate by remember { mutableStateOf<String?>(null) }
     val projectId = state.project?.project?.id
     val unavailable = state.busy || state.loadFailed || candidateState.busy
     LaunchedEffect(page, projectId, state.busy) {
-        if (page == "transition" && projectId == null && !state.busy) pop()
+        if ((page == "transition" || page == "path") && projectId == null && !state.busy) pop()
     }
     val scopeReady = projectId != null && media.projectId == projectId && !retainedMedia
     val openRecordedCandidates: (String, String, Boolean) -> Unit = { id, source, analyze ->
@@ -103,7 +110,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
         if (!unavailable && scopeReady && !mediaState.busy && eligible.isNotEmpty()) {
             if (eligible.size > ProjectLimits.MAX_STEPS - (state.project?.steps?.size ?: 0)) projects.message("所选画面超过项目剩余步骤数量。")
             else {
-                reviewQueue = ArrayList(eligible.map { it.id }); reviewIndex = 0; preparedCandidate = null
+                reviewQueue = ArrayList(eligible.map { it.id }); reviewedStepIds = arrayListOf(); reviewIndex = 0; preparedCandidate = null
                 push("candidate-review")
             }
         }
@@ -112,8 +119,16 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     LaunchedEffect(page, reviewIndex, candidateState.loading, mediaState.busy, state.busy, scopeReady) {
         if (page == "candidate-review" && !candidateState.loading && !mediaState.busy && !state.busy && scopeReady) {
             if (reviewIndex >= reviewQueue.size) {
-                pop(); candidates.refresh(); projects.message("所选画面已处理，可以继续编辑步骤。")
-            } else if (queuedCandidate?.usedStepId != null) { reviewIndex++; preparedCandidate = null }
+                pop(); candidates.refresh()
+                val savedIds = reviewedStepIds.distinct()
+                if (savedIds.size >= 2) {
+                    pathStepIds = ArrayList(savedIds); pathMarkLastTerminal = null; push("path")
+                } else projects.message("所选画面已处理，可以继续编辑步骤。")
+            } else if (queuedCandidate?.usedStepId != null) {
+                val savedId = requireNotNull(queuedCandidate.usedStepId)
+                if (savedId !in reviewedStepIds) reviewedStepIds = ArrayList(reviewedStepIds + savedId)
+                reviewIndex++; preparedCandidate = null
+            }
             else if (queuedCandidate != null && preparedCandidate != queuedCandidate.id) {
                 preparedCandidate = queuedCandidate.id
                 media.prepareCandidateImage(queuedCandidate.sourceId, queuedCandidate.actualTimeUs, queuedCandidate.id)
@@ -123,6 +138,23 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     LaunchedEffect(page, projectId, state.busy, pendingCandidateProject) {
         if ((page == "candidate-review" || page == "candidates") && projectId == null && !state.busy && pendingCandidateProject == null) {
             reviewQueue = arrayListOf(); pages.clear()
+        }
+    }
+    LaunchedEffect(pendingPathProject, projectId, state.busy, state.project?.project?.revision) {
+        val expected = pendingPathProject
+        if (expected != null && !state.busy) {
+            pendingPathProject = null
+            val current = state.project
+            val committed = !state.loadFailed && current?.project?.id == expected &&
+                current.project.revision > pendingPathRevision && pendingPathIds.size >= 2 &&
+                pendingPathIds.zipWithNext().all { (from, to) -> current.steps.firstOrNull { it.id == from }?.nextAction?.targetStepId == to } &&
+                (!pendingPathTerminal || current.steps.firstOrNull { it.id == pendingPathIds.last() }?.isTerminal == true)
+            if (committed && page == "path") { pages.clear(); tab = ProjectTab.STEPS; pathStepIds = null; pathMarkLastTerminal = null }
+        }
+    }
+    val openPath: () -> Unit = {
+        if (!unavailable && !mediaState.busy && state.project != null) {
+            pathStepIds = null; pathMarkLastTerminal = null; push("path")
         }
     }
     val closeEditor: () -> Unit = {
@@ -181,6 +213,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
         }
     }
     BackHandler(enabled = page != null && !retainedMedia) { pop() }
+    BackHandler(enabled = page == "path" && state.route != ProjectRoute.EDIT) { if (!state.busy) pop() }
     BackHandler(enabled = page == null && !retainedMedia && state.route == ProjectRoute.STEPS) {
         if (!state.busy && !mediaState.busy) projects.back()
     }
@@ -271,11 +304,33 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                                     "候选画面已变化，请返回重新选择。"
                                                 }
                                                 val stepId = projects.saveReviewedStep(targetProject, input.copy(captureId = "candidate-${item.id}"), openEditor = false)
+                                                if (stepId !in reviewedStepIds) reviewedStepIds = ArrayList(reviewedStepIds + stepId)
                                                 candidates.markUsed(item.id, stepId)
                                                 reviewIndex++; preparedCandidate = null
                                             })
                                     }
                                 } else ScreenEmpty("候选尚未就绪", "已保存步骤仍在项目中。", "返回候选", { pop(); candidates.refresh() })
+                            }
+                            "path" -> state.project?.let { snapshot ->
+                                if (state.route == ProjectRoute.EDIT && state.stepDraft != null) {
+                                    EditorWorkspaceContent(snapshot, requireNotNull(state.stepDraft), state.bitmap, unavailable, EditorCallbacks(
+                                        closeEditor, projects::editTitle, projects::editDescription, projects::editTerminal,
+                                        projects::putHotspot, projects::removeHotspot, projects::saveStepDraft, projects::discardStepDraft,
+                                        {}, { transitionHotspot = it; push("transition") }, projects::putNextAction, projects::removeNextAction),
+                                        previewEnabled = false)
+                                } else AuthoredPathScreen(snapshot, pathStepIds, unavailable || mediaState.busy,
+                                    { if (!state.busy) pop() },
+                                    { ids, terminal, revision ->
+                                        if (projects.state.value.dirtyStepIds.isNotEmpty()) {
+                                            projects.message("先保存或放弃步骤修改，再生成通路。")
+                                        } else {
+                                            pendingPathProject = snapshot.project.id; pendingPathIds = ArrayList(ids)
+                                            pendingPathTerminal = terminal; pendingPathRevision = revision
+                                            projects.connectStepsInOrder(ids, terminal, revision)
+                                        }
+                                    }, projects::openStep,
+                                    initialMarkLastTerminal = pathMarkLastTerminal,
+                                    onDraftChanged = { ids, terminal -> pathStepIds = ArrayList(ids); pathMarkLastTerminal = terminal })
                             }
                             "review" -> ReleaseReviewScreen(pop)
                             "delivery" -> DeliveryOptionsScreen(pop, { push("review") }, { push("ai") }, { push("account") }, { push("versions") })
@@ -301,12 +356,14 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                             EditorWorkspaceContent(snapshot, draft, state.bitmap, unavailable, EditorCallbacks(
                                 closeEditor, projects::editTitle, projects::editDescription, projects::editTerminal,
                                 projects::putHotspot, projects::removeHotspot, projects::saveStepDraft, projects::discardStepDraft,
-                                { projects.startPreview(true) }, { transitionHotspot = it; push("transition") }),
+                                { projects.startPreview(true) }, { transitionHotspot = it; push("transition") },
+                                projects::putNextAction, projects::removeNextAction),
                                 previewEnabled = state.dirtyStepIds.isEmpty())
                         } }
                         state.route == ProjectRoute.PREVIEW -> state.project?.let { snapshot -> state.preview?.let { preview ->
                             DraftPreviewContent(snapshot, preview, state.bitmap, unavailable, projects::chooseHotspot,
-                                projects::tapPreview, projects::previousPreview, projects::restartPreview, projects::exitPreview)
+                                projects::tapPreview, projects::previousPreview, projects::restartPreview, projects::exitPreview,
+                                onNextAction = projects::chooseNextAction)
                         } }
                         state.route == ProjectRoute.STEPS -> ProjectWorkspaceFrame(
                             state.project?.project?.title.orEmpty(), tab, { if (!state.busy && !mediaState.busy) tab = it },
@@ -316,7 +373,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                             when (tab) {
                                 ProjectTab.STEPS -> StoryboardContent(state, projects::openStep, { tab = ProjectTab.SOURCES },
                                     projects::setStart, projects::moveStep, { deletingStep = it },
-                                    stepThumbnail = { asset -> ReviewedThumbnail(projects, state.project, asset) })
+                                    stepThumbnail = { asset -> ReviewedThumbnail(projects, state.project, asset) }, onBuildPath = openPath)
                                 ProjectTab.SOURCES -> Column(Modifier.fillMaxSize()) {
                                     if (scopeReady && mediaState.loadFailed) Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                                         Text("素材暂时无法读取。", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
@@ -363,7 +420,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                     deletingProject = null; projects.message("请先取消候选整理。")
                 } else { deletingProject = null; projects.deleteProject(item.id) } }) }
             deletingStep?.let { step -> ConfirmDelete("删除“${step.title}”？",
-                "步骤、图片及 ${projects.deletionHotspotCount(step.id)} 个关联热点将删除，包括未保存草稿中指向它的热点。原录屏保留。${if (state.project?.project?.startStepId == step.id) "删除后需要重新设置起点。" else ""}", !state.busy,
+                "步骤、图片及 ${projects.deletionHotspotCount(step.id)} 个关联热点将删除，包括未保存草稿中指向它的热点。${projects.deletionNextActionCount(step.id)} 个下一步动作受影响；指向此步的下一步保留为待补目标。原录屏保留。${if (state.project?.project?.startStepId == step.id) "删除后需要重新设置起点。" else ""}", !state.busy,
                 { deletingStep = null }, { deletingStep = null; projects.deleteStep(step.id) }) }
             if (confirmLeave) AlertDialog(onDismissRequest = { confirmLeave = false }, title = { Text("保留这次修改？") },
                 text = { Text("返回后可继续编辑。尚未保存的修改只在本次应用运行中保留，关闭应用后可能丢失。") },

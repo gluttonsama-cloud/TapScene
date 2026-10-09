@@ -192,6 +192,7 @@ fun StoryboardContent(
     onDeleteStep: (ProjectStep) -> Unit,
     stepThumbnail: @Composable (StepAsset) -> Bitmap?,
     modifier: Modifier = Modifier,
+    onBuildPath: (() -> Unit)? = null,
 ) {
     val snapshot = state.project
     if (snapshot == null) {
@@ -212,13 +213,21 @@ fun StoryboardContent(
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text("分镜", style = MaterialTheme.typography.titleLarge,
                             modifier = Modifier.semantics { heading() })
-                        Text("${snapshot.steps.size} 个步骤 · ${snapshot.steps.sumOf { it.hotspots.size }} 个出口",
+                        Text("${snapshot.steps.size} 个步骤 · ${snapshot.steps.sumOf { it.hotspots.size + if (it.nextAction != null) 1 else 0 }} 个出口",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Button(onClick = onAddSource, enabled = editable, shape = RoundedCornerShape(8.dp),
                         modifier = Modifier.heightIn(min = 48.dp)) {
                         Text("添加内容")
+                    }
+                }
+                if (snapshot.steps.size >= 2 && onBuildPath != null) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("排序只调整分镜位置", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        OutlinedButton(onClick = onBuildPath, enabled = editable,
+                            modifier = Modifier.heightIn(min = 48.dp)) { Text("按顺序连接") }
                     }
                 }
                 if (snapshot.project.goal.isNotBlank()) {
@@ -307,7 +316,7 @@ private fun StoryboardStepRow(
                     if (step.description.isNotBlank()) Text(step.description,
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    if (step.hotspots.isEmpty() && !step.isTerminal) {
+                    if (step.hotspots.isEmpty() && step.nextAction == null && !step.isTerminal) {
                         Text("尚无出口", style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
@@ -326,6 +335,36 @@ private fun StoryboardStepRow(
                     DropdownMenuItem(text = { Text("删除步骤", color = MaterialTheme.colorScheme.error) }, enabled = enabled,
                         onClick = { menuOpen = false; onDeleteStep(step) }, modifier = Modifier.heightIn(min = 48.dp))
                 }
+            }
+        }
+        step.nextAction?.let { action ->
+            val target = snapshot.steps.firstOrNull { it.id == action.targetStepId }
+            val targetIndex = snapshot.steps.indexOfFirst { it.id == action.targetStepId }
+            Row(
+                modifier = Modifier.padding(start = 32.dp).fillMaxWidth().heightIn(min = 48.dp)
+                    .drawBehind {
+                        drawLine(outletColor, Offset(0f, 10.dp.toPx()),
+                            Offset(0f, size.height - 10.dp.toPx()), 1.5.dp.toPx())
+                    }
+                    .clickable(enabled = enabled, role = Role.Button,
+                        onClickLabel = if (target != null) "编辑目标步骤 ${target.title}" else "修复下一步目标") {
+                        onOpenStep(target?.id ?: step.id)
+                    }
+                    .padding(start = 12.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(action.label, style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text("作者编排", style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Text("→", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+                Text(if (target != null) "${(targetIndex + 1).toString().padStart(2, '0')} ${target.title}" else "待修复 · 目标缺失",
+                    Modifier.weight(1.1f), style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    color = if (target == null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
             }
         }
         if (step.hotspots.isNotEmpty()) {

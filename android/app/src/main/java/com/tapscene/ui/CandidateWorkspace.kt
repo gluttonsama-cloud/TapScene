@@ -130,7 +130,7 @@ class CandidateWorkspace(application: Application) : AndroidViewModel(applicatio
                     }
                     if (request == generation) {
                         apply(saved)
-                        message("已整理 ${saved.candidates.size} 个画面变化建议；可能遗漏短暂或细微变化，请人工校正。")
+                        message("已整理 ${saved.candidates.size} 个候选画面。")
                     }
                 } catch (_: TimeoutCancellationException) {
                     finishInterrupted(run, latest, CandidateAnalysisStatus.FAILED, request,

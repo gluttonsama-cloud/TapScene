@@ -67,3 +67,82 @@ c.execute("DELETE FROM local_assets WHERE project_id='p' AND asset_id='a'");c.co
 assert list(c.execute("SELECT hotspot_id FROM hotspots WHERE project_id='p'"))==[('finish',)]
 assert not list(c.execute('PRAGMA foreign_key_check'))
 print('PASS step deletion removes incoming/outgoing/self links, keeps independent end action')
+
+# Next actions are independent authored buttons. Migration is additive and leaves every old
+# table byte-for-byte equivalent at the row level; no hotspots or assets are synthesized.
+tables = re.findall(r'db.execSQL\("""(CREATE TABLE.*?)"""\)', s, re.S)
+single_line = re.findall(r'db.execSQL\("(CREATE (?:INDEX|TABLE).*?)"\)', s)
+next_sql = [sql for sql in tables + single_line if re.match(r'CREATE (?:TABLE|INDEX) next_actions', sql)]
+assert len(next_sql) == 2
+legacy = sqlite3.connect(':memory:')
+legacy.execute('PRAGMA foreign_keys=ON')
+for sql in tables + single_line:
+ if sql not in next_sql: legacy.execute(sql)
+legacy.execute('PRAGMA user_version=1')
+legacy.execute("INSERT INTO projects VALUES('legacy','Title','Goal',11,12,9,'a')")
+legacy.execute("INSERT INTO sources VALUES('legacy','source','{\"kept\":true}')")
+for state in ('a', 'b'):
+ legacy.execute('INSERT INTO local_assets VALUES(?,?,?,?,?,?,?)',(state,'legacy','private/'+state+'.png','digest-'+state,42,3,7))
+ legacy.execute('INSERT INTO states VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',('legacy',state,'capture-'+state,0,state,'legacy text',0,'source',state,123000,1000,'[]'))
+legacy.execute("INSERT INTO hotspots VALUES('legacy','hotspot','a','Manual',0.1,0.2,0.6,0.8)")
+legacy.execute("INSERT INTO edges VALUES('legacy','edge','hotspot','a','b',NULL)")
+legacy.execute("INSERT INTO asset_cleanup VALUES('deleted','private/queued.png')")
+legacy.execute("INSERT INTO asset_imports VALUES('legacy','interrupted')")
+legacy.commit()
+old_names = [row[0] for row in legacy.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+before = {name: list(legacy.execute('SELECT * FROM ' + name)) for name in old_names}
+with legacy:
+ for sql in next_sql: legacy.execute(sql)
+ legacy.execute('PRAGMA user_version=2')
+assert before == {name: list(legacy.execute('SELECT * FROM ' + name)) for name in old_names}
+assert legacy.execute('SELECT COUNT(*) FROM next_actions').fetchone()[0] == 0
+assert not list(legacy.execute('PRAGMA foreign_key_check'))
+print('PASS v1-to-v2 additive DDL: old IDs, revision, hotspots, assets, sources and recovery journals unchanged')
+
+# Use the shared schema above to exercise both composite foreign keys and per-source cardinality.
+def next_action(p, action, frm, to, label='Next'):
+ c.execute('INSERT INTO next_actions VALUES(?,?,?,?,?)', (p, action, frm, label, to))
+step('p', 'new-a'); c.commit()
+next_action('p', 'next-b', 'b', 'new-a'); c.commit()
+for action, frm, to in [('bad-target', 'new-a', 'c'), ('bad-source', 'c', 'new-a'), ('duplicate-source', 'b', 'new-a')]:
+ try:
+  next_action('p', action, frm, to); c.commit(); raise AssertionError('invalid next action accepted')
+ except sqlite3.IntegrityError: c.rollback()
+try:
+ next_action('p', 'blank-label', 'new-a', 'b', ' '); raise AssertionError('blank label accepted')
+except sqlite3.IntegrityError: c.rollback()
+print('PASS next action source/target same-project FKs, one action per source and nonblank label')
+
+# Reordering does not alter any graph action. A rejected transaction restores both text and
+# actions, even if it first wrote a valid authored target and then hit another bad target.
+old_next = list(c.execute('SELECT * FROM next_actions ORDER BY action_id'))
+c.execute("UPDATE states SET sort_order=7 WHERE project_id='p' AND state_id='b'"); c.commit()
+assert old_next == list(c.execute('SELECT * FROM next_actions ORDER BY action_id'))
+try:
+ c.execute("UPDATE next_actions SET label='changed',to_state_id=NULL WHERE project_id='p' AND action_id='next-b'")
+ c.execute("UPDATE states SET title='changed' WHERE project_id='p' AND state_id='b'")
+ next_action('p', 'bad-end', 'new-a', 'c'); c.commit(); raise AssertionError('partial graph committed')
+except sqlite3.IntegrityError: c.rollback()
+assert old_next == list(c.execute('SELECT * FROM next_actions ORDER BY action_id'))
+assert c.execute("SELECT title FROM states WHERE project_id='p' AND state_id='b'").fetchone()[0] == 'b'
+print('PASS authored action reorder invariance and full transaction rollback')
+
+# The store clears only target columns before deleting a destination. Broken actions remain
+# countable and repairable. Deleting their source cascades the action, never another project.
+c.execute("UPDATE next_actions SET to_state_id=NULL WHERE project_id='p' AND to_state_id='new-a'")
+c.execute("DELETE FROM states WHERE project_id='p' AND state_id='new-a'"); c.commit()
+assert list(c.execute('SELECT action_id,label,to_state_id FROM next_actions')) == [('next-b', 'Next', None)]
+assert c.execute("SELECT COUNT(*) FROM next_actions WHERE project_id='p'").fetchone()[0] == 1
+c.execute("UPDATE projects SET start_state_id=NULL WHERE project_id='p'")
+c.execute("DELETE FROM states WHERE project_id='p' AND state_id='b'"); c.commit()
+assert c.execute('SELECT COUNT(*) FROM next_actions').fetchone()[0] == 0
+assert not list(c.execute('PRAGMA foreign_key_check'))
+print('PASS deleted target preserves unresolved button; deleted source cascades its button')
+print('NOTE capacity, explicit rebuild and revision policy are covered by AuthoredPathChecks on Android; host DDL is not runtime proof')
+step('p', 'cascade-a'); step('p', 'cascade-b')
+next_action('p', 'cascade-next', 'cascade-a', 'cascade-b'); c.commit()
+c.execute("DELETE FROM projects WHERE project_id='p'"); c.commit()
+assert c.execute('SELECT COUNT(*) FROM next_actions').fetchone()[0] == 0
+assert c.execute("SELECT COUNT(*) FROM states WHERE project_id='other'").fetchone()[0] == 1
+assert not list(c.execute('PRAGMA foreign_key_check'))
+print('PASS project deletion cascades authored actions while another project remains intact')

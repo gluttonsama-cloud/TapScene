@@ -7,6 +7,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.tapscene.data.ProjectHotspot
 import com.tapscene.data.ProjectLimits
+import com.tapscene.data.ProjectNextAction
 import com.tapscene.data.ProjectSnapshot
 import com.tapscene.data.ProjectStep
 import com.tapscene.data.ProjectStore
@@ -39,6 +40,7 @@ data class StepEditDraft(
     val isTerminal: Boolean,
     val hotspots: List<ProjectHotspot>,
     val dirty: Boolean = false,
+    val nextAction: ProjectNextAction? = null,
 )
 
 data class ProjectIssue(val stepId: String?, val message: String)
@@ -182,8 +184,9 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     fun editDescription(value: String) = editDraft { it.copy(description = value) }
 
     fun editTerminal(value: Boolean) {
-        if (value && state.value.stepDraft?.hotspots?.isNotEmpty() == true) {
-            message("请先移除本步骤的热点，再设为终点")
+        val draft = state.value.stepDraft ?: return
+        if (value && (draft.hotspots.isNotEmpty() || draft.nextAction != null)) {
+            message("请先移除本步骤的热点和下一步动作，再设为终点")
             return
         }
         editDraft { it.copy(isTerminal = value) }
@@ -204,6 +207,25 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     fun removeHotspot(id: String) = editDraft { it.copy(hotspots = it.hotspots.filterNot { hotspot -> hotspot.id == id }) }
+
+    /** An authored button outside the canvas; it never creates a touch region. */
+    fun putNextAction(action: ProjectNextAction) {
+        val draft = state.value.stepDraft ?: return
+        if (draft.isTerminal) {
+            message("请先取消终点标记，再添加下一步动作")
+            return
+        }
+        if (action.targetStepId != null && state.value.project?.steps?.none { it.id == action.targetStepId } == true) {
+            message("下一步目标已不存在，请重新选择当前项目中的步骤")
+            return
+        }
+        // Removing and re-adding before saving is still an edit of the persisted button.
+        val base = state.value.project?.project?.id?.let { drafts[it to draft.stepId]?.baseStep?.nextAction }
+        val stableId = draft.nextAction?.id ?: base?.id ?: action.id
+        editDraft { it.copy(nextAction = action.copy(id = stableId)) }
+    }
+
+    fun removeNextAction() = editDraft { it.copy(nextAction = null) }
 
     private fun editDraft(change: (StepEditDraft) -> StepEditDraft) {
         val current = state.value
@@ -232,7 +254,8 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         execute("保存步骤", editing = true) {
             val saved = withContext(Dispatchers.IO) {
                 store.saveStepDraft(project.project.id, draft.stepId, draft.title, draft.description,
-                    draft.isTerminal, draft.hotspots, expectedRevision = record.baseRevision)
+                    draft.isTerminal, draft.hotspots, expectedRevision = record.baseRevision,
+                    nextAction = draft.nextAction)
             }
             saved.steps.firstOrNull { it.id == draft.stepId }?.let { step ->
                 drafts[project.project.id to step.id] = DraftRecord(step.toDraft(), step, saved.project.revision)
@@ -271,6 +294,32 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         }
     }
 
+    /** The caller first confirms this exact order and whether its final step becomes terminal. */
+    fun connectStepsInOrder(stepIds: List<String>, markLastTerminal: Boolean, expectedRevision: Long) {
+        val current = state.value
+        if (current.busy || current.loadFailed) return
+        val project = current.project ?: return
+        if (dirtyIds(project.project.id).isNotEmpty()) {
+            message("还有未保存的步骤修改，请先保存或放弃修改后生成通路")
+            return
+        }
+        val order = stepIds.toList()
+        if (project.project.revision != expectedRevision || order.size < 2 ||
+            order.toSet().size != order.size || order.any { id -> project.steps.none { it.id == id } }) {
+            message("项目或步骤已变化，请重新查看顺序并确认通路")
+            return
+        }
+        execute("保存作者确认的顺序通路", editing = true) {
+            require(state.value.project?.project?.id == project.project.id) { "当前项目已变化，请重新确认通路" }
+            require(dirtyIds(project.project.id).isEmpty()) { "请先保存或放弃步骤修改后生成通路" }
+            val saved = withContext(Dispatchers.IO) {
+                store.connectStepsInOrder(project.project.id, order, markLastTerminal, expectedRevision)
+            }
+            applyProject(saved)
+            message("顺序通路已保存；画面热点保持原样")
+        }
+    }
+
     fun deletionHotspotCount(stepId: String): Int {
         val project = state.value.project ?: return 0
         return project.steps.flatMap { step ->
@@ -279,10 +328,18 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         }.map { it.id }.toSet().size
     }
 
-    /** Incoming and outgoing hotspots are removed atomically by the store, after UI confirmation. */
+    fun deletionNextActionCount(stepId: String): Int {
+        val project = state.value.project ?: return 0
+        return project.steps.flatMap { step ->
+            listOfNotNull(step.nextAction, drafts[project.project.id to step.id]?.draft?.nextAction)
+                .filter { step.id == stepId || it.targetStepId == stepId }
+        }.map { it.id }.toSet().size
+    }
+
+    /** Hotspots are removed; incoming next buttons become unresolved, after UI confirmation. */
     fun deleteStep(stepId: String) {
         val project = state.value.project ?: return
-        execute("删除步骤与相关热点", editing = true, afterRefresh = {
+        execute("删除步骤并更新相关动作", editing = true, afterRefresh = {
             // Even a cancelled dispatcher return can hide a successful deletion transaction.
             if (state.value.project?.project?.id == project.project.id && state.value.project?.steps?.none { it.id == stepId } == true) {
                 drafts.remove(project.project.id to stepId)
@@ -298,7 +355,8 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
                 mutableState.update { it.copy(route = ProjectRoute.STEPS, selectedStepId = null, stepDraft = null, bitmap = null) }
             }
             message("步骤已删除，已移除 ${result.impact.hotspotCount} 个相关热点" +
-                if (result.pendingAssetCleanupCount > 0) "；私有图片稍后继续清理" else "")
+                (if (result.impact.incomingNextActionCount > 0) "；${result.impact.incomingNextActionCount} 个下一步动作需重选目标" else "") +
+                (if (result.pendingAssetCleanupCount > 0) "；私有图片稍后继续清理" else ""))
         }
     }
 
@@ -428,9 +486,24 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
                 endActionId = hotspot.id, matchingHotspotIds = emptyList(), visitedActionIds = preview.visitedActionIds + id)) }
             return
         }
-        val target = snapshot.steps.firstOrNull { it.id == hotspot.targetStepId }
+        advancePreview(snapshot, preview, hotspot.id, hotspot.targetStepId, "这个热点的目标已缺失，请回编辑修正")
+    }
+
+    /** Invoked only by the authored button, never by canvas hit testing or list position. */
+    fun chooseNextAction() {
+        if (state.value.busy || state.value.bitmap == null) return
+        val snapshot = validPreview() ?: return
+        val preview = state.value.preview ?: return
+        if (preview.ended) return
+        val action = snapshot.steps.firstOrNull { it.id == preview.currentStepId }?.nextAction ?: return
+        advancePreview(snapshot, preview, action.id, action.targetStepId, "下一步目标已缺失，请回编辑重新选择；此处不是结束")
+    }
+
+    private fun advancePreview(snapshot: ProjectSnapshot, preview: PreviewState, actionId: String,
+        targetStepId: String?, missingTargetMessage: String) {
+        val target = snapshot.steps.firstOrNull { it.id == targetStepId }
         if (target == null) {
-            message("这个热点的目标已缺失，请回编辑修正")
+            message(missingTargetMessage)
             return
         }
         if (preview.history.size >= MAX_PREVIEW_VISITS) {
@@ -445,7 +518,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
             mutableState.update { it.copy(selectedStepId = target.id, bitmap = bitmap,
                 preview = preview.copy(currentStepId = target.id, history = preview.history + target.id,
                     ended = target.isTerminal, endLabel = target.title.takeIf { _ -> target.isTerminal },
-                    endActionId = null, matchingHotspotIds = emptyList(), visitedActionIds = preview.visitedActionIds + id)) }
+                    endActionId = null, matchingHotspotIds = emptyList(), visitedActionIds = preview.visitedActionIds + actionId)) }
         }
     }
 
@@ -494,7 +567,8 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     private fun validPreview(): ProjectSnapshot? {
         val current = state.value
         val snapshot = previewSnapshot
-        if (snapshot == null || current.preview?.revision != snapshot.project.revision ||
+        if (snapshot == null || current.preview?.projectId != snapshot.project.id ||
+            current.project?.project?.id != snapshot.project.id || current.preview?.revision != snapshot.project.revision ||
             current.project?.project?.revision != snapshot.project.revision || previewEditRevision != current.editRevision) {
             invalidatePreview()
             message("项目已修改，请重新开始预览")
@@ -527,7 +601,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
                 if (editing) invalidatePreview(edited = true)
                 block()
             } catch (cancelled: CancellationException) {
-                message("已取消；正在核对本地保存结果，未保存的文字和热点会保留")
+                message("已取消；正在核对本地保存结果，未保存的文字和动作会保留")
                 throw cancelled
             } catch (failure: Exception) {
                 message(when (failure) {
@@ -603,15 +677,15 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     private fun draftFor(project: ProjectSnapshot, step: ProjectStep): StepEditDraft =
         drafts.getOrPut(project.project.id to step.id) { DraftRecord(step.toDraft(), step, project.project.revision) }.draft
 
-    private fun ProjectStep.toDraft() = StepEditDraft(id, title, description, isTerminal, hotspots)
+    private fun ProjectStep.toDraft() = StepEditDraft(id, title, description, isTerminal, hotspots, nextAction = nextAction)
     private fun sameEdits(draft: StepEditDraft, step: ProjectStep): Boolean =
         draft.title == step.title && draft.description == step.description && draft.isTerminal == step.isTerminal &&
-            draft.hotspots.sortedBy { it.id } == step.hotspots.sortedBy { it.id }
+            draft.hotspots.sortedBy { it.id } == step.hotspots.sortedBy { it.id } && draft.nextAction == step.nextAction
 
     private fun sameSavedEdits(draft: StepEditDraft, step: ProjectStep): Boolean = sameEdits(draft.copy(
         title = draft.title.trim(), description = draft.description.trim(), hotspots = draft.hotspots.map {
             it.copy(label = it.label.trim(), endLabel = it.endLabel?.trim())
-        }), step)
+        }, nextAction = draft.nextAction?.let { it.copy(label = it.label.trim()) }), step)
 
     private fun pruneDeletedTargets(projectId: String, deletedStepId: String) {
         // Preserve unrelated typed work and explicitly rerouted drafts while removing the deleted
@@ -620,12 +694,17 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
             val record = drafts[key] ?: return@forEach
             val actual = state.value.project?.steps?.firstOrNull { it.id == key.second } ?: return@forEach
             val filtered = record.draft.hotspots.filterNot { it.targetStepId == deletedStepId }
+            val nextAction = record.draft.nextAction?.withoutTarget(deletedStepId)
             val baseAfterDelete = record.baseStep.toDraft().copy(
-                hotspots = record.baseStep.hotspots.filterNot { it.targetStepId == deletedStepId })
+                hotspots = record.baseStep.hotspots.filterNot { it.targetStepId == deletedStepId },
+                nextAction = record.baseStep.nextAction?.withoutTarget(deletedStepId))
+            val draft = record.draft.copy(hotspots = filtered, nextAction = nextAction)
             if (sameEdits(baseAfterDelete, actual)) {
-                val draft = record.draft.copy(hotspots = filtered)
                 drafts[key] = DraftRecord(draft.copy(dirty = !sameEdits(draft, actual)), actual,
                     state.value.project!!.project.revision)
+            } else {
+                // Keep the old revision conflict, but never retain a deleted target in the form.
+                drafts[key] = record.copy(draft = draft.copy(dirty = !sameEdits(draft, record.baseStep)))
             }
         }
         state.value.project?.let { project ->
@@ -633,6 +712,9 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
                 stepDraft = it.selectedStep?.let { step -> draftFor(project, step) }) }
         }
     }
+
+    private fun ProjectNextAction.withoutTarget(deletedStepId: String): ProjectNextAction =
+        if (targetStepId == deletedStepId) copy(targetStepId = null) else this
 
     private suspend fun loadBitmap(project: ProjectSnapshot, step: ProjectStep) {
         mutableState.update { it.copy(bitmap = null) }
@@ -748,11 +830,23 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
             while (queue.isNotEmpty()) {
                 val id = queue.removeFirst()
                 if (!reached.add(id)) continue
-                byId[id]?.hotspots?.mapNotNull { it.targetStepId }?.filter { it in byId && it !in reached }?.forEach(queue::addLast)
+                val step = byId[id] ?: continue
+                (step.hotspots.mapNotNull { it.targetStepId } + listOfNotNull(step.nextAction?.targetStepId))
+                    .filter { it in byId && it !in reached }.forEach(queue::addLast)
             }
             snapshot.steps.forEach { step ->
-                if (start != null && start in byId && step.id !in reached) result += ProjectIssue(step.id, "无法从起点到达“${step.title}”，请连接热点或调整起点")
-                if (!step.isTerminal && step.hotspots.isEmpty()) result += ProjectIssue(step.id, "“${step.title}”尚无动作，请添加热点或设为终点")
+                if (start != null && start in byId && step.id !in reached) result += ProjectIssue(step.id, "无法从起点到达“${step.title}”，请连接动作或调整起点")
+                if (!step.isTerminal && step.hotspots.isEmpty() && step.nextAction == null) {
+                    result += ProjectIssue(step.id, "“${step.title}”尚无动作，请添加下一步、热点或设为终点")
+                }
+                if (step.isTerminal && (step.hotspots.isNotEmpty() || step.nextAction != null)) {
+                    result += ProjectIssue(step.id, "终点“${step.title}”仍有动作，请移除动作或取消终点标记")
+                }
+                step.nextAction?.let { action ->
+                    if (action.targetStepId == null || action.targetStepId !in byId) {
+                        result += ProjectIssue(step.id, "下一步“${action.label}”缺少目标，请重新选择；缺目标不代表结束")
+                    }
+                }
                 step.hotspots.filter { it.targetStepId != null && it.targetStepId !in byId }.forEach {
                     result += ProjectIssue(step.id, "热点“${it.label}”缺少目标，请重新选择目标或结束")
                 }

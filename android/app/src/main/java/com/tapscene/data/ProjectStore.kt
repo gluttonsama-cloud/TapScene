@@ -78,7 +78,7 @@ class ProjectStore(context: Context) {
             db.update("projects", ContentValues().apply { putNull("start_state_id") },
                 "project_id=?", arrayOf(projectId))
             db.delete("projects", "project_id=?", arrayOf(projectId))
-            ProjectDeletionResult(current.steps.size, hotspots, hotspots, current.steps.size)
+            ProjectDeletionResult(current.steps.size, hotspots, edgeCount(current), current.steps.size)
         }
         // Cleanup cannot turn a committed deletion into a reported failure. A journal row stays
         // until its exact, no-longer-referenced asset is gone, including across process restart.
@@ -239,7 +239,10 @@ class ProjectStore(context: Context) {
         }
     }
 
-    /** Atomically save the whole editor form; a stale draft never overwrites a newer revision. */
+    /**
+     * Atomically save the whole editor form; a stale draft never overwrites a newer revision.
+     * nextAction is the complete edited value: null explicitly removes the saved button.
+     */
     fun saveStepDraft(
         projectId: String,
         stepId: String,
@@ -248,6 +251,7 @@ class ProjectStore(context: Context) {
         isTerminal: Boolean,
         hotspots: List<ProjectHotspot>,
         expectedRevision: Long? = null,
+        nextAction: ProjectNextAction? = null,
     ): ProjectSnapshot {
         val cleanTitle = text(title, "步骤标题", 120)
         val cleanDescription = text(description, "步骤说明", 4_000, allowEmpty = true)
@@ -264,19 +268,33 @@ class ProjectStore(context: Context) {
         require(frozen.map { it.id }.toSet().size == frozen.size && frozen.map { it.edgeId }.toSet().size == frozen.size) {
             "热点或连线标识重复，请重新编辑。"
         }
-        require(!isTerminal || frozen.isEmpty()) { "终点不能保留热点，请先删除热点。" }
+        val frozenNext = nextAction?.let {
+            validId(it.id)
+            it.targetStepId?.let(::validId)
+            it.copy(label = text(it.label, "下一步动作标签", 120))
+        }
+        require(!isTerminal || (frozen.isEmpty() && frozenNext == null)) {
+            "终点不能保留热点或下一步动作，请先处理这些动作。"
+        }
         return edit(projectId) { db ->
             val current = requireSnapshot(db, projectId)
             check(expectedRevision == null || current.project.revision == expectedRevision) {
                 "项目已发生其他修改，当前草稿尚未保存；请重新载入后编辑。"
             }
             val step = current.steps.firstOrNull { it.id == stepId } ?: error("步骤已不存在，请刷新。")
-            val otherHotspots = current.steps.filter { it.id != stepId }.flatMap { it.hotspots }
-            require(otherHotspots.size + frozen.size <= ProjectLimits.MAX_EDGES) { "每个项目最多 80 条连线。" }
+            val otherSteps = current.steps.filter { it.id != stepId }
+            val otherHotspots = otherSteps.flatMap { it.hotspots }
+            val otherNextActions = otherSteps.mapNotNull { it.nextAction }
+            require(otherHotspots.size + otherNextActions.size + frozen.size + (if (frozenNext == null) 0 else 1) <= ProjectLimits.MAX_EDGES) { "每个项目最多 80 条连线。" }
             val otherIds = otherHotspots.map { it.id }.toSet()
-            val otherEdges = otherHotspots.map { it.edgeId }.toSet()
+            val otherEdges = (otherHotspots.map { it.edgeId } + otherNextActions.map { it.id }).toSet()
             val oldById = step.hotspots.associateBy { it.id }
             val oldEdges = step.hotspots.associateBy { it.edgeId }
+            frozenNext?.let { action ->
+                require(step.nextAction == null || step.nextAction.id == action.id) { "已保存下一步动作的标识不能改变。" }
+                require(action.id !in otherEdges && frozen.none { it.edgeId == action.id }) { "下一步动作标识与已有连线冲突。" }
+                action.targetStepId?.let { requireStep(db, projectId, it) }
+            }
             frozen.forEach { hotspot ->
                 require(hotspot.id !in otherIds && hotspot.edgeId !in otherEdges) { "热点或连线属于其他步骤。" }
                 require(oldById[hotspot.id]?.edgeId?.let { it == hotspot.edgeId } != false &&
@@ -299,9 +317,59 @@ class ProjectStore(context: Context) {
                     if (hotspot.endLabel == null) putNull("end_label") else put("end_label", hotspot.endLabel)
                 })
             }
+            db.delete("next_actions", "project_id=? AND from_state_id=?", arrayOf(projectId, stepId))
+            frozenNext?.let { insertNextAction(db, projectId, stepId, it) }
             db.update("states", ContentValues().apply {
                 put("title", cleanTitle); put("description", cleanDescription); put("is_terminal", if (isTerminal) 1 else 0)
             }, "project_id=? AND state_id=?", arrayOf(projectId, stepId))
+        }
+    }
+
+    /**
+     * Explicit author confirmation creates/rebuilds only these adjacent next actions, in one
+     * revision. List order, start, manual hotspots, unselected steps and the last step's action
+     * stay unchanged. A terminal in the middle or an occupied requested end is never erased.
+     */
+    fun connectStepsInOrder(
+        projectId: String,
+        stepIds: List<String>,
+        markLastTerminal: Boolean,
+        expectedRevision: Long,
+    ): ProjectSnapshot {
+        val order = stepIds.toList()
+        require(order.size in 2..ProjectLimits.MAX_STEPS && order.toSet().size == order.size) {
+            "生成通路需要 2–40 个不重复的步骤。"
+        }
+        order.forEach(::validId)
+        return edit(projectId) { db ->
+            val current = requireSnapshot(db, projectId)
+            check(current.project.revision == expectedRevision) {
+                "项目已发生其他修改，通路尚未生成；请重新载入后确认。"
+            }
+            val byId = current.steps.associateBy { it.id }
+            val selected = order.map { id -> byId[id] ?: error("通路中的步骤不属于当前项目或已删除，请重新选择。") }
+            selected.dropLast(1).forEach { step ->
+                require(!step.isTerminal) { "“${step.title}”已设为终点，请先取消该终点设置再生成通路。" }
+            }
+            val last = selected.last()
+            if (markLastTerminal) {
+                require(last.hotspots.isEmpty() && last.nextAction == null) {
+                    "“${last.title}”仍有热点或下一步动作，请先处理后再设为终点。"
+                }
+            }
+            val added = selected.dropLast(1).count { it.nextAction == null }
+            require(edgeCount(current) + added <= ProjectLimits.MAX_EDGES) { "每个项目最多 80 条连线（包括热点和下一步动作）。" }
+            selected.zipWithNext().forEach { (from, to) ->
+                val action = from.nextAction?.copy(targetStepId = to.id)
+                    ?: ProjectNextAction(newId(), "下一步", to.id)
+                if (from.nextAction == null) insertNextAction(db, projectId, from.id, action)
+                else db.update("next_actions", ContentValues().apply { put("to_state_id", to.id) },
+                    "project_id=? AND from_state_id=?", arrayOf(projectId, from.id))
+            }
+            if (markLastTerminal) {
+                db.update("states", ContentValues().apply { put("is_terminal", 1) },
+                    "project_id=? AND state_id=?", arrayOf(projectId, last.id))
+            }
         }
     }
 
@@ -326,8 +394,9 @@ class ProjectStore(context: Context) {
 
     fun setTerminal(projectId: String, stepId: String, isTerminal: Boolean): ProjectSnapshot = edit(projectId) { db ->
         requireStep(db, projectId, stepId)
-        require(!isTerminal || count(db, "hotspots", "project_id=? AND state_id=?", projectId, stepId) == 0) {
-            "此步骤仍有热点，请先删除热点再设为终点。"
+        require(!isTerminal || (count(db, "hotspots", "project_id=? AND state_id=?", projectId, stepId) == 0 &&
+            count(db, "next_actions", "project_id=? AND from_state_id=?", projectId, stepId) == 0)) {
+            "此步骤仍有热点或下一步动作，请先处理这些动作再设为终点。"
         }
         db.update("states", ContentValues().apply { put("is_terminal", if (isTerminal) 1 else 0) },
             "project_id=? AND state_id=?", arrayOf(projectId, stepId))
@@ -355,6 +424,10 @@ class ProjectStore(context: Context) {
                     if (next == null) putNull("start_state_id") else put("start_state_id", next)
                 }, "project_id=?", arrayOf(projectId))
             }
+            // Keep incoming authored buttons, but mark their missing destination for repair.
+            // ON DELETE SET NULL cannot be used on the composite FK: it would null project_id.
+            db.update("next_actions", ContentValues().apply { putNull("to_state_id") },
+                "project_id=? AND to_state_id=?", arrayOf(projectId, stepId))
             db.delete("states", "project_id=? AND state_id=?", arrayOf(projectId, stepId))
             queueAsset(db, projectId, step.asset.privateRelativePath)
             db.delete("local_assets", "project_id=? AND asset_id=?", arrayOf(projectId, step.asset.id))
@@ -394,7 +467,7 @@ class ProjectStore(context: Context) {
             }
             if (previous == null) {
                 require(step.hotspots.size < ProjectLimits.MAX_HOTSPOTS_PER_STEP) { "每个步骤最多 6 个热点。" }
-                require(current.steps.sumOf { it.hotspots.size } < ProjectLimits.MAX_EDGES) { "每个项目最多 80 条连线。" }
+                require(edgeCount(current) < ProjectLimits.MAX_EDGES) { "每个项目最多 80 条连线。" }
             }
             val id = previous?.id ?: newId()
             val hotspotValues = ContentValues().apply {
@@ -458,6 +531,10 @@ class ProjectStore(context: Context) {
         transaction(db) {
             requireSnapshot(db, projectId)
             change(db)
+            require(count(db, "edges", "project_id=?", projectId) +
+                count(db, "next_actions", "project_id=?", projectId) <= ProjectLimits.MAX_EDGES) {
+                "每个项目最多 80 条连线（包括热点和下一步动作）。"
+            }
             bump(db, projectId)
             requireSnapshot(db, projectId)
         }
@@ -501,7 +578,7 @@ class ProjectStore(context: Context) {
                         source = parseSource(JSONObject(cursor.string("source_json"))),
                         frameTimeUs = cursor.long("frame_pts_us"), timePrecisionUs = cursor.long("time_precision_us"),
                         masks = parseMasks(JSONArray(cursor.string("masks_json"))), hotspots = readHotspots(db, projectId, id),
-                        captureId = cursor.string("capture_id"),
+                        captureId = cursor.string("capture_id"), nextAction = readNextAction(db, projectId, id),
                     ))
                 }
             }
@@ -542,6 +619,23 @@ class ProjectStore(context: Context) {
             }
         }
 
+    private fun readNextAction(db: SQLiteDatabase, projectId: String, stepId: String): ProjectNextAction? =
+        db.rawQuery("SELECT action_id,label,to_state_id FROM next_actions WHERE project_id=? AND from_state_id=?",
+            arrayOf(projectId, stepId)).use { cursor ->
+            if (cursor.moveToFirst()) ProjectNextAction(cursor.getString(0), cursor.getString(1), cursor.nullableString("to_state_id"))
+            else null
+        }
+
+    private fun insertNextAction(db: SQLiteDatabase, projectId: String, stepId: String, action: ProjectNextAction) {
+        db.insertOrThrow("next_actions", null, ContentValues().apply {
+            put("project_id", projectId); put("action_id", action.id); put("from_state_id", stepId); put("label", action.label)
+            if (action.targetStepId == null) putNull("to_state_id") else put("to_state_id", action.targetStepId)
+        })
+    }
+
+    private fun edgeCount(snapshot: ProjectSnapshot): Int =
+        snapshot.steps.sumOf { it.hotspots.size + (if (it.nextAction == null) 0 else 1) }
+
     private fun readSource(db: SQLiteDatabase, projectId: String, sourceId: String): ImportedSource? =
         db.rawQuery("SELECT source_json FROM sources WHERE project_id=? AND source_id=?", arrayOf(projectId, sourceId)).use {
             if (it.moveToFirst()) parseSource(JSONObject(it.getString(0))) else null
@@ -551,7 +645,11 @@ class ProjectStore(context: Context) {
         val step = snapshot.steps.firstOrNull { it.id == stepId } ?: error("步骤已不存在，请刷新。")
         val incoming = snapshot.steps.flatMap { it.hotspots }.filter { it.targetStepId == stepId }
         val total = (step.hotspots.map { it.id } + incoming.map { it.id }).toSet().size
-        return StepDeletionImpact(incoming.size, step.hotspots.size, total, total, snapshot.project.startStepId == stepId)
+        val incomingNext = snapshot.steps.mapNotNull { it.nextAction }.filter { it.targetStepId == stepId }
+        val outgoingNext = listOfNotNull(step.nextAction)
+        val nextTotal = (incomingNext.map { it.id } + outgoingNext.map { it.id }).toSet().size
+        return StepDeletionImpact(incoming.size, step.hotspots.size, total, total + nextTotal,
+            snapshot.project.startStepId == stepId, incomingNext.size, outgoingNext.size)
     }
 
     private fun count(db: SQLiteDatabase, table: String, where: String, vararg args: String): Int =
@@ -728,7 +826,7 @@ class ProjectStore(context: Context) {
         } }
     }
 
-    private class Database(context: Context, path: String) : SQLiteOpenHelper(context, path, null, 1) {
+    private class Database(context: Context, path: String) : SQLiteOpenHelper(context, path, null, 2) {
         override fun onConfigure(db: SQLiteDatabase) { db.setForeignKeyConstraintsEnabled(true) }
         override fun onCreate(db: SQLiteDatabase) {
             db.execSQL("""CREATE TABLE projects (
@@ -783,9 +881,25 @@ class ProjectStore(context: Context) {
             db.execSQL("CREATE INDEX states_source ON states(source_id)")
             db.execSQL("CREATE INDEX hotspots_state ON hotspots(project_id,state_id)")
             db.execSQL("CREATE INDEX edges_target ON edges(project_id,to_state_id)")
+            createNextActions(db)
         }
+
+        private fun createNextActions(db: SQLiteDatabase) {
+            db.execSQL("""CREATE TABLE next_actions (
+                project_id TEXT NOT NULL, action_id TEXT NOT NULL, from_state_id TEXT NOT NULL,
+                label TEXT NOT NULL CHECK(length(trim(label))>0), to_state_id TEXT,
+                PRIMARY KEY(project_id,action_id), UNIQUE(project_id,from_state_id),
+                FOREIGN KEY(project_id,from_state_id) REFERENCES states(project_id,state_id) ON DELETE CASCADE,
+                FOREIGN KEY(project_id,to_state_id) REFERENCES states(project_id,state_id) DEFERRABLE INITIALLY DEFERRED
+            )""")
+            db.execSQL("CREATE INDEX next_actions_target ON next_actions(project_id,to_state_id)")
+        }
+
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            error("项目数据库需要安全迁移；请保留现有本机数据。")
+            check(oldVersion == 1 && newVersion == 2) { "项目数据库需要安全迁移；请保留现有本机数据。" }
+            // SQLiteOpenHelper wraps this additive migration and user_version in one transaction.
+            // Existing hotspot tables, graph IDs, source records and asset paths stay untouched.
+            createNextActions(db)
         }
     }
 

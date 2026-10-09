@@ -39,9 +39,15 @@ data class ProjectStep(
     val masks: List<OpaqueMask>,
     val hotspots: List<ProjectHotspot>,
     val captureId: String,
+    val nextAction: ProjectNextAction? = null,
 ) {
     val sourceId: String get() = source.sourceId
 }
+
+/** Author-arranged button outside the image, never a detected tap or implicit list-order link.
+ * A null target is an unresolved action that needs repair, not an end action.
+ */
+data class ProjectNextAction(val id: String, val label: String, val targetStepId: String?)
 
 /** Exactly one of targetStepId and endLabel is set. Every hotspot owns one stable edge. */
 data class ProjectHotspot(
@@ -71,13 +77,18 @@ data class ReviewedStepInput(
     val captureId: String = file.name,
 )
 
-/** Self-links count once in totals, and in both incoming and outgoing counts. */
+/**
+ * Self-links count once in totals, and in both incoming and outgoing counts. edgeCount includes
+ * affected next actions: incoming buttons survive with a null target; outgoing buttons are deleted.
+ */
 data class StepDeletionImpact(
     val incomingHotspotCount: Int,
     val outgoingHotspotCount: Int,
     val hotspotCount: Int,
     val edgeCount: Int,
     val wasStart: Boolean,
+    val incomingNextActionCount: Int = 0,
+    val outgoingNextActionCount: Int = 0,
 )
 
 data class StepDeletionResult(
