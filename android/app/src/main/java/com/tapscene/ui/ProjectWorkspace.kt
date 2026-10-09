@@ -125,8 +125,8 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
 
     fun reload() = execute("读取本地项目") { refresh() }
 
-    /** Refresh an external transition save without throwing away the author's typed text. */
-    fun refreshAfterTransition(projectId: String, stepId: String) = execute("读取已保存过渡") {
+    /** Refresh an external media or region save without throwing away the author's typed text. */
+    fun refreshAfterTransition(projectId: String, stepId: String) = execute("读取已保存编辑") {
         if (state.value.project?.project?.id != projectId) return@execute
         val fresh = withContext(Dispatchers.IO) { store.readProject(projectId) } ?: return@execute
         val step = fresh.steps.firstOrNull { it.id == stepId } ?: return@execute

@@ -61,6 +61,7 @@ fun EditorCanvas(
     onCreate: ((OpaqueMask) -> Unit)? = null,
     onChangeRect: ((String, OpaqueMask) -> Unit)? = null,
     onTap: ((Float, Float) -> Unit)? = null,
+    objectLabel: String = "热点",
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val ink = MaterialTheme.colorScheme.onSurface
@@ -180,8 +181,8 @@ fun EditorCanvas(
                 contentDescription = when {
                     !enabled -> "安全步骤画面"
                     onTap != null -> "点击热点继续；也可选择下方文字动作"
-                    adding -> "新增热点模式：拖出矩形；也可使用按比例添加"
-                    else -> "点选热点后拖移，拖动右下角调整尺寸；也可使用对象列表和精调表单"
+                    adding -> "新增${objectLabel}模式：拖出矩形；也可使用精调表单"
+                    else -> "点选${objectLabel}后拖移，拖动右下角调整尺寸；也可使用对象列表和精调表单"
                 }
             }) {
                 hotspots.forEachIndexed { index, hotspot ->

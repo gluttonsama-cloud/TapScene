@@ -30,6 +30,7 @@ import kotlinx.coroutines.withContext
 @Composable
 fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: CandidateWorkspace, releases: ReleaseWorkspace) {
     val transitions: TransitionWorkspace = viewModel()
+    val regions: RegionWorkspace = viewModel()
     val state by projects.state.collectAsStateWithLifecycle()
     val mediaState by media.state.collectAsStateWithLifecycle()
     val candidateState by candidates.state.collectAsStateWithLifecycle()
@@ -126,7 +127,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
         val ready = releaseState.exportFile
         if (ready != null && !releaseState.busy && !exportPickerPending && releases.beginExportPicker()) {
             exportPickerPending = true
-            try { packageSaver.launch("TapScene-${ready.nameWithoutExtension}.tapscene") }
+            try { packageSaver.launch("TapScene-${ready.name}") }
             catch (_: android.content.ActivityNotFoundException) {
                 exportPickerPending = false; releases.cancelExportPicker()
                 releases.message("系统没有可用的文件保存工具。")
@@ -137,7 +138,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
         releases.closePlayer(); pop()
     }
     LaunchedEffect(page, projectId, state.busy) {
-        if ((page == "transition" || page == "path") && projectId == null && !state.busy) pop()
+        if ((page == "transition" || page == "regions" || page == "path") && projectId == null && !state.busy) pop()
     }
     val scopeReady = projectId != null && media.projectId == projectId && !retainedMedia
     val openRecordedCandidates: (String, String, Boolean) -> Unit = { id, source, analyze ->
@@ -425,8 +426,9 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                     EditorWorkspaceContent(snapshot, requireNotNull(state.stepDraft), state.bitmap, unavailable, EditorCallbacks(
                                         closeEditor, projects::editTitle, projects::editDescription, projects::editTerminal,
                                         projects::putHotspot, projects::removeHotspot, projects::saveStepDraft, projects::discardStepDraft,
-                                        {}, { id -> projects.saveBeforeTransition { transitionEdgeId = id; push("transition") } }, projects::putNextAction, projects::removeNextAction),
-                                        previewEnabled = false)
+                                        {}, { id -> projects.saveBeforeTransition { transitionEdgeId = id; push("transition") } }, projects::putNextAction, projects::removeNextAction,
+                                        onOpenRegions = { if (state.dirtyStepIds.isEmpty()) push("regions") }),
+                                        previewEnabled = false, regionsEnabled = state.dirtyStepIds.isEmpty())
                                 } else AuthoredPathScreen(snapshot, pathStepIds, unavailable || mediaState.busy,
                                     { if (!state.busy) pop() },
                                     { ids, terminal, revision ->
@@ -453,13 +455,16 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 { replacingCandidate = releaseState.candidate },
                                 onReviewVideo = releases::selectReviewTransition, onVideoCompleted = releases::completeReviewTransition,
                                 onVideoInterrupted = releases::interruptReviewTransition, onVideoReplay = releases::replayReviewTransition,
-                                onConfirmVideo = releases::confirmReviewTransition, onCloseVideo = releases::closeReviewVideo)
+                                onConfirmVideo = releases::confirmReviewTransition, onCloseVideo = releases::closeReviewVideo,
+                                onReviewRegion = releases::selectReviewRegion, onConfirmRegion = releases::confirmReviewRegion)
                             "delivery" -> {
                                 val sealed = releaseState.releases.firstOrNull { it.id == releaseState.lastSealedId }
-                                DeliveryOptionsScreen(pop, openReleaseReview, { push("ai") }, { push("account") }, { push("versions") },
+                                DeliveryOptionsScreen(pop, openReleaseReview, { if (sealed != null) releases.openAiPackage(sealed.id) else releases.clearAiConfiguration(); push("ai") }, { push("account") }, { push("versions") },
                                     sealedSummary = sealed, onExport = sealed?.let { item -> { releases.prepareExport(item.id) } }, busy = releaseState.busy)
                             }
-                            "ai" -> AiPackageScreen(pop)
+                            "ai" -> AiPackageScreen(pop, releaseState, releases::openAiPackage, releases::chooseAiEdge,
+                                releases::previousAiVisit, releases::resetAiPath, releases::setAiCanvas, releases::setAiHold,
+                                releases::toggleAiEffect, releases::prepareAiExport)
                             "account" -> HostingAccountScreen(pop, { push("versions") })
                             "versions" -> HostedVersionsScreen(pop, { push("account") })
                             "import" -> OfflineImportContent(releaseState, pop) {
@@ -476,6 +481,12 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                             "task" -> TaskDetailsScreen(
                                 if (state.busy || mediaState.busy) ShellTaskInfo("本机处理", if (state.busy) state.stage.orEmpty() else mediaState.stage.orEmpty(), state.project?.project?.title) else null,
                                 pop, { pages.clear() }, { push("settings") })
+                            "regions" -> state.project?.let { snapshot -> state.selectedStepId?.let { stepId ->
+                                LaunchedEffect(snapshot.project.id, stepId) { regions.open(snapshot.project.id, stepId) }
+                                RegionEditorScreen(regions) {
+                                    projects.refreshAfterTransition(snapshot.project.id, stepId); pop()
+                                }
+                            } }
                             "transition" -> state.project?.let { snapshot -> state.selectedStepId?.let { stepId ->
                                 val edgeId = transitionEdgeId
                                 if (edgeId != null) {
@@ -497,8 +508,9 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 closeEditor, projects::editTitle, projects::editDescription, projects::editTerminal,
                                 projects::putHotspot, projects::removeHotspot, projects::saveStepDraft, projects::discardStepDraft,
                                 { projects.startPreview(true) }, { id -> projects.saveBeforeTransition { transitionEdgeId = id; push("transition") } },
-                                projects::putNextAction, projects::removeNextAction),
-                                previewEnabled = state.dirtyStepIds.isEmpty())
+                                projects::putNextAction, projects::removeNextAction,
+                                onOpenRegions = { if (state.dirtyStepIds.isEmpty()) push("regions") }),
+                                previewEnabled = state.dirtyStepIds.isEmpty(), regionsEnabled = state.dirtyStepIds.isEmpty())
                         } }
                         state.route == ProjectRoute.PREVIEW -> state.project?.let { snapshot -> state.preview?.let { preview ->
                             DraftPreviewContent(snapshot, preview, state.bitmap, unavailable, projects::chooseHotspot,
@@ -545,7 +557,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 { id -> releases.openRelease(id); push("player") }, releases::prepareExport,
                                 { deletingRelease = it }, { push("settings") },
                                 onReviewCandidate = { id -> reviewCandidateId = id; push("review") },
-                                onDiscardCandidate = { discardingCandidate = it }) }
+                                onDiscardCandidate = { discardingCandidate = it },
+                                onAi = { id -> releases.openAiPackage(id); push("ai") }) }
                             GlobalNavigation(true, { library = false }, {})
                         }
                         else -> ProjectHomeFrame({ push("record") }, requestImport, { push("settings") }, { library = true; releases.reloadLibrary() }) {

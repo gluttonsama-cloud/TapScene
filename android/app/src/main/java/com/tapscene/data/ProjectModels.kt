@@ -40,8 +40,36 @@ data class ProjectStep(
     val hotspots: List<ProjectHotspot>,
     val captureId: String,
     val nextAction: ProjectNextAction? = null,
+    val regions: List<ProjectRegion> = emptyList(),
 ) {
     val sourceId: String get() = source.sourceId
+}
+
+/** Integer bounds in the actual reviewed base image. No inferred native components. */
+data class RegionBox(val x: Int, val y: Int, val width: Int, val height: Int) {
+    init { require(x >= 0 && y >= 0 && width > 0 && height > 0) { "区域须为正面积像素矩形。" } }
+    fun fits(width: Int, height: Int): Boolean = x.toLong() + this.width <= width && y.toLong() + this.height <= height
+}
+
+data class ProjectRegion(
+    val id: String,
+    val stateId: String,
+    val baseAssetId: String,
+    val baseSha256: String,
+    val name: String,
+    val group: String?,
+    val bbox: RegionBox,
+    val sourceWidth: Int,
+    val sourceHeight: Int,
+    val zIndex: Int,
+    val anchorX: Double,
+    val anchorY: Double,
+    val asset: StepAsset? = null,
+    val reviewedAt: Long? = null,
+) {
+    val stale: Boolean get() = asset == null
+    fun matchesBase(base: StepAsset): Boolean = baseAssetId == base.id && baseSha256 == base.sha256 &&
+        sourceWidth == base.width && sourceHeight == base.height
 }
 
 /** Author-arranged button outside the image, never a detected tap or implicit list-order link.
@@ -154,6 +182,8 @@ data class ProjectDeletionResult(
 object ProjectLimits {
     const val MAX_TRANSITION_US = 10_000_000L
     const val MAX_TOTAL_TRANSITION_US = 60_000_000L
+    const val MAX_REGIONS = 80
+    const val MAX_REGIONS_PER_STEP = 12
     const val MAX_STEPS = 40
     const val MAX_EDGES = 80
     const val MAX_HOTSPOTS_PER_STEP = 6

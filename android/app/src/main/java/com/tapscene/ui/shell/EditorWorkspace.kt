@@ -79,6 +79,7 @@ data class EditorCallbacks(
     val onOpenTransition: (String) -> Unit,
     val onPutNextAction: (ProjectNextAction) -> Unit = {},
     val onRemoveNextAction: () -> Unit = {},
+    val onOpenRegions: () -> Unit = {},
 )
 
 @Composable
@@ -90,6 +91,7 @@ fun EditorWorkspaceContent(
     callbacks: EditorCallbacks,
     modifier: Modifier = Modifier,
     previewEnabled: Boolean = !draft.dirty,
+    regionsEnabled: Boolean = !draft.dirty,
 ) {
     var mode by rememberSaveable(draft.stepId) { mutableStateOf(EditorMode.FRAME) }
     var adding by rememberSaveable(draft.stepId) { mutableStateOf(false) }
@@ -264,15 +266,13 @@ fun EditorWorkspaceContent(
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     EditorMode.REGIONS -> {
-                        Text("可见区域裁片", style = MaterialTheme.typography.titleSmall)
-                        Text("为后续动画标记画面中的内容区域。", style = MaterialTheme.typography.bodySmall,
+                        Text("可见区域裁片 · ${step?.regions?.size ?: 0}", style = MaterialTheme.typography.titleSmall)
+                        Text("从当前安全图框选，生成实际 PNG 后逐张人工复核。", style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(onClick = {}, enabled = false) { Text("框选区域") }
-                            TextButton(onClick = {}, enabled = false) { Text("名称与用途") }
-                            TextButton(onClick = {}, enabled = false) { Text("导出裁片") }
+                        OutlinedButton(onClick = callbacks.onOpenRegions, enabled = !busy && regionsEnabled && hasBitmap) {
+                            Text("编辑区域")
                         }
-                        Text("区域保存、从安全画面裁片和导出尚未接入。", style = MaterialTheme.typography.bodySmall,
+                        if (!regionsEnabled) Text("先保存或放弃所有步骤修改，再编辑区域。", style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }

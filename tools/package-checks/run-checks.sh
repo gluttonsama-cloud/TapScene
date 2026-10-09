@@ -52,3 +52,4 @@ mkdir -p "$WORK/classes" "$WORK/fixtures"
   "$ROOT"/android/app/src/main/java/com/tapscene/packageformat/*.java \
   "$ROOT"/tools/package-checks/*.java
 java -Djava.awt.headless=true -cp "$WORK/classes" PackageSecurityChecks "$WORK/fixtures" | tee "$WORK/results.txt"
+java -Djava.awt.headless=true -cp "$WORK/classes" AiPackageChecks "$WORK/fixtures/ai" | tee "$WORK/ai-results.txt"

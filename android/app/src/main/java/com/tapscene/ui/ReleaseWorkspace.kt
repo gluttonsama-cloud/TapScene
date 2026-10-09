@@ -10,6 +10,7 @@ import androidx.lifecycle.viewModelScope
 import com.tapscene.data.ReleaseCandidate
 import com.tapscene.data.ReleaseStore
 import com.tapscene.data.ReleaseSummary
+import com.tapscene.packageformat.RenderPlan
 import com.tapscene.packageformat.ViewerPackageCodec
 import com.tapscene.packageformat.ViewerScene
 import com.tapscene.packageformat.ViewerTraversal
@@ -56,12 +57,24 @@ data class ReleaseVideoReview(
     val watchedCompletely: Boolean = false,
 )
 
+data class AiPackageConfiguration(
+    val scene: ViewerScene,
+    val visits: List<RenderPlan.Visit>,
+    val effects: List<RenderPlan.Effect> = emptyList(),
+    val width: Int = 1080,
+    val height: Int = 1920,
+) {
+    fun resolve(): RenderPlan = RenderPlan.build(scene, width, height, visits, effects)
+}
+
 data class ReleaseUiState(
     val releases: List<ReleaseSummary> = emptyList(),
     val pendingCandidates: List<ReleaseCandidate> = emptyList(),
     val candidate: ReleaseCandidate? = null,
     val reviewStateId: String? = null,
     val reviewBitmap: Bitmap? = null,
+    val reviewRegionId: String? = null,
+    val reviewRegionBitmap: Bitmap? = null,
     val reviewVideo: ReleaseVideoReview? = null,
     val player: ReleasePlayback? = null,
     val playerBitmap: Bitmap? = null,
@@ -71,6 +84,7 @@ data class ReleaseUiState(
     val lastSealedId: String? = null,
     val lastImportedId: String? = null,
     val exportFile: File? = null,
+    val aiConfiguration: AiPackageConfiguration? = null,
 )
 
 /**
@@ -104,14 +118,14 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
 
     fun openReview(projectId: String) = execute("读取待复核成品") {
         closeReviewVideo()
-        mutableState.update { it.copy(candidate = null, reviewStateId = null, reviewBitmap = null) }
+        mutableState.update { it.copy(candidate = null, reviewStateId = null, reviewBitmap = null, reviewRegionId = null, reviewRegionBitmap = null) }
         val candidate = withContext(Dispatchers.IO) { store.readCandidate(projectId) }
         showCandidate(candidate)
     }
 
     fun openReviewById(candidateId: String) = execute("恢复固定成品复核") {
         closeReviewVideo()
-        mutableState.update { it.copy(candidate = null, reviewStateId = null, reviewBitmap = null) }
+        mutableState.update { it.copy(candidate = null, reviewStateId = null, reviewBitmap = null, reviewRegionId = null, reviewRegionBitmap = null) }
         showCandidate(withContext(Dispatchers.IO) { store.readCandidateById(candidateId) })
     }
 
@@ -119,7 +133,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         withContext(Dispatchers.IO) { store.discardCandidate(candidateId) }
         if (state.value.candidate?.id == candidateId) {
             closeReviewVideo()
-            mutableState.update { it.copy(candidate = null, reviewStateId = null, reviewBitmap = null, player = null, playerBitmap = null) }
+            mutableState.update { it.copy(candidate = null, reviewStateId = null, reviewBitmap = null, reviewRegionId = null, reviewRegionBitmap = null, player = null, playerBitmap = null) }
         }
     }
 
@@ -131,7 +145,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
 
     private suspend fun showCandidate(candidate: ReleaseCandidate?) {
         closeReviewVideo()
-        mutableState.update { it.copy(candidate = candidate, reviewStateId = null, reviewBitmap = null) }
+        mutableState.update { it.copy(candidate = candidate, reviewStateId = null, reviewBitmap = null, reviewRegionId = null, reviewRegionBitmap = null) }
         val first = candidate?.scene?.states?.firstOrNull { it.id !in candidate.reviewedStateIds }
             ?: candidate?.scene?.states?.firstOrNull()
         if (candidate != null && first != null) {
@@ -166,6 +180,33 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
                 val bitmap = decode(updated.scene, next.id, updated.id)
                 mutableState.update { it.copy(reviewBitmap = bitmap) }
             } else message("所有步骤的画面与文字已确认")
+        }
+    }
+
+    fun selectReviewRegion(regionId: String) {
+        val candidate = state.value.candidate ?: return
+        if (state.value.busy) return
+        closeReviewVideo()
+        val region = candidate.scene.regions.firstOrNull { it.id == regionId } ?: return
+        execute("读取实际安全裁片") {
+            mutableState.update { it.copy(reviewRegionId = regionId, reviewRegionBitmap = null) }
+            val bitmap = withContext(Dispatchers.IO) {
+                val file = store.candidateRegionFile(candidate.id, regionId)
+                val decoded = BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888; inScaled = false }) ?: error("区域裁片无法解码。")
+                if (decoded.width != region.bbox.width || decoded.height != region.bbox.height) { decoded.recycle(); error("实际裁片尺寸不一致。") }
+                decoded
+            }
+            mutableState.update { it.copy(reviewRegionBitmap = bitmap) }
+        }
+    }
+    fun confirmReviewRegion() {
+        val current = state.value
+        val candidate = current.candidate ?: return
+        val regionId = current.reviewRegionId ?: return
+        if (current.reviewRegionBitmap == null) return
+        execute("保存固定区域复核") {
+            val updated = withContext(Dispatchers.IO) { store.reviewRegion(candidate.id, candidate.contentDigest, regionId) }
+            mutableState.update { it.copy(candidate = updated) }
         }
     }
 
@@ -251,7 +292,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
             val sealed = withContext(Dispatchers.IO) { store.seal(candidate.id, candidate.contentDigest) }
             val items = withContext(Dispatchers.IO) { store.listReleases() }
             mutableState.update { it.copy(releases = items, lastSealedId = sealed.id, candidate = null,
-                reviewStateId = null, reviewBitmap = null, player = null, playerBitmap = null) }
+                reviewStateId = null, reviewBitmap = null, reviewRegionId = null, reviewRegionBitmap = null, player = null, playerBitmap = null) }
             message("版本已封存，可保存离线观看包")
         }
     }
@@ -474,7 +515,8 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         mutableState.update { it.copy(releases = items,
             player = it.player?.takeUnless { player -> player.candidateId == null && player.scene.releaseId == id },
             playerBitmap = it.playerBitmap.takeUnless { _ -> it.player?.scene?.releaseId == id },
-            lastSealedId = it.lastSealedId?.takeUnless { selected -> selected == id }) }
+            lastSealedId = it.lastSealedId?.takeUnless { selected -> selected == id },
+            aiConfiguration = it.aiConfiguration?.takeUnless { config -> config.scene.releaseId == id }) }
     }
 
     fun prepareExport(id: String) = execute("生成并验证离线观看包") {
@@ -483,6 +525,92 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         val file = withContext(Dispatchers.IO) { store.exportRelease(id) }
         val digest = withContext(Dispatchers.IO) { ViewerPackageCodec.sha256(file) }
         exportDigest = digest; exportLength = file.length()
+        mutableState.update { it.copy(exportFile = file) }
+    }
+
+    fun openAiPackage(id: String) = execute("读取固定版本与动画配置") {
+        mutableState.update { it.copy(aiConfiguration = null) }
+        val scene = withContext(Dispatchers.IO) { store.loadRelease(id) }
+        val saved = withContext(Dispatchers.IO) {
+            try { store.readAiPlan(id) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: IllegalArgumentException) { message("上次动画配置未通过校验，请从起点重新配置。"); null }
+            catch (_: IllegalStateException) { message("上次动画配置不可用，请从起点重新配置。"); null }
+        }
+        val config = if (saved == null) AiPackageConfiguration(scene, listOf(RenderPlan.Visit(java.util.UUID.randomUUID().toString(), scene.startStateId, null, 90)))
+            else AiPackageConfiguration(scene, saved.visits, saved.effects, saved.width, saved.height)
+        mutableState.update { it.copy(aiConfiguration = config) }
+    }
+
+    fun clearAiConfiguration() { if (!state.value.busy && !savePickerPending) mutableState.update { it.copy(aiConfiguration = null) } }
+
+    fun chooseAiEdge(edgeId: String) = editAi { config ->
+        val current = config.visits.last()
+        check(current.selectedEdgeId == null) { "路径已明确结束，请先退回一次访问。" }
+        val edge = config.scene.edges.single { it.id == edgeId && it.fromStateId == current.stateId }
+        check(config.visits.size < RenderPlan.MAX_VISITS || edge.toStateId == null) { "最多 256 次访问。" }
+        val updated = config.visits.dropLast(1) + RenderPlan.Visit(current.visitId, current.stateId, edge.id, current.holdFrames)
+        config.copy(visits = if (edge.toStateId == null) updated else updated + RenderPlan.Visit(java.util.UUID.randomUUID().toString(), edge.toStateId, null, 90))
+    }
+
+    fun previousAiVisit() = editAi { config ->
+        val current = config.visits.last()
+        val remaining = if (current.selectedEdgeId != null) config.visits else config.visits.dropLast(1)
+        if (remaining.isEmpty()) config else {
+            val last = remaining.last()
+            val visits = remaining.dropLast(1) + RenderPlan.Visit(last.visitId, last.stateId, null, last.holdFrames)
+            config.copy(visits = visits, effects = config.effects.filter { effect -> visits.any { it.visitId == effect.visitId } && !(effect.visitId == last.visitId && effect.type in setOf("click", "transition")) })
+        }
+    }
+
+    fun resetAiPath() = editAi { config -> config.copy(visits = listOf(RenderPlan.Visit(java.util.UUID.randomUUID().toString(), config.scene.startStateId, null, 90)), effects = emptyList()) }
+    fun setAiCanvas(landscape: Boolean) = editAi { it.copy(width = if (landscape) 1920 else 1080, height = if (landscape) 1080 else 1920) }
+    fun setAiHold(visitId: String, frames: Int) = editAi { config ->
+        check(frames in 1..RenderPlan.MAX_HOLD_FRAMES) { "每步停留须在 1/30 秒到 60 秒之间。" }
+        val index = config.visits.indexOfFirst { it.visitId == visitId }
+        check(index >= 0) { "播放顺序中没有这一步。" }
+        val previousVisitId = config.visits.getOrNull(index - 1)?.visitId
+        config.copy(visits = config.visits.map { if (it.visitId == visitId) RenderPlan.Visit(it.visitId, it.stateId, it.selectedEdgeId, frames) else it },
+            effects = config.effects.filterNot { it.visitId == visitId || (it.visitId == previousVisitId && it.type == "transition") })
+    }
+    fun toggleAiEffect(visitId: String, type: String, regionId: String? = null, text: String? = null) = editAi { config ->
+        val visit = config.visits.single { it.visitId == visitId }
+        val existing = config.effects.any { it.visitId == visitId && it.type == type && it.regionId == regionId }
+        if (existing) config.copy(effects = config.effects.filterNot { it.visitId == visitId && it.type == type && it.regionId == regionId })
+        else {
+            val edge = config.scene.edges.firstOrNull { it.id == visit.selectedEdgeId }
+            val duration = minOf(30, visit.holdFrames)
+            val effect = when (type) {
+                "click" -> { check(edge?.hotspotId != null) { "此访问没有选择画面热点。" }; RenderPlan.Effect(type, visitId, maxOf(0, visit.holdFrames - duration), duration, edge.hotspotId, null, null, null) }
+                "focus", "highlight" -> { check(config.scene.regions.any { it.id == regionId && it.stateId == visit.stateId }) { "请选择此步骤的安全区域。" }; RenderPlan.Effect(type, visitId, 0, visit.holdFrames, null, regionId, null, null) }
+                "annotation" -> RenderPlan.Effect(type, visitId, 0, visit.holdFrames, null, null, text, ViewerScene.Rect(.08, .08, .84, .14))
+                "transition" -> {
+                    val index = config.visits.indexOf(visit)
+                    check(edge?.toStateId != null && edge.transitionAssetId == null && index + 1 < config.visits.size) { "只有静态跳转可以添加叠化。" }
+                    val overlap = minOf(12, visit.holdFrames - 1, config.visits[index + 1].holdFrames - 1)
+                    check(overlap > 0) { "先增加停留帧数。" }
+                    RenderPlan.Effect(type, visitId, visit.holdFrames - overlap, overlap, null, null, null, null)
+                }
+                else -> error("不支持此效果。")
+            }
+            check(config.effects.size < RenderPlan.MAX_EFFECTS) { "最多 256 个效果。" }
+            config.copy(effects = config.effects + effect)
+        }
+    }
+    private fun editAi(change: (AiPackageConfiguration) -> AiPackageConfiguration) {
+        if (state.value.busy || savePickerPending) return
+        val config = state.value.aiConfiguration ?: return
+        try { mutableState.update { it.copy(aiConfiguration = change(config), exportFile = null, message = null) } }
+        catch (error: IllegalStateException) { message(error.message ?: "动画配置无效。") }
+        catch (error: IllegalArgumentException) { message(error.message ?: "动画配置无效。") }
+    }
+    fun prepareAiExport() = execute("生成并回读验证 AI 数据包") {
+        val config = state.value.aiConfiguration ?: error("请先选择固定版本。")
+        val plan = config.resolve()
+        exportDigest = null; exportLength = null; pendingExportFile = null
+        mutableState.update { it.copy(exportFile = null) }
+        val file = withContext(Dispatchers.IO) { store.exportAiRelease(config.scene.releaseId, plan) }
+        exportDigest = withContext(Dispatchers.IO) { ViewerPackageCodec.sha256(file) }; exportLength = file.length()
         mutableState.update { it.copy(exportFile = file) }
     }
 
@@ -541,7 +669,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
                     check(count == length && hash.digest().joinToString("") { "%02x".format(it) } == digest) { "已保存文件摘要不一致" }
                 }
                 cancelExportPicker()
-                message("离线观看包已完整保存，回读校验一致")
+                message(if (file.name.endsWith(".tapscene-ai")) "AI 数据包已完整保存，回读校验一致；动画由独立模板渲染。" else "离线观看包已完整保存，回读校验一致")
             } catch (error: Exception) {
                 val removed = withContext(NonCancellable + Dispatchers.IO) {
                     runCatching { DocumentsContract.deleteDocument(app.contentResolver, uri) }.getOrDefault(false)

@@ -46,6 +46,15 @@ internal object ReleaseCompiler {
         require(transitions.sumOf { it.asset.durationUs } <= ProjectLimits.MAX_TOTAL_TRANSITION_US) {
             "全部边绑定视频累计不能超过 60 秒。"
         }
+        val regions = snapshot.steps.flatMap { step -> step.regions.map { region ->
+            require(region.matchesBase(step.asset) && region.reviewedAt != null) { "区域底图已失效或裁片尚未复核。" }
+            val crop = requireNotNull(region.asset) { "区域裁片需要重新生成。" }
+            ViewerScene.Region(region.id, step.id, step.asset.id, crop.id, region.name,
+                region.sourceWidth, region.sourceHeight,
+                ViewerScene.PixelRect(region.bbox.x, region.bbox.y, region.bbox.width, region.bbox.height),
+                region.group, region.zIndex, ViewerScene.Anchor(region.anchorX, region.anchorY))
+        } }
+        val regionAssets = snapshot.steps.flatMap { it.regions }.map { requireNotNull(it.asset) }
         val assets = snapshot.steps.map { step -> step.asset.let { asset ->
             ViewerScene.Asset(asset.id, "assets/${asset.id}.png", "image/png", asset.byteLength,
                 asset.sha256, asset.width, asset.height)
@@ -54,10 +63,16 @@ internal object ReleaseCompiler {
             ViewerScene.Asset(asset.id, "assets/${asset.id}.mp4", "video/mp4", asset.byteLength,
                 asset.sha256, asset.width, asset.height, ViewerScene.Asset.ROLE_TRANSITION, (asset.durationUs + 999L) / 1_000L)
         }
-        val schema = if (transitions.isEmpty()) 1 else 2
-        return ViewerScene(schema, if (schema == 1) ViewerPackageCodec.POLICY_VERSION else ViewerPackageCodec.VIDEO_POLICY_VERSION,
+        val allAssets = assets + regionAssets.map { asset ->
+            ViewerScene.Asset(asset.id, "assets/${asset.id}.png", "image/png", asset.byteLength,
+                asset.sha256, asset.width, asset.height, ViewerScene.Asset.ROLE_REGION_CROP, null)
+        }
+        val schema = if (regions.isNotEmpty()) 3 else if (transitions.isEmpty()) 1 else 2
+        val policy = when (schema) { 1 -> ViewerPackageCodec.POLICY_VERSION; 2 -> ViewerPackageCodec.VIDEO_POLICY_VERSION
+            else -> ViewerPackageCodec.REGION_POLICY_VERSION }
+        return ViewerScene(schema, policy,
             ViewerPackageCodec.COMPILER_VERSION, releaseId, snapshot.project.title, snapshot.project.goal, createdAt,
-            requireNotNull(snapshot.project.startStepId) { "请先设置项目起点。" }, states, edges, hotspots, assets)
+            requireNotNull(snapshot.project.startStepId) { "请先设置项目起点。" }, states, edges, hotspots, regions, allAssets)
             .also(ViewerPackageCodec::validateScene)
     }
 

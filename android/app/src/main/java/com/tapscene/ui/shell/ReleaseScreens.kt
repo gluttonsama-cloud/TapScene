@@ -95,9 +95,11 @@ fun ReleaseReviewContent(
     onConfirmVideo: () -> Unit = {},
     onCloseVideo: () -> Unit = {},
     initialSection: Int = 0,
+    onReviewRegion: (String) -> Unit = {},
+    onConfirmRegion: () -> Unit = {},
 ) {
     val candidate = state.candidate
-    var section by rememberSaveable(candidate?.id) { mutableStateOf(initialSection.coerceIn(0, 4)) }
+    var section by rememberSaveable(candidate?.id) { mutableStateOf(initialSection.coerceIn(0, 5)) }
     var showSealConfirmation by rememberSaveable(candidate?.id) { mutableStateOf(false) }
     var showImage by rememberSaveable(candidate?.id, state.reviewStateId) { mutableStateOf(false) }
     var showHotspots by rememberSaveable(candidate?.id) { mutableStateOf(false) }
@@ -132,7 +134,7 @@ fun ReleaseReviewContent(
             val reviewedCount = scene.states.count { it.id in candidate.reviewedStateIds }
             if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp)) {
-                listOf("画面逐项", "整段视频", "项目文字", "包清单", "试走与封存").forEachIndexed { index, label ->
+                listOf("画面逐项", "整段视频", "项目文字", "包清单", "试走与封存", "区域裁片").forEachIndexed { index, label ->
                     TextButton(
                         onClick = { if (index != section) { onCloseVideo(); section = index } }, enabled = !state.busy, shape = RoundedCornerShape(8.dp),
                         modifier = Modifier.heightIn(min = 48.dp).then(if (section == index) Modifier.background(ShellColors.AccentSoft, RoundedCornerShape(8.dp)) else Modifier),
@@ -249,13 +251,30 @@ fun ReleaseReviewContent(
                     ReleaseStatus(state, showProgress = false)
                 }
                 3 -> ReleaseScrollPanel { CandidateFileList(candidate, state.busy, onFileList) }
+                5 -> ReleaseScrollPanel {
+                    SectionHeader("实际区域裁片", "逐个查看固定输出与名称；可见像素来自已复核安全图。")
+                    if (scene.regions.isEmpty()) Text("这个固定版本没有区域裁片。", color = ShellColors.Muted)
+                    scene.regions.forEach { region ->
+                        ShellActionRow(region.name, "${scene.states.firstOrNull { it.id == region.stateId }?.title} · ${region.bbox.width} × ${region.bbox.height}",
+                            if (region.id in candidate.reviewedRegionIds) "已确认" else "查看", onClick = { onReviewRegion(region.id) }, enabled = !state.busy)
+                    }
+                    val region = scene.regions.firstOrNull { it.id == state.reviewRegionId }
+                    val bitmap = state.reviewRegionBitmap
+                    if (region != null && bitmap.isUsable()) {
+                        Text(region.name, style = MaterialTheme.typography.titleMedium)
+                        Image(bitmap!!.asImageBitmap(), "实际固定区域裁片", modifier = Modifier.fillMaxWidth().heightIn(min = 96.dp, max = 300.dp), contentScale = ContentScale.Fit)
+                        Text("组：${region.group ?: "未分组"} · 层次 ${region.zIndex} · 锚点 ${region.anchor.x}, ${region.anchor.y}", style = MaterialTheme.typography.bodySmall)
+                        Button(onClick = onConfirmRegion, enabled = !state.busy && region.id !in candidate.reviewedRegionIds, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (region.id in candidate.reviewedRegionIds) "裁片已确认" else "确认实际裁片与区域文字") }
+                    }
+                }
                 else -> ReleaseScrollPanel {
                     val visitedCount = scene.edges.count { it.id in candidate.visitedEdgeIds }
                     val allReviewed = scene.states.isNotEmpty() && scene.states.all { it.id in candidate.reviewedStateIds }
                     val allWalked = scene.edges.all { it.id in candidate.visitedEdgeIds }
                     val videos = scene.assets.filter { it.role == ViewerScene.Asset.ROLE_TRANSITION }
                     val videosReviewed = videos.all { it.id in candidate.reviewedTransitionAssetIds }
-                    val canSeal = allReviewed && videosReviewed && candidate.summaryReviewed && candidate.fileListReviewed && candidate.completedPath && allWalked
+                    val regionsReviewed = scene.regions.all { it.id in candidate.reviewedRegionIds }
+                    val canSeal = allReviewed && videosReviewed && regionsReviewed && candidate.summaryReviewed && candidate.fileListReviewed && candidate.completedPath && allWalked
                     SectionHeader("实际试走", "只记录这份固定候选中实际选过的动作。")
                     ShellLabelValue("动作覆盖", "$visitedCount / ${scene.edges.size}")
                     ShellLabelValue("从起点到结束", if (candidate.completedPath) "已完成" else "待完成")
@@ -272,6 +291,7 @@ fun ReleaseReviewContent(
                     SectionHeader("封存检查")
                     ShellLabelValue("步骤画面与文字", "$reviewedCount / ${scene.states.size} 已确认")
                     if (videos.isNotEmpty()) ShellLabelValue("整段视频", "${videos.count { it.id in candidate.reviewedTransitionAssetIds }} / ${videos.size} 已确认")
+                    if (scene.regions.isNotEmpty()) ShellLabelValue("实际区域裁片", "${scene.regions.count { it.id in candidate.reviewedRegionIds }} / ${scene.regions.size} 已确认")
                     ShellLabelValue("项目文字", if (candidate.summaryReviewed) "已确认" else "待确认")
                     ShellLabelValue("实际包清单", if (candidate.fileListReviewed) "已确认" else "待确认")
                     if (currentDraftRevision != candidate.projectRevision) StatusNote(
@@ -348,6 +368,7 @@ fun ReleaseLibraryContent(
     onSettings: () -> Unit,
     onReviewCandidate: (String) -> Unit = {},
     onDiscardCandidate: (ReleaseCandidate) -> Unit = {},
+    onAi: ((String) -> Unit)? = null,
 ) {
     Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
         ShellTopBar("演示库", actions = {
@@ -395,6 +416,8 @@ fun ReleaseLibraryContent(
                         style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                     Text("版本 ${release.id.take(12)}", style = MaterialTheme.typography.labelSmall, color = ShellColors.Muted)
                     if (release.origin != "local") Text("完整性校验不代表作者身份或隐私内容已获认证。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    if (onAi != null) TextButton(onClick = { onAi(release.id) }, enabled = !state.busy,
+                        modifier = Modifier.heightIn(min = 48.dp)) { Text("配置 AI 数据包") }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         OutlinedButton(onClick = { onExport(release.id) }, enabled = !state.busy, shape = RoundedCornerShape(8.dp),
                             modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("保存到文件") }

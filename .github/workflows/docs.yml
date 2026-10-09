@@ -45,8 +45,10 @@ jobs:
                   return True
               return not (path.startswith(("docs/", "tools/signing/")) or path.endswith(".md"))
           android = any(needs_android(path) for path in changed if path)
+          ai = any(path.startswith(("remotion-adapter/", "tools/package-checks/", "android/app/src/main/java/com/tapscene/packageformat/", ".github/workflows/")) for path in changed if path)
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
               output.write(f"android={str(android).lower()}\n")
+              output.write(f"ai={str(ai).lower()}\n")
           print("Android/media checks required." if android else
                 "Android/media checks skipped: only documentation or signing tooling changed.")
           PY
@@ -155,6 +157,63 @@ jobs:
             ${{ runner.temp }}/package-fixtures/video/results.txt
           retention-days: 7
           if-no-files-found: error
+      - name: Set up Node for the independent trusted adapter
+        if: steps.scope.outputs.ai == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.19.0'
+      - name: Check AI data contracts and render actual synthetic videos
+        if: steps.scope.outputs.ai == 'true'
+        timeout-minutes: 15
+        run: |
+          java -Djava.awt.headless=true -cp "$RUNNER_TEMP/package-check-classes" AiPackageChecks \
+            "$RUNNER_TEMP/ai-fixtures" 2>&1 | tee "$RUNNER_TEMP/ai-package-checks.txt"
+          grep -E '^TAPSCENE_AI_PACKAGE_CHECKS_PASSED: [1-9][0-9]* assertions/rejections;' "$RUNNER_TEMP/ai-package-checks.txt"
+          sudo apt-get install --no-install-recommends --yes fonts-noto-cjk
+          cd remotion-adapter
+          npm ci --ignore-scripts --no-fund --no-audit
+          npm run check
+          mkdir -p "$RUNNER_TEMP/ai-render"
+          npm run render -- "$RUNNER_TEMP/ai-fixtures/synthetic-portrait.tapscene-ai" "$RUNNER_TEMP/ai-render/synthetic-portrait.mp4"
+          npm run render -- "$RUNNER_TEMP/ai-fixtures/synthetic-landscape.tapscene-ai" "$RUNNER_TEMP/ai-render/synthetic-landscape.mp4"
+          npm run render -- "$RUNNER_TEMP/ai-fixtures/synthetic-video.tapscene-ai" "$RUNNER_TEMP/ai-render/synthetic-video.mp4"
+          # Sample the same authored image-background patch before, at the
+          # middle of, and after the dissolve in the actual encoded videos.
+          python3 - <<'PY_CHECK'
+          import os
+          import subprocess
+          from pathlib import Path
+          for shape, x, y in [("portrait", 225, 1375), ("landscape", 359, 820)]:
+              video = Path(os.environ["RUNNER_TEMP"]) / "ai-render" / f"synthetic-{shape}.mp4"
+              pixels = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(video),
+                  "-vf", f"select='eq(n,60)+eq(n,71)+eq(n,85)',crop=8:8:{x}:{y}",
+                  "-vsync", "0", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+              size = 8 * 8 * 3
+              assert len(pixels) == size * 3, "Missing dissolve verification frames"
+              means = [sum(pixels[i:i+size]) / size for i in range(0, len(pixels), size)]
+              assert min(means) > 230 and max(means) - min(means) <= 3, (shape, means)
+              print(f"DISSOLVE_PIXELS_OK {shape}: before/mid/after={means}")
+          PY_CHECK
+          ffmpeg -v error -i "$RUNNER_TEMP/ai-render/synthetic-video.mp4" -ss 4.5 -frames:v 1 "$RUNNER_TEMP/ai-render/video-4.5.png"
+          for shape in portrait landscape; do
+            for position in 0.5 2.5 5.5 8; do
+              ffmpeg -v error -i "$RUNNER_TEMP/ai-render/synthetic-$shape.mp4" -ss "$position" -frames:v 1 "$RUNNER_TEMP/ai-render/$shape-$position.png"
+            done
+          done
+          cp "$RUNNER_TEMP/ai-fixtures/fixture-note.txt" "$RUNNER_TEMP/ai-render/"
+      - name: Keep actual AI renders and package evidence
+        if: always() && steps.scope.outputs.ai == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tapscene-ai-render-checks
+          path: |
+            ${{ runner.temp }}/ai-render/
+            ${{ runner.temp }}/ai-package-checks.txt
+            ${{ runner.temp }}/ai-fixtures/synthetic-portrait.tapscene-ai
+            ${{ runner.temp }}/ai-fixtures/synthetic-landscape.tapscene-ai
+            ${{ runner.temp }}/ai-fixtures/synthetic-video.tapscene-ai
+          retention-days: 7
+          if-no-files-found: error
       - name: Build the arm64 phone preview and run lint
         if: steps.scope.outputs.android == 'true'
         run: gradle -p android --no-daemon --max-workers=2 -PcompatibilityPreview=true -PtapsceneAbi=arm64-v8a :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
@@ -224,7 +283,7 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 15, f"Expected fifteen Compose review images, found {len(images)}"
+          assert len(images) == 22, f"Expected twenty-two Compose review images, found {len(images)}"
           lines = [
               "TapScene shell review: host-side Compose / Layoutlib renders.",
               "Not device screenshots; does not validate media decoding, touch, or system pickers.",

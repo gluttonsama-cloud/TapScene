@@ -5,6 +5,7 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.system.Os
 import android.system.OsConstants
@@ -84,7 +85,7 @@ class ProjectStore(context: Context) {
             db.update("projects", ContentValues().apply { putNull("start_state_id") },
                 "project_id=?", arrayOf(projectId))
             db.delete("projects", "project_id=?", arrayOf(projectId))
-            ProjectDeletionResult(current.steps.size, hotspots, edgeCount(current), current.steps.size + transitions(current).size)
+            ProjectDeletionResult(current.steps.size, hotspots, edgeCount(current), current.steps.size + transitions(current).size + current.steps.sumOf { step -> step.regions.count { it.asset != null } })
         }
         // Cleanup cannot turn a committed deletion into a reported failure. A journal row stays
         // until its exact, no-longer-referenced asset is gone, including across process restart.
@@ -104,7 +105,18 @@ class ProjectStore(context: Context) {
         title: String,
         description: String = "",
         stepId: String = UUID.randomUUID().toString(),
-    ): ProjectSnapshot {
+    ): ProjectSnapshot = importReviewedStep(projectId, input, title, description, stepId)
+
+    /** Replace only the reviewed safe output. Regions retain their bounds but lose crops/review;
+     * sealed releases have separate copies and remain unchanged. Existing actions stay authored. */
+    suspend fun replaceReviewedStep(projectId: String, stepId: String, expectedRevision: Long,
+        input: ReviewedStepInput): ProjectSnapshot {
+        val step = readProject(projectId)?.steps?.singleOrNull { it.id == stepId } ?: error("步骤已不存在。")
+        return importReviewedStep(projectId, input, step.title, step.description, stepId, true, expectedRevision)
+    }
+
+    private suspend fun importReviewedStep(projectId: String, input: ReviewedStepInput, title: String,
+        description: String, stepId: String, replacing: Boolean = false, expectedRevision: Long? = null): ProjectSnapshot {
         validId(projectId)
         validId(stepId)
         val cleanTitle = text(title, "步骤标题", 120)
@@ -114,8 +126,13 @@ class ProjectStore(context: Context) {
             frozen.captureId.none { it.isISOControl() }) { "步骤保存令牌无效。" }
         val alreadySaved = access { db ->
             val project = requireSnapshot(db, projectId)
+            if (replacing) {
+                require(project.steps.any { it.id == stepId }) { "待替换步骤已不存在。" }
+                require(project.steps.none { it.captureId == frozen.captureId && it.id != stepId }) { "复核令牌属于另一个步骤。" }
+            }
             if (hasMatchingCapture(project, frozen)) project else {
-                require(project.steps.size < ProjectLimits.MAX_STEPS) { "每个项目最多 40 个步骤。" }
+                check(!replacing || project.project.revision == expectedRevision) { "草稿已改变，底图未替换。" }
+                require(replacing || project.steps.size < ProjectLimits.MAX_STEPS) { "每个项目最多 40 个步骤。" }
                 null
             }
         }
@@ -173,9 +190,14 @@ class ProjectStore(context: Context) {
                     val db = helper.writableDatabase
                     val saved = transaction(db) {
                         val current = requireSnapshot(db, projectId)
+                        require(!replacing || current.steps.none { it.captureId == frozen.captureId && it.id != stepId }) {
+                            "复核令牌属于另一个步骤。"
+                        }
                         if (hasMatchingCapture(current, frozen)) return@transaction current
-                        require(current.steps.none { it.id == stepId }) { "这个步骤已经保存，请刷新后继续。" }
-                        require(current.steps.size < ProjectLimits.MAX_STEPS) { "每个项目最多 40 个步骤。" }
+                        val previous = if (replacing) current.steps.singleOrNull { it.id == stepId } ?: error("待替换步骤已不存在。") else null
+                        check(!replacing || current.project.revision == expectedRevision) { "草稿已改变，底图未替换。" }
+                        require(replacing || current.steps.none { it.id == stepId }) { "这个步骤已经保存，请刷新后继续。" }
+                        require(replacing || current.steps.size < ProjectLimits.MAX_STEPS) { "每个项目最多 40 个步骤。" }
                         val existingSource = readSource(db, projectId, frozen.source.sourceId)
                         check(existingSource == null || existingSource == frozen.source) {
                             "素材来源记录已改变，请重新取帧。"
@@ -196,14 +218,31 @@ class ProjectStore(context: Context) {
                             put("relative_path", relativePath); put("sha256", frozen.sha256.lowercase())
                             put("byte_length", byteLength); put("width", frozen.width); put("height", frozen.height)
                         })
-                        db.insertOrThrow("states", null, ContentValues().apply {
+                        val stateValues = ContentValues().apply {
                             put("project_id", projectId); put("state_id", stepId); put("capture_id", frozen.captureId)
-                            put("sort_order", current.steps.size); put("title", cleanTitle)
-                            put("description", cleanDescription); put("is_terminal", 0)
+                            put("sort_order", previous?.sortOrder ?: current.steps.size); put("title", cleanTitle)
+                            put("description", cleanDescription); put("is_terminal", if (previous?.isTerminal == true) 1 else 0)
                             put("source_id", frozen.source.sourceId); put("input_asset_id", assetId)
                             put("frame_pts_us", frozen.frameTimeUs); put("time_precision_us", frozen.timePrecisionUs)
                             put("masks_json", masksJson(frozen.masks).toString())
-                        })
+                        }
+                        if (previous == null) db.insertOrThrow("states", null, stateValues)
+                        else {
+                            previous.regions.forEach { clearRegionAsset(db, projectId, it) }
+                            db.update("states", stateValues, "project_id=? AND state_id=?", arrayOf(projectId, stepId))
+                            queueAsset(db, projectId, previous.asset.privateRelativePath)
+                            db.delete("local_assets", "project_id=? AND asset_id=?", arrayOf(projectId, previous.asset.id))
+                            // A transition reviewed against an old endpoint must be re-established.
+                            current.steps.forEach { from ->
+                                from.hotspots.filter { from.id == stepId || it.targetStepId == stepId }.forEach {
+                                    removeTransitionRow(db, projectId, it.edgeId)
+                                }
+                                from.nextAction?.takeIf { from.id == stepId || it.targetStepId == stepId }?.let {
+                                    removeTransitionRow(db, projectId, it.id)
+                                }
+                            }
+                            pruneSources(db, projectId)
+                        }
                         if (current.project.startStepId == null) {
                             db.update("projects", ContentValues().apply { put("start_state_id", stepId) },
                                 "project_id=?", arrayOf(projectId))
@@ -594,6 +633,7 @@ class ProjectStore(context: Context) {
             // ON DELETE SET NULL cannot be used on the composite FK: it would null project_id.
             db.update("next_actions", ContentValues().apply { putNull("to_state_id") },
                 "project_id=? AND to_state_id=?", arrayOf(projectId, stepId))
+            step.regions.forEach { clearRegionAsset(db, projectId, it) }
             db.delete("states", "project_id=? AND state_id=?", arrayOf(projectId, stepId))
             queueAsset(db, projectId, step.asset.privateRelativePath)
             db.delete("local_assets", "project_id=? AND asset_id=?", arrayOf(projectId, step.asset.id))
@@ -694,7 +734,11 @@ class ProjectStore(context: Context) {
             target.path.startsWith(root.path + File.separator) &&
             target.listFiles()?.isEmpty() == true) { "成品复制目标必须是空的本机私有目录。" }
         var total = 0L
-        val allAssets = current.steps.map { it.asset } + transitions(current).values.map { it.asset }.map {
+        val regionAssets = current.steps.flatMap { step -> step.regions.map { region ->
+            check(region.matchesBase(step.asset) && region.reviewedAt != null) { "区域底图已改变或裁片尚未复核，请重新生成并确认。" }
+            requireNotNull(region.asset) { "区域裁片失效，请重新生成。" }
+        } }
+        val allAssets = current.steps.map { it.asset } + regionAssets + transitions(current).values.map { it.asset }.map {
             StepAsset(it.id, it.privateRelativePath, it.sha256, it.byteLength, it.width, it.height)
         }
         check(allAssets.map { it.id }.toSet().size == allAssets.size) { "成品资产标识重复。" }
@@ -735,6 +779,180 @@ class ProjectStore(context: Context) {
         syncDirectory(target)
         current
     }
+
+    /** Saves only a visible-region definition; output and human review must be regenerated. */
+    fun saveRegion(projectId: String, stepId: String, regionId: String?, name: String, group: String?,
+        bbox: RegionBox, zIndex: Int, anchorX: Double, anchorY: Double, expectedRevision: Long): ProjectSnapshot {
+        val cleanName = text(name, "区域名称", 120)
+        val cleanGroup = group?.trim()?.takeIf { it.isNotEmpty() }?.let { text(it, "区域分组", 120) }
+        require(zIndex in -10000..10000 && anchorX.isFinite() && anchorY.isFinite() &&
+            anchorX in 0.0..1.0 && anchorY in 0.0..1.0) { "层级或裁片局部锚点无效。" }
+        regionId?.let(::validId)
+        return edit(projectId) { db ->
+            val current = requireSnapshot(db, projectId)
+            check(current.project.revision == expectedRevision) { "草稿已改变，请重新打开区域编辑。" }
+            val step = current.steps.singleOrNull { it.id == stepId } ?: error("步骤已不存在。")
+            resolveAsset(projectId, stepId) // Actual hash and dimensions; never use the source file.
+            require(bbox.fits(step.asset.width, step.asset.height)) { "区域超出安全底图。" }
+            val old = regionId?.let { id -> step.regions.singleOrNull { it.id == id } ?: error("区域不属于当前步骤。") }
+            if (old == null) require(step.regions.size < ProjectLimits.MAX_REGIONS_PER_STEP &&
+                current.steps.sumOf { it.regions.size } < ProjectLimits.MAX_REGIONS) { "每步最多 12 个区域，每项目最多 80 个。" }
+            old?.let { clearRegionAsset(db, projectId, it) }
+            val values = ContentValues().apply {
+                put("project_id", projectId); put("region_id", old?.id ?: newId()); put("state_id", stepId)
+                put("base_asset_id", step.asset.id); put("base_sha256", step.asset.sha256)
+                put("name", cleanName); if (cleanGroup == null) putNull("group_name") else put("group_name", cleanGroup)
+                put("x_px", bbox.x); put("y_px", bbox.y); put("width_px", bbox.width); put("height_px", bbox.height)
+                put("source_width", step.asset.width); put("source_height", step.asset.height)
+                put("z_index", zIndex); put("anchor_x", anchorX); put("anchor_y", anchorY)
+                putNull("asset_id"); putNull("reviewed_at")
+            }
+            if (old == null) db.insertOrThrow("regions", null, values)
+            else db.update("regions", values, "project_id=? AND region_id=?", arrayOf(projectId, old.id))
+        }
+    }
+
+    /** Real PNG crop from persisted reviewed image; generation does not imply human review. */
+    suspend fun generateRegion(projectId: String, regionId: String, expectedRevision: Long): ProjectSnapshot {
+        val (step, region) = access { db ->
+            val current = requireSnapshot(db, projectId)
+            check(current.project.revision == expectedRevision) { "草稿已改变，请重新打开区域编辑。" }
+            val step = current.steps.singleOrNull { it.regions.any { r -> r.id == regionId } } ?: error("区域已不存在。")
+            step to step.regions.single { it.id == regionId }
+        }
+        require(region.bbox.fits(step.asset.width, step.asset.height)) { "底图尺寸改变，请先调整区域边界。" }
+        val assetId = newId()
+        access { db ->
+            db.insertOrThrow("asset_imports", null, ContentValues().apply { put("project_id", projectId); put("asset_id", assetId) })
+            activeImports.add(importKey(assetId))
+        }
+        var committed = false
+        var failure: Throwable? = null
+        try {
+            val staging = privateDirectory(File(root, "project-staging"), root)
+            val operation = File(staging, assetId)
+            check(operation.mkdir()) { "无法建立裁片暂存目录。" }
+            val output = File(operation, "candidate.part")
+            val baseFile = resolveAsset(projectId, step.id)
+            check(sha256(baseFile) == step.asset.sha256) { "底图已改变，请刷新。" }
+            SafeMediaWriterValidation.verifyPng(baseFile, step.asset.width, step.asset.height, emptyList())
+            currentCoroutineContext().ensureActive()
+            val base = BitmapFactory.decodeFile(baseFile.path, BitmapFactory.Options().apply {
+                inScaled = false; inPreferredConfig = Bitmap.Config.ARGB_8888
+            }) ?: error("无法解码已复核安全底图。")
+            try {
+                check(base.width == step.asset.width && base.height == step.asset.height) { "底图实际尺寸改变。" }
+                val crop = Bitmap.createBitmap(base, region.bbox.x, region.bbox.y, region.bbox.width, region.bbox.height)
+                try {
+                    FileOutputStream(output).use { sink ->
+                        check(crop.compress(Bitmap.CompressFormat.PNG, 100, sink)) { "区域 PNG 生成失败。" }
+                        sink.fd.sync()
+                    }
+                } finally { if (crop !== base) crop.recycle() }
+            } finally { base.recycle() }
+            check(sha256(baseFile) == step.asset.sha256) { "底图在裁片生成期间改变。" }
+            SafeMediaWriterValidation.verifyPng(output, region.bbox.width, region.bbox.height, emptyList())
+            val digest = sha256(output)
+            val length = output.length()
+            require(length in 1..MAX_PNG_BYTES) { "裁片为空或超过限制。" }
+            currentCoroutineContext().ensureActive()
+            return withContext(NonCancellable) { synchronized(lock) {
+                val db = helper.writableDatabase
+                val result = transaction(db) {
+                    val current = requireSnapshot(db, projectId)
+                    check(current.project.revision == expectedRevision) { "草稿已改变，裁片未替换，请重新生成。" }
+                    val now = current.steps.singleOrNull { it.id == step.id } ?: error("步骤已不存在。")
+                    check(now.asset == step.asset && now.regions.singleOrNull { it.id == region.id } == region) { "区域或底图已改变。" }
+                    check(sha256(resolveAsset(projectId, step.id)) == step.asset.sha256) { "底图已改变。" }
+                    val directory = projectAssetDirectory(projectId)
+                    val destination = File(directory, "$assetId.png")
+                    check(!destination.exists()) { "裁片资产标识冲突。" }
+                    Files.move(output.toPath(), destination.toPath(), StandardCopyOption.ATOMIC_MOVE)
+                    syncDirectory(directory)
+                    db.insertOrThrow("local_assets", null, ContentValues().apply {
+                        put("asset_id", assetId); put("project_id", projectId); put("relative_path", assetPath(projectId, assetId))
+                        put("sha256", digest); put("byte_length", length); put("width", region.bbox.width); put("height", region.bbox.height)
+                    })
+                    clearRegionAsset(db, projectId, region)
+                    db.update("regions", ContentValues().apply {
+                        put("asset_id", assetId); putNull("reviewed_at")
+                        put("base_asset_id", step.asset.id); put("base_sha256", step.asset.sha256)
+                        put("source_width", step.asset.width); put("source_height", step.asset.height)
+                    }, "project_id=? AND region_id=?", arrayOf(projectId, regionId))
+                    bump(db, projectId)
+                    requireSnapshot(db, projectId)
+                }
+                committed = true
+                result
+            } }
+        } catch (error: Throwable) { failure = error; throw error }
+        finally {
+            val cleanup = synchronized(lock) {
+                activeImports.remove(importKey(assetId))
+                runCatching { cleanupImport(helper.writableDatabase, projectId, assetId); cleanupPending(helper.writableDatabase) }.exceptionOrNull()
+            }
+            if (cleanup != null && !committed) { if (failure != null) failure.addSuppressed(cleanup) else throw cleanup }
+        }
+    }
+
+    /** Call only after the author has viewed this exact crop PNG and explicitly confirmed it. */
+    fun reviewRegion(projectId: String, regionId: String, expectedRevision: Long, expectedSha256: String): ProjectSnapshot = edit(projectId) { db ->
+        val current = requireSnapshot(db, projectId)
+        check(current.project.revision == expectedRevision) { "草稿已改变，请重新查看实际裁片。" }
+        val region = current.steps.flatMap { it.regions }.singleOrNull { it.id == regionId } ?: error("区域已不存在。")
+        val asset = requireNotNull(region.asset) { "裁片失效，请重新生成。" }
+        check(asset.sha256 == expectedSha256 && sha256(regionFile(projectId, regionId)) == expectedSha256) { "裁片已改变，请重新复核。" }
+        db.update("regions", ContentValues().apply { put("reviewed_at", System.currentTimeMillis()) },
+            "project_id=? AND region_id=?", arrayOf(projectId, regionId))
+    }
+
+    fun deleteRegion(projectId: String, regionId: String, expectedRevision: Long): ProjectSnapshot = edit(projectId) { db ->
+        val current = requireSnapshot(db, projectId)
+        check(current.project.revision == expectedRevision) { "草稿已改变，请刷新。" }
+        val region = current.steps.flatMap { it.regions }.singleOrNull { it.id == regionId } ?: error("区域已不存在。")
+        clearRegionAsset(db, projectId, region)
+        db.delete("regions", "project_id=? AND region_id=?", arrayOf(projectId, regionId))
+    }
+
+    fun regionFile(projectId: String, regionId: String): File = access { db ->
+        val step = requireSnapshot(db, projectId).steps.singleOrNull { it.regions.any { r -> r.id == regionId } } ?: error("区域已不存在。")
+        val region = step.regions.single { it.id == regionId }
+        check(region.matchesBase(step.asset)) { "安全底图已替换，请重新生成裁片。" }
+        resolveAsset(projectId, step.id)
+        val asset = requireNotNull(region.asset) { "裁片尚未生成或已失效。" }
+        checkedAssetFile(projectId, asset.privateRelativePath).also { file ->
+            check(file.isFile && file.length() == asset.byteLength && sha256(file) == asset.sha256) { "裁片实际内容缺失或改变。" }
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.path, bounds)
+            check(bounds.outMimeType == "image/png" && bounds.outWidth == region.bbox.width && bounds.outHeight == region.bbox.height &&
+                asset.width == region.bbox.width && asset.height == region.bbox.height) { "裁片实际尺寸改变。" }
+        }
+    }
+
+    private fun clearRegionAsset(db: SQLiteDatabase, projectId: String, region: ProjectRegion) {
+        db.update("regions", ContentValues().apply { putNull("asset_id"); putNull("reviewed_at") },
+            "project_id=? AND region_id=?", arrayOf(projectId, region.id))
+        region.asset?.let { asset ->
+            queueAsset(db, projectId, asset.privateRelativePath)
+            db.delete("local_assets", "project_id=? AND asset_id=?", arrayOf(projectId, asset.id))
+        }
+    }
+
+    private fun readRegions(db: SQLiteDatabase, projectId: String, stepId: String): List<ProjectRegion> =
+        db.rawQuery("""SELECT r.*, a.relative_path,a.sha256,a.byte_length,a.width,a.height FROM regions r
+            LEFT JOIN local_assets a ON a.project_id=r.project_id AND a.asset_id=r.asset_id
+            WHERE r.project_id=? AND r.state_id=? ORDER BY r.z_index,r.region_id""", arrayOf(projectId, stepId)).use { cursor ->
+            buildList { while (cursor.moveToNext()) add(ProjectRegion(
+                cursor.string("region_id"), stepId, cursor.string("base_asset_id"), cursor.string("base_sha256"),
+                cursor.string("name"), cursor.nullableString("group_name"),
+                RegionBox(cursor.int("x_px"), cursor.int("y_px"), cursor.int("width_px"), cursor.int("height_px")),
+                cursor.int("source_width"), cursor.int("source_height"), cursor.int("z_index"),
+                cursor.getDouble(cursor.getColumnIndexOrThrow("anchor_x")), cursor.getDouble(cursor.getColumnIndexOrThrow("anchor_y")),
+                cursor.nullableString("asset_id")?.let { StepAsset(it, cursor.string("relative_path"), cursor.string("sha256"),
+                    cursor.long("byte_length"), cursor.int("width"), cursor.int("height")) },
+                cursor.getColumnIndexOrThrow("reviewed_at").let { if (cursor.isNull(it)) null else cursor.getLong(it) },
+            )) }
+        }
 
     fun isSourceReferenced(sourceId: String): Boolean = access { db ->
         count(db, "states", "source_id=?", sourceId) > 0 ||
@@ -801,6 +1019,7 @@ class ProjectStore(context: Context) {
                         frameTimeUs = cursor.long("frame_pts_us"), timePrecisionUs = cursor.long("time_precision_us"),
                         masks = parseMasks(JSONArray(cursor.string("masks_json"))), hotspots = readHotspots(db, projectId, id),
                         captureId = cursor.string("capture_id"), nextAction = readNextAction(db, projectId, id),
+                        regions = readRegions(db, projectId, id),
                     ))
                 }
             }
@@ -1153,7 +1372,7 @@ class ProjectStore(context: Context) {
         } }
     }
 
-    private class Database(context: Context, path: String) : SQLiteOpenHelper(context, path, null, 3) {
+    private class Database(context: Context, path: String) : SQLiteOpenHelper(context, path, null, 4) {
         override fun onConfigure(db: SQLiteDatabase) { db.setForeignKeyConstraintsEnabled(true) }
         override fun onCreate(db: SQLiteDatabase) {
             db.execSQL("""CREATE TABLE projects (
@@ -1210,6 +1429,7 @@ class ProjectStore(context: Context) {
             db.execSQL("CREATE INDEX edges_target ON edges(project_id,to_state_id)")
             createNextActions(db)
             createTransitions(db)
+            createRegions(db)
         }
 
         private fun createNextActions(db: SQLiteDatabase) {
@@ -1242,12 +1462,35 @@ class ProjectStore(context: Context) {
             db.execSQL("CREATE TABLE transition_imports(project_id TEXT NOT NULL, asset_id TEXT PRIMARY KEY NOT NULL)")
         }
 
+
+        private fun createRegions(db: SQLiteDatabase) {
+            // base_asset_id deliberately keeps the old identity after replacement so invalidation
+            // is visible. Only the nullable crop asset is a live FK; it is never a source image.
+            db.execSQL("""CREATE TABLE regions (
+                project_id TEXT NOT NULL, region_id TEXT NOT NULL, state_id TEXT NOT NULL,
+                base_asset_id TEXT NOT NULL, base_sha256 TEXT NOT NULL, name TEXT NOT NULL, group_name TEXT,
+                x_px INTEGER NOT NULL CHECK(x_px>=0), y_px INTEGER NOT NULL CHECK(y_px>=0),
+                width_px INTEGER NOT NULL CHECK(width_px>0), height_px INTEGER NOT NULL CHECK(height_px>0),
+                source_width INTEGER NOT NULL CHECK(source_width>0), source_height INTEGER NOT NULL CHECK(source_height>0),
+                z_index INTEGER NOT NULL CHECK(z_index BETWEEN -10000 AND 10000),
+                anchor_x REAL NOT NULL CHECK(anchor_x BETWEEN 0 AND 1), anchor_y REAL NOT NULL CHECK(anchor_y BETWEEN 0 AND 1),
+                asset_id TEXT, reviewed_at INTEGER,
+                PRIMARY KEY(project_id,region_id), UNIQUE(project_id,asset_id),
+                CHECK(x_px+width_px<=source_width AND y_px+height_px<=source_height),
+                CHECK(reviewed_at IS NULL OR asset_id IS NOT NULL),
+                FOREIGN KEY(project_id,state_id) REFERENCES states(project_id,state_id) ON DELETE CASCADE,
+                FOREIGN KEY(project_id,asset_id) REFERENCES local_assets(project_id,asset_id) DEFERRABLE INITIALLY DEFERRED
+            )""")
+            db.execSQL("CREATE INDEX regions_state ON regions(project_id,state_id)")
+        }
+
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            check(oldVersion in 1..2 && newVersion == 3) { "项目数据库需要安全迁移；请保留现有本机数据。" }
+            check(oldVersion in 1..3 && newVersion == 4) { "项目数据库需要安全迁移；请保留现有本机数据。" }
             // SQLiteOpenHelper commits both additive migrations and user_version together. Never
             // rebuild old tables or drop pending image cleanup/import records during an upgrade.
             if (oldVersion < 2) createNextActions(db)
             if (oldVersion < 3) createTransitions(db)
+            if (oldVersion < 4) createRegions(db)
         }
     }
 
