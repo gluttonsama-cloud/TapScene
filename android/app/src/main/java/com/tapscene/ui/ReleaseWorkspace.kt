@@ -63,6 +63,7 @@ data class AiPackageConfiguration(
     val effects: List<RenderPlan.Effect> = emptyList(),
     val width: Int = 1080,
     val height: Int = 1920,
+    val fromDraft: Boolean = false,
 ) {
     fun resolve(): RenderPlan = RenderPlan.build(scene, width, height, visits, effects)
 }
@@ -531,14 +532,10 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     fun openAiPackage(id: String) = execute("读取固定版本与动画配置") {
         mutableState.update { it.copy(aiConfiguration = null) }
         val scene = withContext(Dispatchers.IO) { store.loadRelease(id) }
-        val saved = withContext(Dispatchers.IO) {
-            try { store.readAiPlan(id) }
-            catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: IllegalArgumentException) { message("上次动画配置未通过校验，请从起点重新配置。"); null }
-            catch (_: IllegalStateException) { message("上次动画配置不可用，请从起点重新配置。"); null }
-        }
+        val saved = withContext(Dispatchers.IO) { store.readAiPlan(id) }
+        val fromDraft = withContext(Dispatchers.IO) { store.hasDraftAiPlan(id) }
         val config = if (saved == null) AiPackageConfiguration(scene, listOf(RenderPlan.Visit(java.util.UUID.randomUUID().toString(), scene.startStateId, null, 90)))
-            else AiPackageConfiguration(scene, saved.visits, saved.effects, saved.width, saved.height)
+            else AiPackageConfiguration(scene, saved.visits, saved.effects, saved.width, saved.height, fromDraft)
         mutableState.update { it.copy(aiConfiguration = config) }
     }
 
@@ -569,9 +566,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         check(frames in 1..RenderPlan.MAX_HOLD_FRAMES) { "每步停留须在 1/30 秒到 60 秒之间。" }
         val index = config.visits.indexOfFirst { it.visitId == visitId }
         check(index >= 0) { "播放顺序中没有这一步。" }
-        val previousVisitId = config.visits.getOrNull(index - 1)?.visitId
-        config.copy(visits = config.visits.map { if (it.visitId == visitId) RenderPlan.Visit(it.visitId, it.stateId, it.selectedEdgeId, frames) else it },
-            effects = config.effects.filterNot { it.visitId == visitId || (it.visitId == previousVisitId && it.type == "transition") })
+        config.copy(visits = config.visits.map { if (it.visitId == visitId) RenderPlan.Visit(it.visitId, it.stateId, it.selectedEdgeId, frames) else it })
     }
     fun toggleAiEffect(visitId: String, type: String, regionId: String? = null, text: String? = null) = editAi { config ->
         val visit = config.visits.single { it.visitId == visitId }
@@ -600,6 +595,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     private fun editAi(change: (AiPackageConfiguration) -> AiPackageConfiguration) {
         if (state.value.busy || savePickerPending) return
         val config = state.value.aiConfiguration ?: return
+        if (config.fromDraft) { message("此计划随草稿封存，请回项目的动画计划调整后重新封存。"); return }
         try { mutableState.update { it.copy(aiConfiguration = change(config), exportFile = null, message = null) } }
         catch (error: IllegalStateException) { message(error.message ?: "动画配置无效。") }
         catch (error: IllegalArgumentException) { message(error.message ?: "动画配置无效。") }

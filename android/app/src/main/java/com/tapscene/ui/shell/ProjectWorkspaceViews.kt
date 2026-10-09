@@ -193,6 +193,7 @@ fun StoryboardContent(
     stepThumbnail: @Composable (StepAsset) -> Bitmap?,
     modifier: Modifier = Modifier,
     onBuildPath: (() -> Unit)? = null,
+    onAiPlan: (() -> Unit)? = null,
 ) {
     val snapshot = state.project
     if (snapshot == null) {
@@ -230,6 +231,7 @@ fun StoryboardContent(
                             modifier = Modifier.heightIn(min = 48.dp)) { Text("按顺序连接") }
                     }
                 }
+                if (onAiPlan != null) ShellActionRow("动画计划", "访问路径、停留与全部效果", onClick = onAiPlan, enabled = editable)
                 if (snapshot.project.goal.isNotBlank()) {
                     Text(snapshot.project.goal, style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
