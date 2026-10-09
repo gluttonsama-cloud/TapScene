@@ -400,13 +400,22 @@ private fun StepNameSheet(form: EditorPendingForm, enabled: Boolean, recoverySta
     onRetry: () -> Unit, onChange: (EditorPendingForm) -> Unit, onDismiss: () -> Unit,
     onConfirm: (String, String) -> Unit) {
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp),
+        StepNameFormContent(form, enabled, recoveryStatus, onRetry, onChange, onDismiss, onConfirm)
+    }
+}
+
+/** Shared production content: host rendering cannot capture the platform modal window. */
+@Composable
+internal fun StepNameFormContent(form: EditorPendingForm, enabled: Boolean, recoveryStatus: DraftRecoveryStatus,
+    onRetry: () -> Unit, onChange: (EditorPendingForm) -> Unit, onDismiss: () -> Unit,
+    onConfirm: (String, String) -> Unit) {
+    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("名称与讲解", style = MaterialTheme.typography.titleMedium)
             PendingFormStatus(recoveryStatus, enabled, onRetry)
             OutlinedTextField(form.title, { onChange(form.copy(title = it)) }, label = { Text("步骤名称") }, singleLine = true,
                 enabled = enabled, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(form.description, { onChange(form.copy(description = it)) }, label = { Text("讲解（可选）") }, minLines = 3,
+            OutlinedTextField(form.description, { onChange(form.copy(description = it)) }, label = { Text("讲解（可选）") }, minLines = 3, maxLines = 8,
                 enabled = enabled, modifier = Modifier.fillMaxWidth())
             Text("应用后记得保存步骤。关闭此面板将丢弃未应用的内容。", style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -416,7 +425,6 @@ private fun StepNameSheet(form: EditorPendingForm, enabled: Boolean, recoverySta
                     enabled = enabled && form.title.isNotBlank()) { Text("应用") }
             }
         }
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

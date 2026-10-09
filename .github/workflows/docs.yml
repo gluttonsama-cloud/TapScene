@@ -296,6 +296,17 @@ jobs:
               assert data[:8] == b"\x89PNG\r\n\x1a\n", image
               width, height = struct.unpack(">II", data[16:24])
               assert width > 0 and height > 0, image
+              if "EditorDraftRecovery" in str(image):
+                  # A modal window can yield a valid but blank PNG in Layoutlib. Reject that
+                  # before treating the two recovery form images as usable review evidence.
+                  import zlib
+                  offset, compressed = 8, bytearray()
+                  while offset < len(data):
+                      size = struct.unpack(">I", data[offset:offset + 4])[0]
+                      if data[offset + 4:offset + 8] == b"IDAT":
+                          compressed.extend(data[offset + 8:offset + 8 + size])
+                      offset += size + 12
+                  assert len(set(zlib.decompress(compressed))) > 32, f"Blank recovery form render: {image}"
               lines.append(f"{image.relative_to(root)} | {width}x{height} | SHA256 {hashlib.sha256(data).hexdigest()}")
           report = Path(os.environ["RUNNER_TEMP"]) / "compose-review.txt"
           report.write_text("\n".join(lines) + "\n", encoding="utf-8")

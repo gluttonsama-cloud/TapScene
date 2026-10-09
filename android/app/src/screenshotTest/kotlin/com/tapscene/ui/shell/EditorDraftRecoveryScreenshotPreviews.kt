@@ -22,7 +22,7 @@ import com.tapscene.data.EditorFormKind
 import com.tapscene.data.EditorPendingForm
 import com.tapscene.ui.DraftRecoveryStatus
 
-/** Test-only recovery inputs. These previews use the production editor and its real modal sheet. */
+/** Test-only inputs rendered by the exact production form body, without the platform modal window. */
 @PreviewTest
 @Preview(name = "30_editor_recovered_form", widthDp = 412, heightDp = 915, locale = "zh-rCN", showBackground = true)
 @Composable
@@ -52,27 +52,17 @@ fun EditorStagingFailureLongTextPreview() {
 
 @Composable
 private fun EditorRecoverySurface(form: EditorPendingForm, status: DraftRecoveryStatus) {
-    val bitmap = remember { ShellPreviewFixture.bitmap(1) }
-    var draft by remember { mutableStateOf(ShellPreviewFixture.draft.copy(
-        pendingForm = form, recoveryStatus = status,
-    )) }
+    var pending by remember { mutableStateOf(form) }
     TapSceneTheme {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Column(Modifier.fillMaxSize()) {
-                Box(Modifier.weight(1f).fillMaxWidth()) {
-                    EditorWorkspaceContent(
-                        ShellPreviewFixture.project, draft, bitmap, false,
-                        EditorCallbacks(
-                            onBack = {}, onTitleChange = { draft = draft.copy(title = it, dirty = true) },
-                            onDescriptionChange = { draft = draft.copy(description = it, dirty = true) },
-                            onTerminalChange = {}, onPutHotspot = {}, onRemoveHotspot = {},
-                            onSave = {}, onDiscard = {}, onPreview = {}, onOpenTransition = {},
-                            onPendingFormChange = { draft = draft.copy(pendingForm = it) },
-                            onRetryStaging = { draft = draft.copy(recoveryStatus = DraftRecoveryStatus.STAGING) },
-                        ),
-                    )
+                Text(if (status == DraftRecoveryStatus.STAGED) "已恢复上次未保存的编辑，可以继续修改" else "本机暂存失败，输入仍保留",
+                    Modifier.fillMaxWidth().background(ShellColors.AccentSoft).padding(16.dp),
+                    style = MaterialTheme.typography.bodyMedium)
+                Box(Modifier.weight(1f).fillMaxWidth().padding(top = 20.dp)) {
+                    StepNameFormContent(pending, true, status, {}, { pending = it }, {}, { _, _ -> })
                 }
-                Text("布局样例 · 合成内容，仅供界面检查", Modifier.fillMaxWidth().background(ShellColors.AccentSoft)
+                Text("布局样例 · 生产表单内容，独立窗口行为需设备检查", Modifier.fillMaxWidth().background(ShellColors.AccentSoft)
                     .padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.labelSmall,
                     color = ShellColors.Accent)
             }
