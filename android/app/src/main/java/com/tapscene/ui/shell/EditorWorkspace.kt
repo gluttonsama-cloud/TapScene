@@ -141,6 +141,7 @@ fun EditorWorkspaceContent(
 
     BoxWithConstraints(modifier.fillMaxSize()) {
         val panelMaxHeight = (maxHeight * 0.32f).coerceIn(92.dp, 216.dp)
+        val sidePanelWidth = (maxWidth * .4f).coerceIn(240.dp, 320.dp)
         val compactHeader = maxWidth > maxHeight && maxWidth >= 560.dp
         val showUnsaved = dirtyStepCount > 0 && (!previewEnabled || !regionsEnabled)
         Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
@@ -325,7 +326,7 @@ fun EditorWorkspaceContent(
             if (compactHeader) {
                 Row(Modifier.weight(1f).fillMaxWidth()) {
                     editorCanvas(Modifier.weight(1f).fillMaxHeight())
-                    editorPanel(Modifier.width((maxWidth * .4f).coerceIn(240.dp, 320.dp)).fillMaxHeight())
+                    editorPanel(Modifier.width(sidePanelWidth).fillMaxHeight())
                 }
             } else {
                 editorCanvas(Modifier.weight(1f).fillMaxWidth())
