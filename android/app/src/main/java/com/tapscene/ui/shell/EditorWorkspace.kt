@@ -80,6 +80,7 @@ data class EditorCallbacks(
     val onPutNextAction: (ProjectNextAction) -> Unit = {},
     val onRemoveNextAction: () -> Unit = {},
     val onOpenRegions: () -> Unit = {},
+    val onCorrectImage: (Boolean) -> Unit = {},
 )
 
 @Composable
@@ -92,6 +93,7 @@ fun EditorWorkspaceContent(
     modifier: Modifier = Modifier,
     previewEnabled: Boolean = !draft.dirty,
     regionsEnabled: Boolean = !draft.dirty,
+    correctionEnabled: Boolean = true,
 ) {
     var mode by rememberSaveable(draft.stepId) { mutableStateOf(EditorMode.FRAME) }
     var adding by rememberSaveable(draft.stepId) { mutableStateOf(false) }
@@ -155,7 +157,7 @@ fun EditorWorkspaceContent(
                             Text(step?.asset?.let { "${it.width} × ${it.height}" } ?: "图片信息不可用",
                                 Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            TextButton(onClick = {}, enabled = false) { Text("替换画面 · 待接入") }
+                            TextButton(onClick = { callbacks.onCorrectImage(false) }, enabled = !busy && correctionEnabled) { Text("替换画面") }
                         }
                         Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
                             Checkbox(checked = draft.isTerminal, onCheckedChange = { terminal ->
@@ -257,12 +259,10 @@ fun EditorWorkspaceContent(
                         Text("固定遮挡", style = MaterialTheme.typography.titleSmall)
                         Text("当前安全画面包含 ${step?.masks?.size ?: 0} 处已生成遮挡。", style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(onClick = {}, enabled = false) { Text("画遮挡") }
-                            TextButton(onClick = {}, enabled = false) { Text("对象列表") }
-                            TextButton(onClick = {}, enabled = false) { Text("重新生成") }
+                        OutlinedButton(onClick = { callbacks.onCorrectImage(true) }, enabled = !busy && correctionEnabled) {
+                            Text("重新遮挡")
                         }
-                        Text("修改既有步骤遮挡、生成和重新复核尚未接入。", style = MaterialTheme.typography.bodySmall,
+                        Text("从本步原片校正，检查新图片后替换。", style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     EditorMode.REGIONS -> {

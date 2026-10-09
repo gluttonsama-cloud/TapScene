@@ -262,6 +262,8 @@ class MediaCompatibilityInstrumentation : Instrumentation() {
             }
             if (fixture.spec.name == "avc-sdr.mp4") {
                 com.tapscene.data.TransitionStoreChecks.run(targetContext, fixture.source, video, startUs, endUs, masks, ::status)
+                com.tapscene.data.StepReplacementChecks.run(targetContext, fixture.source, video, startUs, endUs, masks, ::status)
+                com.tapscene.ui.StepCorrectionWorkspaceChecks.run(targetContext, fixture.source, video, startUs, endUs, masks, ::status)
             }
             if (checkCancellation) {
                 checkCancelledWrite(outputDirectory) { onStage -> writer.writePng(frame.bitmap, masks, outputDirectory, onStage) }

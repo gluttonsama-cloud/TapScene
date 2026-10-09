@@ -8,6 +8,7 @@ import android.provider.DocumentsContract
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.tapscene.data.ProjectStore
+import com.tapscene.data.ProjectSnapshot
 import com.tapscene.data.CandidateOcrStore
 import com.tapscene.data.ReviewedStepInput
 import com.tapscene.data.SourceDraft
@@ -36,8 +37,24 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.coroutineContext
 
+/** A bounded replacement session. Its masks and frame are never written to SourceDraft storage. */
+data class StepImageCorrection(
+    val projectId: String,
+    val stepId: String,
+    val expectedRevision: Long,
+    val sessionId: String,
+    val title: String,
+    val regionCount: Int,
+    val transitionCount: Int,
+)
+
+class StepCorrectionException(message: String) : Exception(message)
+
 data class WorkspaceUiState(
     val drafts: List<SourceDraft> = emptyList(),
+    val correction: StepImageCorrection? = null,
+    val correctionDraft: SourceDraft? = null,
+    val completedCorrectionId: String? = null,
     val selectedId: String? = null,
     val frame: DecodedFrame? = null,
     /** Queue item whose actual decoded frame is currently editable; never inferred from source ID. */
@@ -52,7 +69,8 @@ data class WorkspaceUiState(
     val loadFailed: Boolean = false,
     val unsavedEdits: Boolean = false,
 ) {
-    val selected: SourceDraft? get() = drafts.firstOrNull { it.source.sourceId == selectedId }
+    val selected: SourceDraft? get() = if (correction != null) correctionDraft
+        else drafts.firstOrNull { it.source.sourceId == selectedId }
 }
 
 class MediaWorkspace(application: Application) : AndroidViewModel(application) {
@@ -81,7 +99,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
 
     /** Separate source budgets/drafts per project; null retains the earlier media-only workspace. */
     fun activateProject(projectId: String?): Boolean {
-        if (state.value.busy || savePickerPending || !requireSavedEdits()) return false
+        if (state.value.busy || savePickerPending || state.value.correction != null || !requireSavedEdits()) return false
         if (activeProjectId == projectId) return true
         val nextStore = WorkspaceStore(app, projectId)
         invalidateCandidate()
@@ -92,42 +110,133 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
         return true
     }
 
+    /** Enter from a saved step, retaining unsaved text in ProjectWorkspace rather than saving it. */
+    fun openStepCorrection(project: ProjectSnapshot, stepId: String): Boolean {
+        if (activeProjectId != project.project.id || state.value.busy || savePickerPending ||
+            state.value.correction != null || !requireSavedEdits()) return false
+        val step = project.steps.singleOrNull { it.id == stepId } ?: return false
+        val transitionCount = project.steps.sumOf { from ->
+            from.hotspots.count { it.transition != null && (from.id == stepId || it.targetStepId == stepId) } +
+                if (from.nextAction?.let { it.transition != null && (from.id == stepId || it.targetStepId == stepId) } == true) 1 else 0
+        }
+        invalidateCandidate()
+        mutableState.update { it.copy(correction = StepImageCorrection(project.project.id, step.id,
+            project.project.revision, UUID.randomUUID().toString(), step.title, step.regions.size, transitionCount),
+            correctionDraft = SourceDraft(step.source, step.frameTimeUs, step.masks.toList()),
+            completedCorrectionId = null, frame = null, frameReviewId = null, message = null) }
+        retryStepCorrection()
+        return true
+    }
+
+    fun retryStepCorrection() {
+        val snapshot = state.value
+        val correction = snapshot.correction ?: return
+        val draft = snapshot.correctionDraft ?: return
+        execute("读取步骤原片") {
+            verifyCorrection(correction)
+            decodeCorrection(correction, draft, draft.frameTimeUs)
+        }
+    }
+
+    fun selectCorrectionSource(sourceId: String) {
+        val snapshot = state.value
+        val correction = snapshot.correction ?: return
+        val draft = snapshot.correctionDraft ?: return
+        val source = snapshot.drafts.firstOrNull { it.source.sourceId == sourceId }?.source ?: return
+        if (source == draft.source) return
+        execute("更换取帧素材") {
+            verifyCorrection(correction)
+            // Keep this step's masks, never another source's shared workbench masks.
+            decodeCorrection(correction, SourceDraft(source, 0, draft.masks.toList()), 0)
+        }
+    }
+
+    fun closeStepCorrection(): Boolean {
+        if (state.value.busy || savePickerPending) return false
+        invalidateCandidate()
+        mutableState.update { it.copy(correction = null, correctionDraft = null, completedCorrectionId = null,
+            frame = null, frameReviewId = null, message = null) }
+        return true
+    }
+
+    private suspend fun verifyCorrection(correction: StepImageCorrection) {
+        val current = withContext(Dispatchers.IO) { projectStore.readProject(correction.projectId) }
+        if (current == null || state.value.correction != correction || current.project.revision != correction.expectedRevision ||
+            current.steps.none { it.id == correction.stepId })
+            throw StepCorrectionException("步骤已改变，请返回后重新打开；原画面仍保留。")
+    }
+
+    private suspend fun decodeCorrection(correction: StepImageCorrection, draft: SourceDraft, timeUs: Long) {
+        invalidateCandidate()
+        mutableState.update { it.copy(correctionDraft = draft, frame = null, frameReviewId = null) }
+        val exists = withContext(Dispatchers.IO) {
+            val file = File(app.noBackupFilesDir, draft.source.privateRelativePath)
+            draft.source.privateRelativePath == "sources/${draft.source.sourceId}.mp4" &&
+                file.canonicalFile == file.absoluteFile && file.isFile
+        }
+        if (!exists) throw StepCorrectionException("本机原片已缺失。已保存画面仍可查看，暂不能重新取帧或恢复被遮挡的像素。")
+        val decoded = decoder.decode(draft.source, timeUs)
+        check(state.value.correction == correction)
+        mutableState.update { it.copy(correctionDraft = draft.copy(frameTimeUs = decoded.presentationTimeUs),
+            frame = decoded, frameReviewId = correction.sessionId) }
+    }
+
     /** The callback runs while this workspace's operation lock owns the reviewed candidate. */
     fun saveReviewedImage(commit: suspend (ReviewedStepInput) -> Unit) {
         val snapshot = state.value
         val candidate = snapshot.candidate
         val source = snapshot.selected
         val frame = snapshot.frame
+        val correction = snapshot.correction
         if (snapshot.busy || savePickerPending || snapshot.unsavedEdits ||
             candidate == null || candidate.mimeType != "image/png" || source == null || frame == null ||
-            snapshot.reviewedDigest != candidate.sha256
+            snapshot.reviewedDigest != candidate.sha256 ||
+            (correction != null && snapshot.frameReviewId != correction.sessionId)
         ) {
             message("请先生成并复核实际图片，再保存为步骤")
             return
         }
-        execute("保存为项目步骤") {
+        execute(if (correction == null) "保存为项目步骤" else "替换步骤画面") {
             check(state.value.candidate?.sha256 == candidate.sha256 &&
                 state.value.reviewedDigest == candidate.sha256) { "复核已变化" }
             val input = ReviewedStepInput(candidate.file, candidate.sha256, candidate.width, candidate.height,
                 source.source, frame.presentationTimeUs, frame.timePrecisionUs, source.masks.toList())
-            commit(input)
+            try {
+                commit(input)
+            } finally {
+                if (correction != null) withContext(NonCancellable) {
+                    // IO can commit even when cancellation prevents its result reaching Main.
+                    val saved = withContext(Dispatchers.IO) {
+                        runCatching { projectStore.readProject(correction.projectId) }.getOrNull()
+                    }?.steps?.singleOrNull { it.id == correction.stepId && it.captureId == input.captureId }
+                    if (saved != null) {
+                        mutableState.update { it.copy(completedCorrectionId = correction.sessionId) }
+                        cancellationNote = "画面已替换；已重新读取实际保存结果。"
+                        invalidateCandidate()
+                    }
+                }
+            }
             // The store owns a separately verified persistent copy, not this temporary file.
             invalidateCandidate()
-            message("已保存为项目步骤")
+            message(if (correction == null) "已保存为项目步骤" else "画面已替换")
         }
     }
 
-    fun reload() = execute("读取已保存素材") {
-        invalidateCandidate()
-        val drafts = withContext(Dispatchers.IO) {
-            cleanInactiveSessions()
-            store.read()
+    fun reload() {
+        if (state.value.correction != null) return
+        execute("读取已保存素材") {
+            invalidateCandidate()
+            val drafts = withContext(Dispatchers.IO) {
+                cleanInactiveSessions()
+                store.read()
+            }
+            mutableState.update { it.copy(drafts = drafts, selectedId = drafts.lastOrNull()?.source?.sourceId,
+                frame = null, frameReviewId = null, loadFailed = false) }
         }
-        mutableState.update { it.copy(drafts = drafts, selectedId = drafts.lastOrNull()?.source?.sourceId,
-            frame = null, frameReviewId = null, loadFailed = false) }
     }
 
     fun importVideo(uri: Uri) {
+        if (state.value.correction != null) return
         if (!requireSavedEdits()) return
         if (state.value.loadFailed) return
         if (state.value.drafts.size >= 3) {
@@ -148,6 +257,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectSource(id: String) {
+        if (state.value.correction != null) return
         if (!requireSavedEdits()) return
         if (state.value.busy || savePickerPending || state.value.selectedId == id) return
         invalidateCandidate()
@@ -158,6 +268,14 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
     fun takeFrame(timeUs: Long) {
         if (!requireSavedEdits()) return
         val selected = state.value.selected ?: return
+        val correction = state.value.correction
+        if (correction != null) {
+            execute("解码步骤实际帧") {
+                verifyCorrection(correction)
+                decodeCorrection(correction, selected, timeUs)
+            }
+            return
+        }
         execute("解码实际帧") {
             invalidateCandidate()
             val decoded = decoder.decode(selected.source, timeUs)
@@ -171,6 +289,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
 
     /** Prepare one queue item through the same actual-frame/privacy pipeline as manual editing. */
     fun prepareCandidateImage(sourceId: String, timeUs: Long, reviewId: String) {
+        if (state.value.correction != null) return
         if (state.value.busy || savePickerPending || !requireSavedEdits() || state.value.loadFailed) return
         // Close the previous output and its frame BEFORE the first suspension. Cancellation
         // or a failed metadata read must never leave item A approvable as queue item B.
@@ -211,6 +330,13 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
     }
 
     private fun updateMasks(masks: List<OpaqueMask>) {
+        if (state.value.busy || savePickerPending) return
+        val correctionDraft = state.value.correctionDraft
+        if (state.value.correction != null && correctionDraft != null) {
+            invalidateCandidate()
+            mutableState.update { it.copy(correctionDraft = correctionDraft.copy(masks = masks.toList())) }
+            return
+        }
         val selectedId = state.value.selectedId ?: return
         execute("保存遮挡") {
             invalidateCandidate()
@@ -255,6 +381,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
     }
 
     fun makeVideo(startUs: Long, endUs: Long) {
+        if (state.value.correction != null) return
         if (!requireSavedEdits()) return
         val selected = state.value.selected ?: return
         execute("生成遮挡视频") {
@@ -375,6 +502,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
     private class SaveDocumentException(message: String, cause: Throwable) : Exception(message, cause)
 
     fun deleteSelected() {
+        if (state.value.correction != null) return
         if (!requireSavedEdits()) return
         val selected = state.value.selected ?: return
         execute("删除选定素材") {
@@ -432,6 +560,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
                     is com.tapscene.media.FrameDecodeException -> error.message
                     is com.tapscene.media.MediaExportException -> error.message
                     is SaveDocumentException -> error.message
+                    is StepCorrectionException -> error.message
                     else -> null
                 }
                 message(safe ?: "${state.value.stage ?: label}未完成。请检查文件和可用空间后重试")
@@ -440,7 +569,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
                 // Import's final registration is atomic even if cancellation arrives at that boundary.
                 try {
                     if (locked) withContext(NonCancellable + Dispatchers.IO) {
-                        runCatching { store.read() }.getOrNull()?.takeUnless { state.value.unsavedEdits }?.let { drafts ->
+                        runCatching { store.read() }.getOrNull()?.takeUnless { state.value.unsavedEdits || state.value.correction != null }?.let { drafts ->
                             mutableState.update { old ->
                                 val selectedId = old.selectedId?.takeIf { id -> drafts.any { it.source.sourceId == id } }
                                     ?: drafts.lastOrNull()?.source?.sourceId

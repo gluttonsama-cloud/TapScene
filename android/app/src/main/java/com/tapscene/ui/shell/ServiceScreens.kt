@@ -612,7 +612,7 @@ fun SettingsStorageScreen(
             ShellDivider()
             ShellActionRow("本机内容与设备丢失", value = if (showPrivacy) "收起" else "展开", onClick = { showPrivacy = !showPrivacy })
             if (showPrivacy) {
-                Text("原素材和草稿不随账号同步，也不进入系统云备份。卸载应用或设备丢失可能造成丢失。目前可单独保存实际复核后的 PNG 图片或短片；观看包与托管尚未接入。", style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
+                Text("原素材和草稿不随账号同步，也不进入系统云备份。卸载应用或设备丢失可能造成丢失。可保存已封存的离线观看包和 AI 数据包，也可单独保存复核后的 PNG 或短片。观看包不包含原片或可继续编辑的草稿；托管尚未接入。", style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
             }
         }
         DetailSection("关于 TapScene") {
