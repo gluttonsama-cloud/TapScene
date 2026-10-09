@@ -81,8 +81,10 @@ fun CandidateSelectionContent(
     candidateThumbnail: @Composable (FrameCandidate) -> Bitmap?,
 ) {
     var menu by remember { mutableStateOf(false) }
+    var showHelp by rememberSaveable { mutableStateOf(false) }
     var showDismissed by rememberSaveable(state.sourceId) { mutableStateOf(false) }
     val disabled = state.busy || state.loading || !sourceReady
+    val selectable = state.candidates.filter { it.usedStepId == null && it.decision != CandidateDecision.DISMISSED }
     val selected = state.candidates.filter { it.decision == CandidateDecision.KEPT && it.usedStepId == null }
     val visible = state.candidates.filter { showDismissed || it.decision != CandidateDecision.DISMISSED }
     val source = sources.firstOrNull { it.source.sourceId == state.sourceId }
@@ -102,7 +104,10 @@ fun CandidateSelectionContent(
             item("source") {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(source?.source?.displayName ?: "选择来源录屏", style = MaterialTheme.typography.titleMedium)
-                    Text("私有原片画面 · 按变化提出建议，不代表已记录点击", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("画面分析 · 原片私有", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                        TextButton(onClick = { showHelp = true }) { Text("说明") }
+                    }
                     if (state.busy) {
                         if (state.totalSamples > 0) LinearProgressIndicator(
                             progress = { (state.completedSamples.toFloat() / state.totalSamples).coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
@@ -129,8 +134,6 @@ fun CandidateSelectionContent(
                             }
                         }
                     }
-                    if (state.status == CandidateAnalysisStatus.COMPLETED) Text("短暂变化可能遗漏；可在校正时调帧，或从素材手动补充。",
-                        style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                 }
             }
             if (sources.isEmpty()) item("no_source") {
@@ -175,16 +178,19 @@ fun CandidateSelectionContent(
         ShellDivider()
         Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = {
-                val eligible = state.candidates.filter { it.usedStepId == null && it.decision != CandidateDecision.DISMISSED }
+                val eligible = selectable
                 val allSelected = eligible.isNotEmpty() && eligible.all { it.decision == CandidateDecision.KEPT }
                 callbacks.onSetDecisions(eligible.map { it.id }, if (allSelected) CandidateDecision.SUGGESTED else CandidateDecision.KEPT)
-            }, enabled = !disabled && state.candidates.any { it.usedStepId == null }) { Text(if (selected.isNotEmpty()) "选择" else "全选") }
+            }, enabled = !disabled && state.candidates.any { it.usedStepId == null }) { Text(if (selectable.isNotEmpty() && selectable.all { it.decision == CandidateDecision.KEPT }) "清空" else "全选") }
             Button(onClick = { callbacks.onReview(selected.map { it.id }) }, enabled = !disabled && selected.isNotEmpty() && selected.size <= remainingSteps,
                 shape = RoundedCornerShape(8.dp), modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
                 Text(if (selected.size > remainingSteps) "最多再加入 $remainingSteps 帧" else "校正所选 ${selected.size} 帧")
             }
         }
     }
+    if (showHelp) AlertDialog(onDismissRequest = { showHelp = false }, title = { Text("画面分析建议") },
+        text = { Text("建议来自录屏画面变化，可能漏掉短暂或细微变化；可在校正页调帧，也可手动补充。\n\n这里没有记录原始点击、识别文字或自动确定热点。选择后仍需检查实际输出，再加入步骤。") },
+        confirmButton = { TextButton(onClick = { showHelp = false }) { Text("知道了") } })
 }
 
 @Composable

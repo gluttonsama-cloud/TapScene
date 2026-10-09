@@ -226,9 +226,9 @@ fun RecordingCaptureContent(
                             shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("整理候选步骤") }
                     }
                     if (recording.canRetry) {
-                        OutlinedButton(onClick = callbacks.onRetry,
+                        Button(onClick = callbacks.onRetry,
                             shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("继续检查已录内容") }
-                        TextButton(onClick = { showDiscard = true }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                        TextButton(onClick = { showDiscard = true }, colors = ButtonDefaults.textButtonColors(contentColor = ShellColors.Muted), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                             Text("删除未完成录制")
                         }
                         Text("请先继续检查或删除未完成录制，再开始新录制。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)

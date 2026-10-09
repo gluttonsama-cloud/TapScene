@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -44,6 +45,7 @@ fun DraftPreviewContent(
     onRestart: () -> Unit,
     onExit: () -> Unit,
     modifier: Modifier = Modifier,
+    onNextAction: () -> Unit = {},
 ) {
     val hasBitmap = bitmap != null && !bitmap.isRecycled
     val step = project.steps.firstOrNull { it.id == preview.currentStepId }
@@ -90,10 +92,20 @@ fun DraftPreviewContent(
                             Text(it, style = MaterialTheme.typography.bodyMedium)
                         }
                     }
-                    step.hotspots.isEmpty() -> Text("这一步还没有动作。退出预览后可继续编辑。", style = MaterialTheme.typography.bodyMedium,
+                    step.hotspots.isEmpty() && step.nextAction == null -> Text("这一步还没有动作。退出预览后可继续编辑。", style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     else -> {
-                        Text(if (preview.matchingHotspotIds.size > 1) "重叠区域：请选择一个动作" else "选择动作",
+                        step.nextAction?.let { action ->
+                            val validTarget = project.steps.any { it.id == action.targetStepId }
+                            Button(onClick = onNextAction, enabled = !busy && hasBitmap && validTarget && !step.isTerminal,
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                                Text(action.label)
+                            }
+                            if (!validTarget) Text("下一步目标缺失，请退出预览后修复。", style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error)
+                        }
+                        if (step.hotspots.isNotEmpty()) Text(
+                            if (preview.matchingHotspotIds.size > 1) "重叠区域：请选择一个动作" else "选择热点动作",
                             style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         step.hotspots.forEachIndexed { index, hotspot ->
                             val validTarget = hotspot.endLabel != null || project.steps.any { it.id == hotspot.targetStepId }

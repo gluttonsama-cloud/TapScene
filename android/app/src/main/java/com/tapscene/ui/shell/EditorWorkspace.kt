@@ -53,6 +53,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.tapscene.data.ProjectHotspot
 import com.tapscene.data.ProjectLimits
+import com.tapscene.data.ProjectNextAction
 import com.tapscene.data.ProjectSnapshot
 import com.tapscene.data.ProjectStep
 import com.tapscene.media.OpaqueMask
@@ -76,6 +77,8 @@ data class EditorCallbacks(
     val onDiscard: () -> Unit,
     val onPreview: () -> Unit,
     val onOpenTransition: (String) -> Unit,
+    val onPutNextAction: (ProjectNextAction) -> Unit = {},
+    val onRemoveNextAction: () -> Unit = {},
 )
 
 @Composable
@@ -93,6 +96,8 @@ fun EditorWorkspaceContent(
     var selectedId by rememberSaveable(draft.stepId) { mutableStateOf<String?>(null) }
     var showName by rememberSaveable(draft.stepId) { mutableStateOf(false) }
     var editingHotspot by remember(draft.stepId) { mutableStateOf<ProjectHotspot?>(null) }
+    var editingNextAction by remember(draft.stepId) { mutableStateOf<ProjectNextAction?>(null) }
+    var terminalConflict by rememberSaveable(draft.stepId) { mutableStateOf(false) }
     var showDiscard by rememberSaveable(draft.stepId) { mutableStateOf(false) }
     val step = project.steps.firstOrNull { it.id == draft.stepId }
     val selected = draft.hotspots.firstOrNull { it.id == selectedId }
@@ -107,7 +112,7 @@ fun EditorWorkspaceContent(
             }
         }
     }
-    BackHandler(enabled = !showName && editingHotspot == null && !showDiscard) { goBack() }
+    BackHandler(enabled = !showName && editingHotspot == null && editingNextAction == null && !showDiscard) { goBack() }
     val openNew: (OpaqueMask) -> Unit = { rect ->
         if (canAdd) {
             editingHotspot = ProjectHotspot(UUID.randomUUID().toString(), "", rect, null, "演示结束", UUID.randomUUID().toString())
@@ -151,10 +156,16 @@ fun EditorWorkspaceContent(
                             TextButton(onClick = {}, enabled = false) { Text("替换画面 · 待接入") }
                         }
                         Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(checked = draft.isTerminal, onCheckedChange = callbacks.onTerminalChange,
-                                enabled = !busy)
+                            Checkbox(checked = draft.isTerminal, onCheckedChange = { terminal ->
+                                if (terminal && (draft.hotspots.isNotEmpty() || draft.nextAction != null)) terminalConflict = true
+                                else { terminalConflict = false; callbacks.onTerminalChange(terminal) }
+                            }, enabled = !busy)
                             Text("在这一步结束", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
                             TextButton(onClick = callbacks.onPreview, enabled = !busy && previewEnabled && hasBitmap) { Text("预览") }
+                        }
+                        if (terminalConflict && (draft.hotspots.isNotEmpty() || draft.nextAction != null)) {
+                            Text("先移除本步动作，再设为终点。", style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error)
                         }
                         if (!previewEnabled) Text("保存所有步骤的修改后可预览。", style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -191,9 +202,39 @@ fun EditorWorkspaceContent(
                         }
                     }
                     EditorMode.BRANCHES -> {
-                        Text("本步的出口", style = MaterialTheme.typography.titleSmall)
-                        if (draft.hotspots.isEmpty()) Text(if (draft.isTerminal) "此处结束，没有后续分支。" else "还没有出口。先添加一个热点动作。",
-                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text("本步的出口", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                            if (draft.nextAction == null) TextButton(onClick = {
+                                editingNextAction = ProjectNextAction(UUID.randomUUID().toString(), "下一步", null)
+                            }, enabled = !busy && !draft.isTerminal) { Text("+ 下一步按钮") }
+                        }
+                        if (draft.isTerminal) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text("当前是终点。", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            TextButton(onClick = { callbacks.onTerminalChange(false) }, enabled = !busy) { Text("取消终点") }
+                        }
+                        draft.nextAction?.let { action ->
+                            val validTarget = project.steps.any { it.id == action.targetStepId }
+                            Row(Modifier.fillMaxWidth().heightIn(min = 56.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f).clickable(enabled = !busy && !draft.isTerminal, role = Role.Button,
+                                    onClickLabel = "编辑下一步按钮") { editingNextAction = action }.padding(vertical = 4.dp)) {
+                                    Text(action.label, style = MaterialTheme.typography.bodyMedium)
+                                    Text("画布外按钮 · 作者编排", style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("→ ${editorNextTargetLabel(action, project.steps)}", style = MaterialTheme.typography.bodySmall,
+                                        color = if (validTarget) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
+                                }
+                                TextButton(onClick = { editingNextAction = action }, enabled = !busy && !draft.isTerminal) {
+                                    Text(if (validTarget) "编辑" else "选目标")
+                                }
+                                TextButton(onClick = callbacks.onRemoveNextAction, enabled = !busy) { Text("移除") }
+                            }
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        }
+                        if (draft.hotspots.isEmpty() && draft.nextAction == null && !draft.isTerminal) {
+                            Text("添加下一步按钮，或在画面上画热点。", style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                         draft.hotspots.forEachIndexed { index, hotspot ->
                             Row(Modifier.fillMaxWidth().heightIn(min = 56.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Column(Modifier.weight(1f).clickable(enabled = !busy) { editingHotspot = hotspot }.padding(vertical = 4.dp)) {
@@ -206,8 +247,6 @@ fun EditorWorkspaceContent(
                             }
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         }
-                        Text("现有分支为静态切换。录制过渡尚未接入。", style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     EditorMode.REDACTIONS -> {
                         Text("固定遮挡", style = MaterialTheme.typography.titleSmall)
@@ -257,6 +296,12 @@ fun EditorWorkspaceContent(
         HotspotEditorSheet(hotspot, project.steps, !busy, onDismiss = { editingHotspot = null }, onConfirm = {
             callbacks.onPutHotspot(it); selectedId = it.id; editingHotspot = null
         })
+    }
+    editingNextAction?.let { action ->
+        NextActionEditorSheet(action, project.steps, !busy && !draft.isTerminal,
+            onDismiss = { editingNextAction = null }, onConfirm = {
+                callbacks.onPutNextAction(it); editingNextAction = null
+            })
     }
     if (showDiscard) AlertDialog(onDismissRequest = { showDiscard = false }, title = { Text("放弃本步修改？") },
         text = { Text("这一步将恢复到最近一次保存的内容。") },
@@ -391,6 +436,39 @@ private fun HotspotEditorSheet(hotspot: ProjectHotspot, steps: List<ProjectStep>
     }
 }
 
+/** This action has no rectangle and remains separate from the canvas hotspot editor. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NextActionEditorSheet(action: ProjectNextAction, steps: List<ProjectStep>, enabled: Boolean,
+    onDismiss: () -> Unit, onConfirm: (ProjectNextAction) -> Unit) {
+    var label by rememberSaveable(action.id) { mutableStateOf(action.label) }
+    var targetId by rememberSaveable(action.id) { mutableStateOf(action.targetStepId) }
+    val validTarget = steps.any { it.id == targetId }
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("下一步按钮", style = MaterialTheme.typography.titleMedium)
+            Text("画布外按钮 · 作者编排", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            OutlinedTextField(label, { label = it }, label = { Text("按钮文字") }, singleLine = true,
+                enabled = enabled, modifier = Modifier.fillMaxWidth())
+            Text("点击后前往", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 8.dp))
+            if (!validTarget) Text(if (action.targetStepId == null) "请选择目标步骤。" else "原目标已失效，请重新选择。",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            steps.forEachIndexed { index, step ->
+                EditorTargetRow("${index + 1}  ${step.title}", step.source.displayName, targetId == step.id, enabled) {
+                    targetId = step.id
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = onDismiss) { Text("取消") }
+                Button(onClick = { onConfirm(action.copy(label = label.trim(), targetStepId = targetId)) },
+                    enabled = enabled && label.isNotBlank() && validTarget) { Text("应用动作") }
+            }
+        }
+    }
+}
+
 @Composable
 private fun EditorPercentageField(label: String, value: String, onValue: (String) -> Unit, enabled: Boolean, modifier: Modifier) {
     OutlinedTextField(value, onValue, label = { Text(label) }, enabled = enabled, singleLine = true,
@@ -459,6 +537,11 @@ fun TransitionWorkspaceContent(project: ProjectSnapshot, stepId: String, hotspot
 internal fun editorTargetLabel(hotspot: ProjectHotspot, steps: List<ProjectStep>): String =
     hotspot.endLabel?.let { "结束 · $it" } ?: steps.indexOfFirst { it.id == hotspot.targetStepId }.let { index ->
         if (index >= 0) "${index + 1} ${steps[index].title}" else "目标已失效"
+    }
+
+internal fun editorNextTargetLabel(action: ProjectNextAction, steps: List<ProjectStep>): String =
+    steps.indexOfFirst { it.id == action.targetStepId }.let { index ->
+        if (index >= 0) "${index + 1} ${steps[index].title}" else "待修复 · 请选择目标"
     }
 
 private fun editorPercent(value: Float): String = String.format(Locale.ROOT, "%.2f", value * 100f).trimEnd('0').trimEnd('.')

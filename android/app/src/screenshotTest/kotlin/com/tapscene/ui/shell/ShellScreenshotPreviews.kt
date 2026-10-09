@@ -15,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.android.tools.screenshot.PreviewTest
+import com.tapscene.ui.PreviewState
 import com.tapscene.ui.ProjectIssue
 import com.tapscene.ui.ProjectRoute
 import com.tapscene.ui.ProjectUiState
@@ -123,6 +124,28 @@ fun CandidateSelectionSamplePreview() {
                 images[ShellPreviewFixture.candidateState.candidates.indexOfFirst { it.id == candidate.id }]
             },
         )
+    }
+}
+
+@PreviewTest
+@Preview(name = "07_authored_path_sample", widthDp = 412, heightDp = 915, locale = "zh-rCN", showBackground = true)
+@Composable
+fun AuthoredPathSamplePreview() {
+    ReviewSurface(sample = true) {
+        AuthoredPathScreen(ShellPreviewFixture.authoredProject, null, false, {}, { _, _, _ -> }, {})
+    }
+}
+
+@PreviewTest
+@Preview(name = "08_authored_preview_sample", widthDp = 412, heightDp = 915, locale = "zh-rCN", showBackground = true)
+@Composable
+fun AuthoredTraversalSamplePreview() {
+    val bitmap = remember { ShellPreviewFixture.bitmap(0) }
+    val project = ShellPreviewFixture.authoredProject
+    ReviewSurface(sample = true) {
+        DraftPreviewContent(project,
+            PreviewState(project.project.id, project.project.revision, project.steps.first().id, listOf(project.steps.first().id)),
+            bitmap, false, {}, { _, _ -> }, {}, {}, {}, onNextAction = {})
     }
 }
 

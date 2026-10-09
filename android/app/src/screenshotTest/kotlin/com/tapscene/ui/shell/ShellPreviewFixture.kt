@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
+import com.tapscene.data.ProjectNextAction
 import com.tapscene.data.ProjectHotspot
 import com.tapscene.data.ProjectSnapshot
 import com.tapscene.data.ProjectStep
@@ -72,6 +73,11 @@ internal object ShellPreviewFixture {
             )
         },
     )
+
+    val authoredProject = project.copy(steps = project.steps.mapIndexed { index, step ->
+        step.copy(nextAction = if (index < project.steps.lastIndex) ProjectNextAction(
+            "layout-next-${index + 1}", "下一步", project.steps[index + 1].id) else null)
+    })
 
     val selectedStep = project.steps[1]
     val draft = StepEditDraft(
