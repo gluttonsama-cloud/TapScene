@@ -2,6 +2,7 @@ package com.tapscene.ui
 
 import android.graphics.Bitmap
 import android.widget.VideoView
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
@@ -63,6 +64,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.tapscene.data.ReviewedStepInput
 import com.tapscene.media.OpaqueMask
 import com.tapscene.media.SafeMediaWriter
 import java.util.Locale
@@ -71,12 +73,20 @@ import kotlin.math.max
 import kotlin.math.min
 
 @Composable
-fun MediaScreen(workspace: MediaWorkspace) {
+fun MediaScreen(
+    workspace: MediaWorkspace,
+    onBack: (() -> Unit)? = null,
+    onReviewedImage: (suspend (ReviewedStepInput) -> Unit)? = null,
+) {
     val state by workspace.state.collectAsStateWithLifecycle()
     var pendingDigest by rememberSaveable { mutableStateOf("") }
     var savePending by rememberSaveable { mutableStateOf(false) }
     var deleteDialog by remember { mutableStateOf(false) }
     var maskDialog by remember { mutableStateOf(false) }
+    val canLeave = !state.busy && !savePending && !state.unsavedEdits
+    BackHandler(enabled = onBack != null) {
+        if (canLeave) onBack?.invoke() else workspace.message("请等待处理完成，或先取消处理并保存修改")
+    }
     val import = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) workspace.importVideo(uri)
     }
@@ -94,7 +104,8 @@ fun MediaScreen(workspace: MediaWorkspace) {
                 modifier = Modifier.fillMaxSize().padding(insets).verticalScroll(rememberScrollState()).padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                Text("TapScene", style = MaterialTheme.typography.headlineMedium)
+                if (onBack != null) TextButton(onClick = onBack, enabled = canLeave) { Text("返回项目") }
+                else Text("TapScene", style = MaterialTheme.typography.headlineMedium)
                 Text("素材与遮挡", style = MaterialTheme.typography.titleLarge)
                 Text("H.264 / H.265 录屏，单段不超过 3 分钟、200 MiB。按本机能力解码，原片只保存在本机。",
                     style = MaterialTheme.typography.bodyMedium)
@@ -191,6 +202,11 @@ fun MediaScreen(workspace: MediaWorkspace) {
                             enabled = !state.busy && !savePending && (candidate.mimeType == "image/png" || state.watchedDigest == candidate.sha256))
                         Text("我已检查实际输出，确认遮挡完整", modifier = Modifier.weight(1f))
                     }
+                    if (candidate.mimeType == "image/png" && onReviewedImage != null) {
+                        Button(onClick = { workspace.saveReviewedImage(onReviewedImage) },
+                            enabled = !state.busy && !savePending && state.reviewedDigest == candidate.sha256,
+                            modifier = Modifier.fillMaxWidth()) { Text("保存为步骤") }
+                    }
                     Button(onClick = {
                         if (!savePending && workspace.beginSave(candidate.sha256)) {
                             pendingDigest = candidate.sha256
@@ -207,7 +223,7 @@ fun MediaScreen(workspace: MediaWorkspace) {
                     }, enabled = !state.busy && !savePending && state.reviewedDigest == candidate.sha256, modifier = Modifier.fillMaxWidth()) {
                         Text("保存到文件")
                     }
-                    Text("保存的是本次图片或短视频。演示图与离线观看包尚未接入。", style = MaterialTheme.typography.bodySmall)
+                    Text("保存到文件仅导出本次图片或短视频。离线观看包尚未接入。", style = MaterialTheme.typography.bodySmall)
                 }
                 Spacer(Modifier.height(12.dp))
             }
