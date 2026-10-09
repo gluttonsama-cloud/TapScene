@@ -2,20 +2,19 @@ package com.tapscene.ui.shell
 
 import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.text.KeyboardOptions
@@ -43,6 +42,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -116,22 +120,18 @@ fun EditorWorkspaceContent(
         Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
             Row(Modifier.fillMaxWidth().heightIn(min = 60.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = goBack, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("返回") }
-                Column(Modifier.weight(1f).clickable(enabled = !busy) { showName = true }.padding(vertical = 8.dp)) {
+                Column(Modifier.weight(1f).clickable(enabled = !busy, role = Role.Button,
+                    onClickLabel = "编辑步骤名称与讲解") { showName = true }.padding(vertical = 8.dp)) {
                     Text(draft.title.ifBlank { "未命名步骤" }, style = MaterialTheme.typography.titleMedium,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text("步骤 ${project.steps.indexOfFirst { it.id == draft.stepId } + 1} · 点名称编辑",
-                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    val saveStatus = if (busy) "处理中" else if (draft.dirty) "未保存" else "已保存"
+                    Text("步骤 ${project.steps.indexOfFirst { it.id == draft.stepId } + 1} · $saveStatus",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (draft.dirty) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 TextButton(onClick = callbacks.onSave, enabled = !busy && draft.dirty, modifier = Modifier.heightIn(min = 48.dp)) { Text("保存") }
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(if (busy) "处理中" else if (draft.dirty) "有未保存修改" else "已保存",
-                    Modifier.weight(1f), style = MaterialTheme.typography.labelMedium,
-                    color = if (draft.dirty) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(if (adding) "拖出新的点击区域" else mode.label,
-                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
             EditorCanvas(bitmap = bitmap,
                 hotspots = if (mode == EditorMode.HOTSPOTS || mode == EditorMode.BRANCHES) draft.hotspots else emptyList(),
                 modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
@@ -145,24 +145,18 @@ fun EditorWorkspaceContent(
                 when (mode) {
                     EditorMode.FRAME -> {
                         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                            Column(Modifier.weight(1f)) {
-                                Text("已复核画面", style = MaterialTheme.typography.titleSmall)
-                                Text(step?.asset?.let { "${it.width} × ${it.height}" } ?: "图片信息不可用",
-                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            TextButton(onClick = {}, enabled = false) { Text("替换画面") }
+                            Text(step?.asset?.let { "${it.width} × ${it.height}" } ?: "图片信息不可用",
+                                Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            TextButton(onClick = {}, enabled = false) { Text("替换画面 · 待接入") }
                         }
-                        Text("代表帧替换尚未接入。当前画面和来源保持原样。", style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
                             Checkbox(checked = draft.isTerminal, onCheckedChange = callbacks.onTerminalChange,
-                                enabled = !busy && (draft.isTerminal || draft.hotspots.isEmpty()))
+                                enabled = !busy)
                             Text("在这一步结束", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
                             TextButton(onClick = callbacks.onPreview, enabled = !busy && previewEnabled && hasBitmap) { Text("预览") }
                         }
                         if (!previewEnabled) Text("保存所有步骤的修改后可预览。", style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        if (draft.hotspots.isNotEmpty()) Text("设为终点前，请先移除本步热点。", style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                         if (draft.dirty) TextButton(onClick = { showDiscard = true }, enabled = !busy) { Text("放弃本步修改") }
                     }
@@ -244,13 +238,12 @@ fun EditorWorkspaceContent(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Row(Modifier.fillMaxWidth()) {
                 EditorMode.entries.forEach { item ->
+                    val tint = if (mode == item) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                     Column(Modifier.weight(1f).heightIn(min = 56.dp).selectable(selected = mode == item, enabled = !busy, role = Role.Tab,
-                        onClick = { mode = item; adding = false; selectedId = null }).padding(top = 8.dp, bottom = 10.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Box(Modifier.width(20.dp).height(2.dp).background(
-                            if (mode == item) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.background))
-                        Text(item.label, style = MaterialTheme.typography.labelLarge,
-                            color = if (mode == item) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                        onClick = { mode = item; adding = false; selectedId = null }).padding(vertical = 8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        EditorModeIcon(item, tint)
+                        Text(item.label, style = MaterialTheme.typography.labelLarge, color = tint)
                     }
                 }
             }
@@ -269,6 +262,52 @@ fun EditorWorkspaceContent(
         text = { Text("这一步将恢复到最近一次保存的内容。") },
         confirmButton = { TextButton(onClick = { callbacks.onDiscard(); showDiscard = false }, enabled = !busy) { Text("放弃修改") } },
         dismissButton = { TextButton(onClick = { showDiscard = false }) { Text("继续编辑") } })
+}
+
+/** Decorative geometry only; the enclosing tab exposes its visible label and selected state. */
+@Composable
+private fun EditorModeIcon(mode: EditorMode, tint: Color) {
+    Canvas(Modifier.size(20.dp)) {
+        val stroke = 1.6.dp.toPx()
+        fun point(x: Float, y: Float) = Offset(size.width * x / 24f, size.height * y / 24f)
+        fun line(x1: Float, y1: Float, x2: Float, y2: Float) =
+            drawLine(tint, point(x1, y1), point(x2, y2), stroke, StrokeCap.Round)
+        when (mode) {
+            EditorMode.FRAME -> {
+                drawRect(tint, point(3f, 4f), Size(size.width * .75f, size.height * 2f / 3f), style = Stroke(stroke))
+                drawCircle(tint, size.width / 12f, point(8f, 9f))
+                line(5f, 17f, 10f, 12f)
+                line(10f, 12f, 14f, 16f)
+                line(14f, 16f, 18f, 11f)
+            }
+            EditorMode.HOTSPOTS -> {
+                drawRect(tint, point(5f, 5f), Size(size.width * 14f / 24f, size.height * 14f / 24f), style = Stroke(stroke))
+                listOf(point(5f, 5f), point(19f, 19f)).forEach { corner ->
+                    drawRect(tint, corner - Offset(stroke, stroke), Size(stroke * 2f, stroke * 2f))
+                }
+            }
+            EditorMode.BRANCHES -> {
+                line(5f, 12f, 10f, 12f)
+                line(10f, 5f, 10f, 19f)
+                line(10f, 5f, 19f, 5f)
+                line(10f, 19f, 19f, 19f)
+                listOf(point(4f, 12f), point(20f, 5f), point(20f, 19f)).forEach {
+                    drawCircle(tint, size.width * 2f / 24f, it)
+                }
+            }
+            EditorMode.REDACTIONS -> {
+                drawRect(tint, point(3f, 4f), Size(size.width * .75f, size.height * 2f / 3f), style = Stroke(stroke))
+                drawRect(tint, point(3f, 9f), Size(size.width * .75f, size.height / 4f))
+            }
+            EditorMode.REGIONS -> {
+                line(3f, 8f, 3f, 3f); line(3f, 3f, 8f, 3f)
+                line(16f, 3f, 21f, 3f); line(21f, 3f, 21f, 8f)
+                line(3f, 16f, 3f, 21f); line(3f, 21f, 8f, 21f)
+                line(16f, 21f, 21f, 21f); line(21f, 21f, 21f, 16f)
+                drawRect(tint, point(8f, 8f), Size(size.width / 3f, size.height / 3f), style = Stroke(stroke))
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

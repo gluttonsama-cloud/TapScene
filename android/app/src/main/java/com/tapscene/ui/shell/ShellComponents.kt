@@ -3,6 +3,7 @@ package com.tapscene.ui.shell
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -92,7 +93,7 @@ fun ScreenEmpty(title: String, body: String, actionLabel: String? = null, onActi
         Text(title, style = MaterialTheme.typography.titleLarge)
         Text(body, style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
         if (actionLabel != null) {
-            Button(onClick = { onAction?.invoke() }, enabled = onAction != null, modifier = Modifier.heightIn(min = 48.dp)) {
+            Button(shape = RoundedCornerShape(8.dp), onClick = { onAction?.invoke() }, enabled = onAction != null, modifier = Modifier.heightIn(min = 48.dp)) {
                 Text(actionLabel)
             }
         }
@@ -118,7 +119,7 @@ private fun EmptyFrames() {
 @Composable
 fun UnavailableAction(label: String, reason: String) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-        Button(onClick = {}, enabled = false, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(label) }
+        Button(shape = RoundedCornerShape(8.dp), onClick = {}, enabled = false, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(label) }
         Text(reason, style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
     }
 }

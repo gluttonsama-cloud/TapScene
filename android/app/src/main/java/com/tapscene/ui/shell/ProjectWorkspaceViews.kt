@@ -38,6 +38,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.asImageBitmap
@@ -82,22 +83,24 @@ fun ProjectHomeContent(
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        item(key = "search") {
-            OutlinedTextField(
-                value = query,
-                onValueChange = { query = it },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                label = { Text("搜索项目") },
-                placeholder = { Text("名称或演示目标") },
-                shape = RoundedCornerShape(4.dp),
-                trailingIcon = if (query.isNotEmpty()) {
-                    { TextButton(onClick = { query = "" }, modifier = Modifier.heightIn(min = 48.dp)) { Text("清除") } }
-                } else null,
-            )
-        }
-        item(key = "summary") {
-            WorkspaceSectionTitle("本机项目", "${state.projects.size} 个")
+        if (state.projects.isNotEmpty()) {
+            item(key = "search") {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("搜索项目") },
+                    placeholder = { Text("名称或演示目标") },
+                    shape = RoundedCornerShape(4.dp),
+                    trailingIcon = if (query.isNotEmpty()) {
+                        { TextButton(onClick = { query = "" }, modifier = Modifier.heightIn(min = 48.dp)) { Text("清除") } }
+                    } else null,
+                )
+            }
+            item(key = "summary") {
+                WorkspaceSectionTitle("本机项目", "${state.projects.size} 个")
+            }
         }
         if (state.loadFailed && state.projects.isEmpty()) {
             item(key = "unreadable") {
@@ -107,7 +110,7 @@ fun ProjectHomeContent(
             item(key = "loading") { WorkspaceEmpty("正在读取本机项目", "读取完成后，项目会显示在这里。") }
         } else if (state.projects.isEmpty()) {
             item(key = "empty") {
-                WorkspaceEmpty("从一段操作开始", "创建项目后，可准备录制操作或导入已有录屏。步骤与分支会保存在本机。")
+                WorkspaceEmpty("从一段操作开始", "录制尚未接入，可先导入录屏。")
             }
         } else if (visibleProjects.isEmpty()) {
             item(key = "no_matches") { WorkspaceEmpty("没有找到匹配项目", "换个关键词，或清除搜索查看全部项目。") }
@@ -213,7 +216,8 @@ fun StoryboardContent(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    Button(onClick = onAddSource, enabled = editable, modifier = Modifier.heightIn(min = 48.dp)) {
+                    Button(onClick = onAddSource, enabled = editable, shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.heightIn(min = 48.dp)) {
                         Text("添加内容")
                     }
                 }
@@ -221,8 +225,6 @@ fun StoryboardContent(
                     Text(snapshot.project.goal, style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                Text("点画面编辑步骤；出口右侧显示实际跳转目标。",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (state.dirtyStepIds.isNotEmpty()) {
                     Text("${state.dirtyStepIds.size} 个步骤有未保存修改，列表显示已保存内容。",
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
@@ -244,12 +246,6 @@ fun StoryboardContent(
                 stepThumbnail = stepThumbnail,
             )
         }
-        if (snapshot.steps.isNotEmpty()) {
-            item(key = "reorder_note") {
-                Text("排序只改变分镜顺序，保留现有跳转。更多菜单可上移、下移或设为起点。",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
     }
 }
 
@@ -270,7 +266,18 @@ private fun StoryboardStepRow(
     var allExitsVisible by rememberSaveable(step.id) { mutableStateOf(false) }
     val isStart = snapshot.project.startStepId == step.id
     val ordinal = (index + 1).toString().padStart(2, '0')
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    val railColor = MaterialTheme.colorScheme.outlineVariant
+    val outletColor = MaterialTheme.colorScheme.primary
+    Column(
+        modifier = Modifier.drawBehind {
+            val x = 12.dp.toPx()
+            if (index > 0) drawLine(railColor, Offset(x, 0f), Offset(x, 6.dp.toPx()), 1.dp.toPx())
+            if (index < snapshot.steps.lastIndex) {
+                drawLine(railColor, Offset(x, 32.dp.toPx()), Offset(x, size.height + 16.dp.toPx()), 1.dp.toPx())
+            }
+        },
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
         Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(ordinal, modifier = Modifier.width(24.dp).padding(top = 8.dp),
                 style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -286,7 +293,7 @@ private fun StoryboardStepRow(
                     },
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                DerivedStepThumbnail(step.asset, stepThumbnail, Modifier.size(width = 72.dp, height = 104.dp))
+                DerivedStepThumbnail(step.asset, stepThumbnail, Modifier.size(width = 92.dp, height = 136.dp))
                 Column(Modifier.weight(1f).padding(top = 4.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(step.title, style = MaterialTheme.typography.titleMedium,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -300,10 +307,10 @@ private fun StoryboardStepRow(
                     if (step.description.isNotBlank()) Text(step.description,
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Text(if (step.hotspots.isEmpty()) {
-                        if (step.isTerminal) "到此结束" else "尚无出口"
-                    } else "${step.hotspots.size} 个出口",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (step.hotspots.isEmpty() && !step.isTerminal) {
+                        Text("尚无出口", style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             }
             Box {
@@ -333,19 +340,20 @@ private fun StoryboardStepRow(
                     }
                     Row(
                         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
-                            .background(MaterialTheme.colorScheme.surfaceContainerLow, RoundedCornerShape(2.dp))
+                            .drawBehind {
+                                drawLine(outletColor, Offset(0f, 10.dp.toPx()),
+                                    Offset(0f, size.height - 10.dp.toPx()), 1.5.dp.toPx())
+                            }
                             .then(if (target != null) Modifier.clickable(enabled = enabled, role = Role.Button,
                                 onClickLabel = "编辑目标步骤 ${target.title}") { onOpenStep(target.id) } else Modifier)
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                            .padding(start = 12.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Text(hotspot.label, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
                             maxLines = 2, overflow = TextOverflow.Ellipsis)
                         Text("→", style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        if (target != null) DerivedStepThumbnail(target.asset, stepThumbnail,
-                            Modifier.size(width = 24.dp, height = 34.dp))
+                            color = MaterialTheme.colorScheme.primary)
                         Text(targetLabel, Modifier.weight(1.1f), style = MaterialTheme.typography.bodyMedium,
                             maxLines = 2, overflow = TextOverflow.Ellipsis,
                             color = if (target == null && hotspot.endLabel == null) MaterialTheme.colorScheme.error
@@ -359,7 +367,7 @@ private fun StoryboardStepRow(
                 }
             }
         }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        HorizontalDivider(Modifier.padding(start = 32.dp), color = MaterialTheme.colorScheme.outlineVariant)
     }
 }
 

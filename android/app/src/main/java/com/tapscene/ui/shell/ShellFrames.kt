@@ -2,7 +2,12 @@ package com.tapscene.ui.shell
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
@@ -11,7 +16,6 @@ enum class ProjectTab(val label: String) { STEPS("步骤"), SOURCES("素材"), C
 /** Shared production chrome, also used by the host-side layout previews. */
 @Composable
 fun ProjectHomeFrame(
-    onNewProject: () -> Unit,
     onRecord: () -> Unit,
     onImportVideo: () -> Unit,
     onSettings: () -> Unit,
@@ -20,12 +24,11 @@ fun ProjectHomeFrame(
 ) {
     Column(Modifier.fillMaxSize()) {
         ShellTopBar("TapScene") {
-            TextButton(onClick = onNewProject) { Text("新建") }
             TextButton(onClick = onSettings) { Text("设置") }
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button(onClick = onRecord, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("开始录制") }
-            OutlinedButton(onClick = onImportVideo, modifier = Modifier.heightIn(min = 48.dp)) { Text("导入录屏") }
+            Button(onClick = onRecord, shape = RoundedCornerShape(8.dp), modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("开始录制") }
+            OutlinedButton(onClick = onImportVideo, shape = RoundedCornerShape(8.dp), modifier = Modifier.heightIn(min = 48.dp)) { Text("导入录屏") }
         }
         Box(Modifier.weight(1f)) { content() }
         GlobalNavigation(false, {}, onLibrary)
@@ -37,10 +40,10 @@ fun GlobalNavigation(library: Boolean, onProjects: () -> Unit, onLibrary: () -> 
     ShellDivider()
     // Text destinations remain explicit instead of introducing unfamiliar icon-only navigation.
     Row(Modifier.fillMaxWidth().heightIn(min = 56.dp)) {
-        TextButton(onClick = onProjects, modifier = Modifier.weight(1f).heightIn(min = 56.dp)) {
+        TextButton(onClick = onProjects, modifier = Modifier.weight(1f).heightIn(min = 56.dp).semantics { selected = !library; role = Role.Tab }) {
             Text("项目", color = if (!library) ShellColors.Accent else ShellColors.Muted)
         }
-        TextButton(onClick = onLibrary, modifier = Modifier.weight(1f).heightIn(min = 56.dp)) {
+        TextButton(onClick = onLibrary, modifier = Modifier.weight(1f).heightIn(min = 56.dp).semantics { selected = library; role = Role.Tab }) {
             Text("演示库", color = if (library) ShellColors.Accent else ShellColors.Muted)
         }
     }
@@ -64,7 +67,7 @@ fun ProjectWorkspaceFrame(
         Row(Modifier.fillMaxWidth()) {
             ProjectTab.entries.forEach { tab ->
                 Column(Modifier.weight(1f)) {
-                    TextButton(onClick = { onTab(tab) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                    TextButton(onClick = { onTab(tab) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).semantics { selected = tab == selectedTab; role = Role.Tab }) {
                         Text(tab.label, color = if (tab == selectedTab) ShellColors.Accent else ShellColors.Muted)
                     }
                     if (tab == selectedTab) HorizontalDivider(thickness = 2.dp, color = ShellColors.Accent) else ShellDivider()

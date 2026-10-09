@@ -185,7 +185,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace) {
                         }
                         state.route == ProjectRoute.MEDIA -> {
                             val targetId = projectId
-                            if (scopeReady && targetId != null) MediaScreen(media, projects::back) { input ->
+                            if (scopeReady) MediaScreen(media, projects::back) { input ->
                                 projects.saveReviewedStep(targetId, input)
                             } else ScreenEmpty("素材未就绪", "请返回项目重新打开素材。", "返回", projects::back)
                         }
@@ -231,8 +231,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace) {
                             Box(Modifier.weight(1f)) { DemoLibraryScreen({ push("import") }, { push("settings") }) }
                             GlobalNavigation(true, { library = false }, {})
                         }
-                        else -> ProjectHomeFrame({ if (!unavailable) { importAfterCreate = false; newProject = true } },
-                            { push("record") }, requestImport, { push("settings") }, { library = true }) {
+                        else -> ProjectHomeFrame({ push("record") }, requestImport, { push("settings") }, { library = true }) {
                             ProjectHomeContent(state, { tab = ProjectTab.STEPS; projects.openProject(it) }, { renaming = it }, { deletingProject = it })
                         }
                     }

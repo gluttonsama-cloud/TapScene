@@ -1,6 +1,7 @@
 package com.tapscene.ui.shell
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -26,6 +27,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -108,7 +110,7 @@ fun RecordingSetupScreen(onBack: () -> Unit, onImportVideo: () -> Unit) {
         }
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             UnavailableAction("开始录制", "录制与自动整理尚未接入。")
-            OutlinedButton(onClick = onImportVideo, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("导入已有录屏") }
+            OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = onImportVideo, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("导入已有录屏") }
         }
         Column {
             ShellDivider()
@@ -133,7 +135,7 @@ fun RecordingSetupScreen(onBack: () -> Unit, onImportVideo: () -> Unit) {
 @Composable
 fun DemoLibraryScreen(onImport: () -> Unit, onSettings: () -> Unit) {
     ServicePage("演示库", actions = {
-        TextButton(onClick = onSettings, modifier = Modifier.heightIn(min = 48.dp)) { Text("设置") }
+        TextButton(shape = RoundedCornerShape(8.dp), onClick = onSettings, modifier = Modifier.heightIn(min = 48.dp)) { Text("设置") }
     }) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text("离线观看", style = MaterialTheme.typography.titleMedium)
@@ -163,7 +165,7 @@ fun ExternalImportScreen(onBack: () -> Unit) {
         DetailSection("选择 TapScene 数据包") {
             ShellLabelValue("文件", "尚未选择")
             ShellLabelValue("验证状态", "未开始")
-            OutlinedButton(onClick = {}, enabled = false, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("选择数据包") }
+            OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = {}, enabled = false, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("选择数据包") }
         }
         DetailSection("导入用途") {
             ShellActionRow("加入演示库", "完整观看固定版本，保留独立的观看进度。")
@@ -193,8 +195,8 @@ fun FormalPlayerScreen(onBack: () -> Unit) {
             ShellActionRow("上一步与重来", "上一步沿实际访问路径返回；重来从起点开始。")
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedButton(onClick = {}, enabled = false, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("上一步") }
-            Button(onClick = {}, enabled = false, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("开始") }
+            OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = {}, enabled = false, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("上一步") }
+            Button(shape = RoundedCornerShape(8.dp), onClick = {}, enabled = false, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("开始") }
         }
     }
 }
@@ -210,30 +212,63 @@ fun DeliveryCheckScreen(
     onDelivery: () -> Unit,
     showTopBar: Boolean = true,
 ) {
+    var showMediaDetails by rememberSaveable(project?.project?.id) { mutableStateOf(false) }
     ServicePage("检查与交付", onBack, showTopBar = showTopBar) {
         WorkflowLine(0, listOf("检查", "成品复核", "交付"))
-        if (project != null) {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(project.project.title, style = MaterialTheme.typography.titleMedium)
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (project != null) {
+                if (showTopBar) Text(project.project.title, style = MaterialTheme.typography.titleMedium)
                 Text("草稿修订 ${project.project.revision} · ${project.steps.size} 个步骤", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
             }
-        }
-        DetailSection("结构与路径", if (issues.isEmpty()) "当前本机结构检查未返回问题。" else "${issues.size} 项需要处理，点击可回到对应位置。") {
-            issues.forEach { issue ->
-                ShellActionRow("需要修正", issue.message, onClick = { onIssue(issue) })
-                ShellDivider()
+            val firstIssue = issues.firstOrNull()
+            if (firstIssue != null) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("${issues.size} 项待处理", style = MaterialTheme.typography.titleLarge, color = ShellColors.Accent)
+                        Text("结构与路径", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    }
+                    Button(shape = RoundedCornerShape(8.dp), onClick = { onIssue(firstIssue) }, modifier = Modifier.heightIn(min = 48.dp)) { Text("去修正") }
+                }
+                issues.forEach { issue ->
+                    val stepTitle = project?.steps?.firstOrNull { it.id == issue.stepId }?.title
+                    ShellDivider()
+                    ShellActionRow(
+                        title = issue.message,
+                        subtitle = stepTitle?.let { "步骤：$it" } ?: "项目结构",
+                        onClick = { onIssue(issue) },
+                    )
+                }
+            } else {
+                SectionHeader("结构与路径", if (project == null) "未选择项目。" else "当前本机结构检查未返回问题。")
             }
+            ShellDivider()
             ShellActionRow("试走点击路径", "确认每个动作到达预期画面或结束结果。", onClick = onPreview, enabled = project?.steps?.isNotEmpty() == true)
         }
         DetailSection("隐私与文字") {
-            ShellLabelValue("图片与过渡", "生成实际成品后复核")
-            ShellLabelValue("标题、讲解与裁片", "逐项检查可见内容")
+            Text("生成实际成品后，逐项复核图片、完整过渡、标题、讲解与裁片。", style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
         }
-        DetailSection("媒体与体积") {
-            ShellLabelValue("当前步骤图片", if (project == null) "未选择项目" else "${project.steps.size} 张 · ${formatShellBytes(project.steps.sumOf { it.asset.byteLength })}")
-            ShellLabelValue("交付包大小", "尚未生成")
+        Column {
+            ShellDivider()
+            ShellActionRow(
+                "媒体与体积",
+                subtitle = project?.let { "当前 ${it.steps.size} 张步骤图片" },
+                value = if (showMediaDetails) "收起" else "展开",
+                onClick = { showMediaDetails = !showMediaDetails },
+            )
+            if (showMediaDetails) {
+                ShellLabelValue("当前步骤图片", if (project == null) "未选择项目" else "${project.steps.size} 张 · ${formatShellBytes(project.steps.sumOf { it.asset.byteLength })}")
+                ShellLabelValue("交付包大小", "尚未生成")
+            }
+            ShellDivider()
         }
-        UnavailableAction("生成待复核成品", "完整交付检查与版本生成尚未接入；本机结构检查不代表已可交付。")
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("完整交付检查与版本生成尚未接入，本机结构检查不代表已可交付。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+            OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = {}, enabled = false, modifier = Modifier.heightIn(min = 48.dp)) { Text("生成待复核成品") }
+        }
         Column {
             ShellDivider()
             ShellActionRow("成品逐项复核", "检查真实输出，全部确认后封存版本。", onClick = onReview)
@@ -276,14 +311,14 @@ fun DeliveryOptionsScreen(
         }
         DetailSection("离线观看包", "保存为文件，交给另一台设备离线观看。") {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedButton(onClick = {}, enabled = false, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("保存到文件") }
-                OutlinedButton(onClick = {}, enabled = false, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("系统分享") }
+                OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = {}, enabled = false, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("保存到文件") }
+                OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = {}, enabled = false, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("系统分享") }
             }
         }
         DetailSection("托管链接", "主动上传封存后的安全内容，由持链者观看。") {
             ShellLabelValue("有效期选项", "1 天 / 7 天 / 30 天")
             ShellActionRow("托管账号与版本", "查看账号入口与已发布版本管理。", onClick = onAccount)
-            OutlinedButton(onClick = {}, enabled = false, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("确认并发布") }
+            OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = {}, enabled = false, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("确认并发布") }
         }
         DetailSection("AI 工程包", "导出完整图与有限渲染计划，在独立环境中制作动画。") {
             ShellActionRow("查看工程包配置", "路径、画布、停留时间与可见区域。", onClick = onAi)
@@ -366,7 +401,7 @@ fun HostedVersionsScreen(onBack: () -> Unit, onAccount: () -> Unit) {
             ShellDivider()
             ShellActionRow("本机原项目", "草稿后续修改不改变已经发布的固定版本。")
         }
-        OutlinedButton(onClick = {}, enabled = false, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("刷新版本") }
+        OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = {}, enabled = false, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("刷新版本") }
         Text("已下载的离线副本无法通过撤销链接收回。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
     }
 }

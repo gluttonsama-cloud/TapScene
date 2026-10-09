@@ -25,7 +25,7 @@ import com.tapscene.ui.ProjectUiState
 fun ProjectsEmptyPreview() {
     ReviewSurface(sample = false) {
         ProjectHomeFrame(
-            onNewProject = {}, onRecord = {}, onImportVideo = {}, onSettings = {}, onLibrary = {},
+            onRecord = {}, onImportVideo = {}, onSettings = {}, onLibrary = {},
         ) {
             ProjectHomeContent(ProjectUiState(), onOpenProject = {}, onRenameProject = {}, onDeleteProject = {})
         }
