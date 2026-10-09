@@ -7,6 +7,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: ci-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -46,8 +50,16 @@ jobs:
         with:
           gradle-version: '8.13'
           cache-disabled: true
+      - name: Install media inspection tools from Ubuntu
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes ffmpeg
+          command -v ffprobe
+          command -v ffmpeg
       - name: Check and materialize real phone-media fixtures
-        run: python3 tools/media-checks/materialize-fixtures.py "$RUNNER_TEMP/media-fixtures" --verify-media | tee "$RUNNER_TEMP/fixture-checks.txt"
+        run: |
+          python3 tools/media-checks/materialize-fixtures.py "$RUNNER_TEMP/media-fixtures" --verify-media 2>&1 | tee "$RUNNER_TEMP/fixture-checks.txt"
+          grep -qx TAPSCENE_FIXTURE_CHECKS_OK "$RUNNER_TEMP/fixture-checks.txt"
       - name: Check project graph schema invariants
         run: python3 tools/project-checks/check-schema.py
       - name: Build the side-by-side preview and run lint
