@@ -11,7 +11,7 @@
 - 验证基线：Android 8.0 / API 26 起；compile / target API 36；JDK 17、Gradle 8.13、AGP 8.13.2、Kotlin 2.2.21、Media3 1.9.4。正式兼容设备范围待实测。
 - 已装上述工具和已接受许可的 Android SDK 时，运行 `gradle -p android :app:assembleDebug :app:lintDebug`；APK 在 `android/app/build/outputs/apk/debug/`。当前未附 Gradle Wrapper 二进制。
 - `ci/gate` 核对合成 AVC/HEVC 素材与项目 SQLite 约束、构建 APK、运行 Android lint 与权限检查；有可用硬件加速时才运行模拟器媒体冒烟，否则明确记录 `NOT_RUN`。构建通过不代表设备检查通过；成功产物保留 7 天。
-- CI 以 `-PcompatibilityPreview=true` 构建现有“TapScene 兼容预览”包名；不再增加包名。早期产物使用临时调试签名，不能保证覆盖升级；不要为签名冲突卸载旧版或清除数据。稳定更新签名与安装交付待单独配置。
+- CI 以 `-PcompatibilityPreview=true` 构建现有“TapScene 兼容预览”包名；不再增加包名。CI 原始 APK 使用临时调试签名，交付前须按 [本地重签说明](tools/signing/README.md) 使用同一专用开发证书并核对实际输出。首次换签不能覆盖旧版；不要为签名冲突卸载有数据的旧版或清除数据。长期私钥备份尚未完成，开发环境重建后仍有丢失风险。
 - 当前路径：创建项目 → 添加步骤 → 选录屏、取帧并按需遮挡 → 生成并复核 PNG → 保存为步骤 → 编辑标题、说明和热点跳转 → 本机点击预览。无敏感信息可不加遮挡，但仍需复核实际图片。空项目可继续编辑或删除；取消选片不额外建立项目。
 - 项目预览只读取持久化派生 PNG，支持起点、结束、热点选择、实际访问历史返回和重来；不会直接播放原片。现有无声短视频复核/文件保存保留，尚未接入步骤过渡；项目没有分享或观看包导出入口。
 - 原片、取帧位置和遮挡保存在 `noBackupFilesDir`；备份及设备迁移规则显式排除应用数据，OEM 迁移行为仍待设备验证。没有接入 ML Kit：其官方指标外传行为尚不满足本项目隐私条件。

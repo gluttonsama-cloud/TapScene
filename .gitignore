@@ -5,4 +5,8 @@
 *.iml
 *.jks
 *.keystore
+*.p12
+*.pfx
+store.pass
+**/__pycache__/
 android/app/src/androidTest/assets/*.mp4
