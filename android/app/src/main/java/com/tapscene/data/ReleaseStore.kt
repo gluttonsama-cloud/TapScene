@@ -191,13 +191,13 @@ class ReleaseStore(context: Context) {
     }
 
     suspend fun candidateAssetFile(candidateId: String, stateId: String): File = locked {
-        val candidate = readCandidateDirectory(child(candidates, candidateId))
+        val candidate = readCandidateDirectory(child(candidates, candidateId), verifyAssets = false)
         checkedAsset(candidate.scene, File(child(candidates, candidateId), "package"), stateId)
     }
 
     suspend fun releaseAssetFile(releaseId: String, stateId: String): File = locked {
         val location = child(releases, releaseId)
-        readReleaseDirectory(location)
+        readReleaseDirectory(location, verifyAssets = false)
         val payload = File(location, "package")
         checkedAsset(readScene(payload), payload, stateId)
     }
@@ -295,8 +295,10 @@ class ReleaseStore(context: Context) {
         return scene.assets.single { it.id == state.imageAssetId }
     }
 
+    // Frequent review/playback updates bind canonical content; target pixels are checked by
+    // the image/review operation. Initial open and the seal commit still verify every asset.
     private suspend fun boundCandidate(id: String, digest: String): ReleaseCandidate =
-        readCandidateDirectory(child(candidates, id)).also {
+        readCandidateDirectory(child(candidates, id), verifyAssets = false).also {
             check(it.contentDigest == digest) { "复核对应另一份内容，请重新打开固定候选。" }
         }
 

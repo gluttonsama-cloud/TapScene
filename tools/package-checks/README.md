@@ -28,7 +28,7 @@ bash tools/package-checks/run-checks.sh /tmp/tapscene-package-checks
 
 完整 JDK 优先走 `javac --release 17`，强制 Java 17 API、语言和字节码版本。若安装的精简运行时缺少 `javac` 启动器、但仍带 `jdk.compiler` 模块，脚本使用 `java -m jdk.compiler/com.sun.tools.javac.Main -source 17 -target 17`。后者在日志中明确标记 `Java 17 API-surface check NOT_RUN`，不把 source/target 编译等同于完整 `--release 17` 验证。
 
-本次本地实际运行：Java 21.0.12.1 的已安装编译器模块，source/target 17；148 项全部通过，输出 `TAPSCENE_PACKAGE_CHECKS_OK: passed=148 failed=0`。完整 Java 17 API / Java 17 运行时验证仍待 JDK 17 CI。Android 平台 PNG 解码、像素不透明检查、导入库事务、SAF 导入导出、页面操作、飞行模式播放及真机运行均不由这组桌面检查代替。
+本次本地实际运行：Java 21.0.12.1 的已安装编译器模块，source/target 17；148 项全部通过，输出 `TAPSCENE_PACKAGE_CHECKS_OK: passed=148 failed=0`。`4e91581` 的 JDK 17 CI 已通过同一编解码与播放器检查（`javac --release 17`）。Android 平台 PNG 解码、像素不透明检查、导入库事务、SAF 导入导出、页面操作、飞行模式播放及真机运行均不由这组桌面检查代替。
 
 CI 也可以直接执行（JDK 17）：
 
