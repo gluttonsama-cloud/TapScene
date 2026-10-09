@@ -16,8 +16,12 @@ endif()
 if(NOT ANDROID AND NOT TAPSCENE_HOST_TEST)
   message(FATAL_ERROR "Host builds are restricted to the explicit fixture target")
 endif()
-if(ANDROID AND CMAKE_SYSTEM_VERSION VERSION_LESS "26")
-  message(FATAL_ERROR "TapScene OCR requires Android API 26 or later")
+# NDK r28's default legacy toolchain intentionally sets CMAKE_SYSTEM_VERSION=1.
+# ANDROID_PLATFORM_LEVEL is its normalized API used by the LLVM target/sysroot.
+if(ANDROID)
+  if(NOT "${ANDROID_PLATFORM_LEVEL}" MATCHES "^[0-9]+$" OR ANDROID_PLATFORM_LEVEL LESS 26)
+    message(FATAL_ERROR "TapScene OCR requires resolved NDK ANDROID_PLATFORM_LEVEL >= 26")
+  endif()
 endif()
 # Every optional WITH_* backend in the pinned OpenCV root is disabled, including
 # future additions to this exact source. No codecs, hardware SDK or downloaded HAL.
