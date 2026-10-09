@@ -92,47 +92,6 @@ private fun WorkflowLine(current: Int, labels: List<String>) {
 }
 
 @Composable
-fun RecordingSetupScreen(onBack: () -> Unit, onImportVideo: () -> Unit) {
-    var showPrivacy by rememberSaveable { mutableStateOf(false) }
-    ServicePage("录制一段操作", onBack) {
-        WorkflowLine(0, listOf("录制", "自动整理", "逐项校正"))
-        DetailSection("录制准备", "完成一次想演示的操作，再整理成可以点击的步骤。") {
-            ShellLabelValue("录制范围", "开始时由系统选择")
-            ShellDivider()
-            ShellLabelValue("当前会话", "尚未开始")
-            ShellDivider()
-            ShellLabelValue("录制状态", "未录制")
-        }
-        DetailSection("录完之后") {
-            ShellActionRow("按画面变化整理", "从录屏提出步骤与画面候选，保留来源时间。")
-            ShellDivider()
-            ShellActionRow("确认画面与动作", "逐项校正标题、热点与目标，最后由你确认。")
-        }
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            UnavailableAction("开始录制", "录制与自动整理尚未接入。")
-            OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = onImportVideo, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("导入已有录屏") }
-        }
-        Column {
-            ShellDivider()
-            ShellActionRow(
-                "辅助识别与隐私",
-                "画面分析为基础；无障碍增强为可选项。",
-                value = if (showPrivacy) "收起" else "展开",
-                onClick = { showPrivacy = !showPrivacy },
-            )
-            if (showPrivacy) {
-                Text(
-                    "录制将通过系统屏幕录制授权启动，默认按画面变化与文字识别提出候选。可选的无障碍增强只辅助识别控件区域，不代表精确点击。不会收集密码或键盘输入，也不会绕过受保护画面的录制限制。",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = ShellColors.Muted,
-                    modifier = Modifier.padding(bottom = 12.dp),
-                )
-            }
-        }
-    }
-}
-
-@Composable
 fun DemoLibraryScreen(onImport: () -> Unit, onSettings: () -> Unit) {
     ServicePage("演示库", actions = {
         TextButton(shape = RoundedCornerShape(8.dp), onClick = onSettings, modifier = Modifier.heightIn(min = 48.dp)) { Text("设置") }

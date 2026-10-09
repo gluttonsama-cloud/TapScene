@@ -5,6 +5,9 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.system.Os
+import android.system.OsConstants
+import com.tapscene.data.WorkspaceDurabilityException
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
@@ -25,8 +28,9 @@ class SourceImporter(context: Context) {
     /**
      * [register] runs on IO after validation, in a non-cancellable commit section. It must be a
      * synchronous, atomic local metadata write: return only after persistence succeeds, and never
-     * throw after committing. Once it returns, the file belongs to the repository, even if the caller
-     * is cancelled while switching back to its dispatcher. This closes the cancellation/return gap.
+     * throw after committing except WorkspaceDurabilityException, which means the source MUST be
+     * retained because its metadata is visible but not yet confirmed durable. Once it returns, the
+     * file belongs to the repository, even if cancellation hides the return value.
      */
     suspend fun importSource(uri: Uri, register: (ImportedSource) -> Unit): ImportedSource =
         withContext(Dispatchers.IO) {
@@ -44,6 +48,9 @@ class SourceImporter(context: Context) {
             try {
                 val ownerContext = currentCoroutineContext()
                 val copied = runInterruptible { copy(uri, file, ownerContext) }
+                // Sync the private copy's directory entry before metadata can claim ownership.
+                val descriptor = Os.open(directory.absolutePath, OsConstants.O_RDONLY, 0)
+                try { Os.fsync(descriptor) } finally { Os.close(descriptor) }
                 ownerContext.ensureActive()
                 val metadata = runInterruptible { inspect(file, copied.first, copied.second) }
                 VideoFrameDecoder(appContext).validate(file, metadata)
@@ -56,10 +63,20 @@ class SourceImporter(context: Context) {
                 )
                 ownerContext.ensureActive()
                 withContext(NonCancellable) {
-                    register(source)
+                    try {
+                        register(source)
+                    } catch (uncertain: WorkspaceDurabilityException) {
+                        // Set inside the non-cancellable block, before crossing a return boundary.
+                        registered = true
+                        throw uncertain
+                    }
                     registered = true
                 }
                 source
+            } catch (uncertain: WorkspaceDurabilityException) {
+                val error = MediaImportException("素材已写入本机，但保存确认未完成，请保留原文件并重新读取素材。", uncertain)
+                failure = error
+                throw error
             } catch (cancelled: CancellationException) {
                 failure = cancelled
                 throw cancelled

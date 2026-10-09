@@ -86,6 +86,46 @@ fun DeliveryCheckSamplePreview() {
     }
 }
 
+@PreviewTest
+@Preview(name = "05_recording_recovery_sample", widthDp = 412, heightDp = 915, locale = "zh-rCN", showBackground = true)
+@Composable
+fun RecordingRecoverySamplePreview() {
+    ReviewSurface(sample = true) {
+        RecordingCaptureContent(
+            projectState = ProjectUiState(project = ShellPreviewFixture.project, route = ProjectRoute.STEPS),
+            recording = ShellPreviewFixture.recording,
+            localMessage = null,
+            preparingConsent = false,
+            callbacks = RecordingCaptureCallbacks(
+                onBack = {}, onNewProject = {}, onStart = {}, onStopAndOrganize = {},
+                onRetry = {}, onDiscard = {}, onCandidates = {}, onImportVideo = {},
+            ),
+        )
+    }
+}
+
+@PreviewTest
+@Preview(name = "06_candidates_sample", widthDp = 412, heightDp = 915, locale = "zh-rCN", showBackground = true)
+@Composable
+fun CandidateSelectionSamplePreview() {
+    val images = remember { List(3, ShellPreviewFixture::bitmap) }
+    ReviewSurface(sample = true) {
+        CandidateSelectionContent(
+            state = ShellPreviewFixture.candidateState,
+            sources = ShellPreviewFixture.sources,
+            sourceReady = true,
+            remainingSteps = 37,
+            callbacks = CandidateSelectionCallbacks(
+                onSource = {}, onReview = {}, onBack = {}, onImport = {},
+                onAnalyze = {}, onCancel = {}, onSetDecision = { _, _ -> }, onSetDecisions = { _, _ -> },
+            ),
+            candidateThumbnail = { candidate ->
+                images[ShellPreviewFixture.candidateState.candidates.indexOfFirst { it.id == candidate.id }]
+            },
+        )
+    }
+}
+
 @Composable
 private fun SampleProjectFrame(tab: ProjectTab, content: @Composable () -> Unit) {
     ProjectWorkspaceFrame(

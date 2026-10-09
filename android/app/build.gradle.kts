@@ -14,8 +14,8 @@ android {
         applicationId = "com.tapscene"
         minSdk = 26
         targetSdk = 36
-        versionCode = 5
-        versionName = "0.3.0-shell-dev"
+        versionCode = 6
+        versionName = "0.4.0-recording-dev"
         testInstrumentationRunner = "com.tapscene.media.MediaCompatibilityInstrumentation"
         manifestPlaceholders["appLabel"] = "TapScene"
     }
@@ -24,7 +24,7 @@ android {
             // The earlier CI debug key was ephemeral. A side-by-side preview preserves its data.
             if (providers.gradleProperty("compatibilityPreview").orNull == "true") {
                 applicationIdSuffix = ".preview.hevc"
-                manifestPlaceholders["appLabel"] = "TapScene 兼容预览"
+                manifestPlaceholders["appLabel"] = "TapScene 开发版"
             }
         }
     }

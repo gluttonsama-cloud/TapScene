@@ -1,6 +1,8 @@
 package com.tapscene.data
 
 import android.content.Context
+import android.system.Os
+import android.system.OsConstants
 import android.util.AtomicFile
 import com.tapscene.media.ImportedSource
 import com.tapscene.media.OpaqueMask
@@ -10,6 +12,7 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.FileOutputStream
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 
@@ -20,6 +23,10 @@ data class SourceDraft(
     val frameTimeUs: Long = 0,
     val masks: List<OpaqueMask> = emptyList(),
 )
+
+/** Metadata is visible, but durability was not confirmed. Never delete its source as rollback. */
+class WorkspaceDurabilityException(cause: Exception) :
+    IOException("素材记录已写入，但持久化确认未完成。请保留原片并重试。", cause)
 
 /** Media workbench state only. This is not the project's future graph database. */
 class WorkspaceStore(context: Context, projectId: String? = null) {
@@ -87,8 +94,56 @@ class WorkspaceStore(context: Context, projectId: String? = null) {
         }
     }
 
+    /**
+     * Read/modify/write under the same process-wide lock used by every workspace instance.
+     * [transform] must be synchronous and must not retain or mutate the supplied list later.
+     * Returning means the atomic replacement and parent-directory sync succeeded. A
+     * WorkspaceDurabilityException means replacement happened: callers must retain source files.
+     */
+    fun update(transform: (List<SourceDraft>) -> List<SourceDraft>): List<SourceDraft> = synchronized(lock) {
+        val drafts = transform(read()).toList()
+        write(drafts)
+        drafts
+    }
+
+    /** Idempotent registration never resets an existing source's frame or privacy edits. */
+    fun append(source: ImportedSource): ImportedSource = synchronized(lock) {
+        val current = read()
+        val existing = current.firstOrNull { it.source.sourceId == source.sourceId }
+        if (existing != null) {
+            require(existing.source == source) { "素材标识已用于其他内容" }
+            confirmDirectoryDurability()
+            existing.source
+        } else {
+            write(current + SourceDraft(source))
+            source
+        }
+    }
+
+    /** Finish an interrupted registration before its caller may discard the journal's original. */
+    fun confirmRegistration(source: ImportedSource): ImportedSource = synchronized(lock) {
+        val existing = read().firstOrNull { it.source.sourceId == source.sourceId }
+        require(existing?.source == source) { "素材登记已改变，请重新读取" }
+        confirmDirectoryDurability()
+        source
+    }
+
+    /** Change only one source's draft, preserving concurrently added recordings. */
+    fun updateSource(sourceId: String, transform: (SourceDraft) -> SourceDraft): List<SourceDraft> = update { current ->
+        require(current.any { it.source.sourceId == sourceId }) { "素材已移除，请重新读取" }
+        current.map { draft ->
+            if (draft.source.sourceId != sourceId) draft else transform(draft).also {
+                require(it.source == draft.source) { "不能在编辑时替换原素材" }
+            }
+        }
+    }
+
+    /** Whole-workspace replacement is for initialization only; live callers use update/append. */
     fun write(drafts: List<SourceDraft>): Unit = synchronized(lock) {
         require(drafts.size <= 3) { "最多保留 3 段录屏" }
+        require(drafts.map { it.source.sourceId }.distinct().size == drafts.size) { "素材标识重复" }
+        require(drafts.all { it.source.metadata.byteLength in 1..200L * 1024 * 1024 &&
+            it.source.metadata.durationUs in 1..180_000_000L }) { "单段录屏超过时长或大小限额" }
         require(drafts.sumOf { it.source.metadata.byteLength } <= 500L * 1024 * 1024) {
             "全部录屏不能超过 500 MiB"
         }
@@ -129,14 +184,25 @@ class WorkspaceStore(context: Context, projectId: String? = null) {
                 // Unlike AtomicFile.finishWrite, these failures propagate to the caller.
                 output.fd.sync()
             }
-            // Same-directory replacement is the commit point. Do not perform fallible work
-            // afterward: import registration must never report failure after it committed.
+            // Replacement is the visibility point; a directory fsync makes its name durable.
+            // Failure after replacement is explicitly uncertain, never permission to roll back
+            // the source file that the new metadata might already reference.
             Files.move(temporary.toPath(), state.baseFile.toPath(),
                 StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            confirmDirectoryDurability()
         } finally {
             runCatching { temporary.delete() }
         }
         Unit
+    }
+
+    private fun confirmDirectoryDurability() {
+        try {
+            val descriptor = Os.open(root.absolutePath, OsConstants.O_RDONLY, 0)
+            try { Os.fsync(descriptor) } finally { Os.close(descriptor) }
+        } catch (cause: Exception) {
+            throw WorkspaceDurabilityException(cause)
+        }
     }
 
     companion object {

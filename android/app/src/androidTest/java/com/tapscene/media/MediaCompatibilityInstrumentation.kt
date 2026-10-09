@@ -54,6 +54,9 @@ class MediaCompatibilityInstrumentation : Instrumentation() {
 
     private suspend fun runChecks() {
         com.tapscene.data.ProjectEditingChecks.run(targetContext, ::status)
+        com.tapscene.data.SourceRegistrationChecks.run(targetContext, ::status)
+        CandidateAnalysisChecks.run(targetContext, ::status)
+        com.tapscene.recording.RecordingRecoveryTest.run(targetContext, ::status)
         val outputRoot = File(targetContext.noBackupFilesDir, "media-checks-${UUID.randomUUID()}")
         check(outputRoot.mkdir()) { "Could not reserve private smoke-check directory" }
         val sources = mutableListOf<Fixture>()
@@ -197,6 +200,10 @@ class MediaCompatibilityInstrumentation : Instrumentation() {
     ) {
         val metadata = fixture.source.metadata
         decoder.validate(fixture.file, metadata) // First/middle/last Surface samples, not full source decode.
+        if (fixture.spec.name in setOf("avc-sdr.mp4", "avc-rotated-sar-vfr.mp4")) {
+            CandidateAnalysisChecks.checkDecodedSource(targetContext, fixture.source, fixture.ptsUs)
+            status("PASS ${fixture.spec.name} candidate sampling: actual millisecond PTS, bounded suggestions, batch cancellation and Surface reuse")
+        }
         for (timeUs in listOf(0L, metadata.durationUs)) {
             val edge = decoder.decode(fixture.source, timeUs)
             try {

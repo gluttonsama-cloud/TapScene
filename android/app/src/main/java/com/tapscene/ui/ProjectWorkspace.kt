@@ -306,7 +306,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
      * Called directly inside MediaWorkspace's operation lock. This must remain a suspending commit,
      * never a viewModelScope launch: the caller owns and may clean up the reviewed candidate.
      */
-    suspend fun saveReviewedStep(projectId: String, input: ReviewedStepInput): String = withContext(Dispatchers.Main.immediate) {
+    suspend fun saveReviewedStep(projectId: String, input: ReviewedStepInput, openEditor: Boolean = true): String = withContext(Dispatchers.Main.immediate) {
         check(!state.value.busy) { "项目正在保存，请稍后重试" }
         check(state.value.project?.project?.id == projectId) { "当前项目已变化，请重新打开素材工作台" }
         check(!state.value.loadFailed) { "请先重新读取本地项目" }
@@ -327,7 +327,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
             stepId = saved.steps.first { it.captureId == input.captureId }.id
             // No fallible refresh/decode after the commit is allowed to turn it into a failed add.
             applyProject(saved)
-            selectCommittedStep(stepId)
+            if (openEditor) selectCommittedStep(stepId)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
@@ -342,13 +342,15 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
                     val saved = state.value.project?.steps?.firstOrNull { it.captureId == input.captureId }
                     if (saved != null) {
                         stepId = saved.id
-                        selectCommittedStep(stepId)
-                        try { loadBitmap(state.value.project!!, saved) }
-                        catch (_: Exception) { clearFailedBitmap() }
-                        if (state.value.bitmap != null) message("已复核图片已加入步骤")
+                        if (openEditor) selectCommittedStep(stepId)
+                        if (openEditor) {
+                            try { loadBitmap(state.value.project!!, saved) }
+                            catch (_: Exception) { clearFailedBitmap() }
+                        }
+                        message("已复核图片已加入步骤")
                     } else if (committed != null) {
                         // A reread failure retains the already-returned committed snapshot.
-                        selectCommittedStep(stepId)
+                        if (openEditor) selectCommittedStep(stepId)
                     }
                 } catch (_: Exception) {
                     mutableState.update { it.copy(loadFailed = true, bitmap = null,

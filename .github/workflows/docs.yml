@@ -121,10 +121,19 @@ jobs:
               "android.permission.INTERNET", "android.permission.ACCESS_NETWORK_STATE",
               "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE",
               "android.permission.MANAGE_EXTERNAL_STORAGE", "android.permission.READ_MEDIA_VIDEO",
+              "android.permission.RECORD_AUDIO", "android.permission.CAPTURE_AUDIO_OUTPUT",
+              "android.permission.BIND_ACCESSIBILITY_SERVICE",
           }
           assert not permissions & forbidden, permissions
-          assert root.find("application").get(namespace + "allowBackup") == "false"
-          print("Merged manifest: no network or broad storage permission; backup disabled.")
+          application = root.find("application")
+          assert application.get(namespace + "allowBackup") == "false"
+          services = application.findall("service")
+          recording = [item for item in services if item.get(namespace + "name") == "com.tapscene.recording.RecordingService"]
+          assert len(recording) == 1
+          assert recording[0].get(namespace + "exported") == "false"
+          assert recording[0].get(namespace + "foregroundServiceType") == "mediaProjection"
+          assert all(item.get(namespace + "permission") != "android.permission.BIND_ACCESSIBILITY_SERVICE" for item in services)
+          print("Merged manifest: no network/audio/broad storage/accessibility access; non-exported projection service; backup disabled.")
           PY
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs \
             android/app/build/outputs/apk/debug/app-debug.apk | tee "$RUNNER_TEMP/apk-signature.txt"
@@ -152,7 +161,7 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 4, f"Expected four Compose review images, found {len(images)}"
+          assert len(images) == 6, f"Expected six Compose review images, found {len(images)}"
           lines = [
               "TapScene shell review: host-side Compose / Layoutlib renders.",
               "Not device screenshots; does not validate media decoding, touch, or system pickers.",

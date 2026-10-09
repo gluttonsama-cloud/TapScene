@@ -39,6 +39,8 @@ data class WorkspaceUiState(
     val drafts: List<SourceDraft> = emptyList(),
     val selectedId: String? = null,
     val frame: DecodedFrame? = null,
+    /** Queue item whose actual decoded frame is currently editable; never inferred from source ID. */
+    val frameReviewId: String? = null,
     val candidate: SafeMediaWriter.CandidateMedia? = null,
     val candidateImage: Bitmap? = null,
     val watchedDigest: String? = null,
@@ -121,7 +123,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
             store.read()
         }
         mutableState.update { it.copy(drafts = drafts, selectedId = drafts.lastOrNull()?.source?.sourceId,
-            frame = null, loadFailed = false) }
+            frame = null, frameReviewId = null, loadFailed = false) }
     }
 
     fun importVideo(uri: Uri) {
@@ -132,13 +134,12 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
             return
         }
         execute("复制并检查录屏") {
-            val previous = state.value.drafts
             val source = importer.importSource(uri) { imported ->
-                store.write(previous + SourceDraft(imported))
+                store.append(imported)
             }
             val drafts = withContext(Dispatchers.IO) { store.read() }
             mutableState.update {
-                it.copy(drafts = drafts, selectedId = source.sourceId, frame = null,
+                it.copy(drafts = drafts, selectedId = source.sourceId, frame = null, frameReviewId = null,
                     candidate = null, candidateImage = null, reviewedDigest = null, watchedDigest = null)
             }
             message("录屏已保存到本机")
@@ -149,7 +150,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
         if (!requireSavedEdits()) return
         if (state.value.busy || savePickerPending || state.value.selectedId == id) return
         invalidateCandidate()
-        mutableState.update { it.copy(selectedId = id, frame = null, candidate = null,
+        mutableState.update { it.copy(selectedId = id, frame = null, frameReviewId = null, candidate = null,
             candidateImage = null, watchedDigest = null, reviewedDigest = null, message = null) }
     }
 
@@ -159,12 +160,41 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
         execute("解码实际帧") {
             invalidateCandidate()
             val decoded = decoder.decode(selected.source, timeUs)
-            val drafts = state.value.drafts.map {
-                if (it.source.sourceId == selected.source.sourceId) it.copy(frameTimeUs = decoded.presentationTimeUs) else it
+            val drafts = withContext(Dispatchers.IO) {
+                store.updateSource(selected.source.sourceId) { it.copy(frameTimeUs = decoded.presentationTimeUs) }
             }
-            withContext(Dispatchers.IO) { store.write(drafts) }
-            mutableState.update { it.copy(drafts = drafts, frame = decoded, candidate = null,
+            mutableState.update { it.copy(drafts = drafts, frame = decoded, frameReviewId = null, candidate = null,
                 candidateImage = null, reviewedDigest = null, watchedDigest = null) }
+        }
+    }
+
+    /** Prepare one queue item through the same actual-frame/privacy pipeline as manual editing. */
+    fun prepareCandidateImage(sourceId: String, timeUs: Long, reviewId: String) {
+        if (state.value.busy || savePickerPending || !requireSavedEdits() || state.value.loadFailed) return
+        // Close the previous output and its frame BEFORE the first suspension. Cancellation
+        // or a failed metadata read must never leave item A approvable as queue item B.
+        invalidateCandidate()
+        mutableState.update { it.copy(frame = null, frameReviewId = null) }
+        execute("准备候选图片") {
+            val current = withContext(Dispatchers.IO) { store.read() }
+            val selected = current.firstOrNull { it.source.sourceId == sourceId }
+                ?: error("素材已移除，请重新读取")
+            invalidateCandidate()
+            mutableState.update { it.copy(drafts = current, selectedId = sourceId, frame = null, frameReviewId = null) }
+            val decoded = decoder.decode(selected.source, timeUs)
+            val drafts = withContext(Dispatchers.IO) {
+                store.updateSource(sourceId) { it.copy(frameTimeUs = decoded.presentationTimeUs) }
+            }
+            val saved = drafts.first { it.source.sourceId == sourceId }
+            mutableState.update { it.copy(drafts = drafts, frame = decoded, frameReviewId = reviewId, candidate = null,
+                candidateImage = null, reviewedDigest = null, watchedDigest = null) }
+            val candidate = writer.writePng(decoded.bitmap, saved.masks, outputDirectory(), ::onStage)
+            val image = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(candidate.file.path) }
+                ?: error("无法重读生成的图片")
+            // Preparation is never a privacy review. Only the existing explicit review action
+            // can bind reviewedDigest to this exact output before it can become a project step.
+            mutableState.update { it.copy(candidate = candidate, candidateImage = image,
+                reviewedDigest = null, watchedDigest = null) }
         }
     }
 
@@ -183,20 +213,24 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
         val selectedId = state.value.selectedId ?: return
         execute("保存遮挡") {
             invalidateCandidate()
-            val drafts = state.value.drafts.map {
+            val pendingDrafts = state.value.drafts.map {
                 if (it.source.sourceId == selectedId) it.copy(masks = masks) else it
             }
-            mutableState.update { it.copy(drafts = drafts, unsavedEdits = true) }
-            withContext(Dispatchers.IO) { store.write(drafts) }
+            mutableState.update { it.copy(drafts = pendingDrafts, unsavedEdits = true) }
+            val drafts = withContext(Dispatchers.IO) { store.updateSource(selectedId) { it.copy(masks = masks) } }
             mutableState.update { it.copy(drafts = drafts, candidate = null, candidateImage = null,
                 watchedDigest = null, reviewedDigest = null, unsavedEdits = false) }
         }
     }
 
-    fun retryEdits() = execute("重试保存遮挡") {
-        val drafts = state.value.drafts
-        withContext(Dispatchers.IO) { store.write(drafts) }
-        mutableState.update { it.copy(unsavedEdits = false) }
+    fun retryEdits() {
+        val selected = state.value.selected ?: return
+        execute("重试保存遮挡") {
+            val drafts = withContext(Dispatchers.IO) {
+                store.updateSource(selected.source.sourceId) { it.copy(masks = selected.masks) }
+            }
+            mutableState.update { it.copy(drafts = drafts, unsavedEdits = false) }
+        }
     }
 
     private fun requireSavedEdits(): Boolean {
@@ -348,18 +382,22 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
                 return@execute
             }
             invalidateCandidate()
-            mutableState.update { it.copy(frame = null) }
-            val drafts = state.value.drafts.filterNot { it.source.sourceId == selected.source.sourceId }
-            withContext(Dispatchers.IO) {
-                val sourceFile = File(app.noBackupFilesDir, selected.source.privateRelativePath)
-                require(sourceFile.canonicalFile.parentFile == File(app.noBackupFilesDir, "sources").canonicalFile)
-                check(!sourceFile.exists() || sourceFile.delete()) { "素材文件清理失败" }
-                // Retain the record on a filesystem failure, so the user can retry. If this
-                // metadata write fails, its now-missing source record is also safe to retry.
-                store.write(drafts)
+            mutableState.update { it.copy(frame = null, frameReviewId = null) }
+            val drafts = withContext(Dispatchers.IO) {
+                store.update { current ->
+                    val latest = current.firstOrNull { it.source.sourceId == selected.source.sourceId }
+                    if (latest != null) {
+                        val sourceFile = File(app.noBackupFilesDir, latest.source.privateRelativePath)
+                        require(sourceFile.canonicalFile.parentFile == File(app.noBackupFilesDir, "sources").canonicalFile)
+                        check(!sourceFile.exists() || sourceFile.delete()) { "素材文件清理失败" }
+                    }
+                    // Retain the record on a filesystem failure, so the user can retry. If this
+                    // metadata write fails, its now-missing source record is also safe to retry.
+                    current.filterNot { it.source.sourceId == selected.source.sourceId }
+                }
             }
             mutableState.update { it.copy(drafts = drafts, selectedId = drafts.lastOrNull()?.source?.sourceId,
-                frame = null, candidate = null, candidateImage = null, reviewedDigest = null, watchedDigest = null) }
+                frame = null, frameReviewId = null, candidate = null, candidateImage = null, reviewedDigest = null, watchedDigest = null) }
         }
     }
 
@@ -406,7 +444,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
                                 // A write may commit just before cancellation. Never pair newly loaded
                                 // edits or a different source with an old frame or old privacy review.
                                 if (old.selected != selected) old.copy(drafts = drafts, selectedId = selectedId,
-                                    frame = null, candidate = null, candidateImage = null,
+                                    frame = null, frameReviewId = null, candidate = null, candidateImage = null,
                                     watchedDigest = null, reviewedDigest = null)
                                 else old.copy(drafts = drafts, selectedId = selectedId)
                             }
