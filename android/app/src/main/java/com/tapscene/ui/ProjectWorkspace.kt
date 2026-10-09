@@ -5,6 +5,11 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.tapscene.data.EditorDraftFields
+import com.tapscene.data.EditorPendingForm
+import com.tapscene.data.StoredEditorDraft
+import com.tapscene.data.editorFields
+import com.tapscene.data.withCurrentMedia
 import com.tapscene.data.ProjectHotspot
 import com.tapscene.data.ProjectLimits
 import com.tapscene.data.ProjectTransition
@@ -29,10 +34,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
 
 enum class ProjectRoute { PROJECTS, STEPS, EDIT, MEDIA, PREVIEW }
+
+enum class DraftRecoveryStatus { NONE, STAGING, STAGED, FAILED }
 
 data class StepEditDraft(
     val stepId: String,
@@ -42,6 +50,9 @@ data class StepEditDraft(
     val hotspots: List<ProjectHotspot>,
     val dirty: Boolean = false,
     val nextAction: ProjectNextAction? = null,
+    val pendingForm: EditorPendingForm? = null,
+    val recoveryStatus: DraftRecoveryStatus = DraftRecoveryStatus.NONE,
+    val conflicts: Set<String> = emptySet(),
 )
 
 data class ProjectIssue(val stepId: String?, val message: String)
@@ -109,6 +120,13 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     private var previewGeneration = 0L
     private var mediaRunSequence = 0L
     private val drafts = mutableMapOf<Pair<String, String>, DraftRecord>()
+    private val draftWriteLock = Mutex()
+    private val draftSessions = mutableMapOf<String, Long>()
+    private val loadedDraftProjects = mutableSetOf<String>()
+    private val draftGenerations = mutableMapOf<Pair<String, String>, Long>()
+    private val pendingStages = linkedMapOf<Pair<String, String>, Long>()
+    private var stagingTask: Job? = null
+    private val savingDrafts = mutableSetOf<Pair<String, String>>()
 
     private data class DraftRecord(
         val draft: StepEditDraft,
@@ -130,25 +148,6 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         if (state.value.project?.project?.id != projectId) return@execute
         val fresh = withContext(Dispatchers.IO) { store.readProject(projectId) } ?: return@execute
         val step = fresh.steps.firstOrNull { it.id == stepId } ?: return@execute
-        val key = projectId to stepId
-        drafts[key]?.let { record ->
-            val old = record.baseStep
-            val withoutMedia = step.copy(hotspots = step.hotspots.map { spot ->
-                spot.copy(transition = old.hotspots.firstOrNull { it.id == spot.id }?.transition)
-            }, nextAction = step.nextAction?.let { action -> action.copy(transition = old.nextAction?.takeIf { it.id == action.id }?.transition) })
-            if (sameEdits(old.toDraft(), withoutMedia)) {
-                val updatedDraft = record.draft.copy(hotspots = record.draft.hotspots.map { spot ->
-                    val actual = step.hotspots.firstOrNull { it.id == spot.id }
-                    val base = old.hotspots.firstOrNull { it.id == spot.id }
-                    if (actual != null && base != null && spot.copy(transition = base.transition) == base) spot.copy(transition = actual.transition) else spot
-                }, nextAction = record.draft.nextAction?.let { action ->
-                    val actual = step.nextAction
-                    val base = old.nextAction
-                    if (actual != null && base != null && action.copy(transition = base.transition) == base) action.copy(transition = actual.transition) else action
-                })
-                drafts[key] = DraftRecord(updatedDraft.copy(dirty = !sameEdits(updatedDraft, step)), step, fresh.project.revision)
-            }
-        }
         invalidatePreview()
         applyProject(fresh)
         mutableState.update { it.copy(route = ProjectRoute.EDIT, selectedStepId = step.id, stepDraft = draftFor(fresh, step)) }
@@ -166,6 +165,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         val project = withContext(Dispatchers.IO) { store.readProject(id) }
             ?: error("项目已不存在，请刷新项目列表")
         invalidatePreview()
+        restoreDrafts(project)
         applyProject(project)
         mutableState.update { it.copy(route = ProjectRoute.STEPS, selectedStepId = null, stepDraft = null, bitmap = null) }
     }
@@ -182,7 +182,10 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
 
     /** The caller presents the deletion impact and gets explicit confirmation before this event. */
     fun deleteProject(id: String) = execute("删除本地项目", editing = true) {
-        val result = withContext(Dispatchers.IO) { store.deleteProject(id) }
+        drafts.keys.filter { it.first == id }.forEach(::invalidateStaging)
+        val result = draftWriteLock.withLock { withContext(Dispatchers.IO) { store.deleteProject(id) } }
+        draftSessions.remove(id)
+        loadedDraftProjects.remove(id)
         drafts.keys.removeAll { it.first == id }
         if (state.value.project?.project?.id == id) {
             mutableState.update { it.copy(project = null, route = ProjectRoute.PROJECTS,
@@ -280,10 +283,12 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         val record = drafts[key] ?: return
         val changed = change(old)
         if (changed == old) return
-        val next = changed.copy(dirty = !sameEdits(changed, record.baseStep))
+        val next = changed.copy(dirty = true,
+            recoveryStatus = DraftRecoveryStatus.STAGING)
         drafts[key] = record.copy(draft = next)
         invalidatePreview(edited = true)
         mutableState.update { it.copy(stepDraft = next, dirtyStepIds = dirtyIds(project.project.id), message = null) }
+        queueStage(key)
     }
 
     fun saveStepDraft() = saveStepDraftInternal(null)
@@ -294,20 +299,30 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         if (state.value.busy || state.value.loadFailed) return
         val project = state.value.project ?: return
         val draft = state.value.stepDraft ?: return
+        if (draft.pendingForm != null) { message("请先应用或取消面板中的输入，再保存步骤"); return }
         if (!draft.dirty) { onSaved?.invoke(); return }
-        val record = drafts[project.project.id to draft.stepId] ?: return
-        if (record.baseRevision != project.project.revision) {
-            message("此步骤已有其他已保存修改，你的草稿仍保留。请先记录要保留的内容，再放弃草稿查看新版本")
+        val key = project.project.id to draft.stepId
+        val record = drafts[key] ?: return
+        if (draft.conflicts.isNotEmpty() || record.baseRevision != project.project.revision) {
+            message("此步骤有新的已保存内容，请先处理冲突。你的修改仍保留")
             return
         }
-        execute("保存步骤", editing = true) {
-            val saved = withContext(Dispatchers.IO) {
-                store.saveStepDraft(project.project.id, draft.stepId, draft.title, draft.description,
-                    draft.isTerminal, draft.hotspots, expectedRevision = record.baseRevision,
-                    nextAction = draft.nextAction)
+        invalidateStaging(key)
+        savingDrafts += key
+        execute("保存步骤", editing = true, afterRefresh = {
+            savingDrafts.remove(key)
+            if (drafts[key]?.draft?.dirty == true) queueStage(key)
+        }) {
+            val saved = draftWriteLock.withLock {
+                val session = sessionFor(project.project.id)
+                withContext(Dispatchers.IO) {
+                    store.saveStepDraft(project.project.id, draft.stepId, draft.title, draft.description,
+                        draft.isTerminal, draft.hotspots, expectedRevision = record.baseRevision,
+                        nextAction = draft.nextAction, editorDraftSession = session)
+                }
             }
             saved.steps.firstOrNull { it.id == draft.stepId }?.let { step ->
-                drafts[project.project.id to step.id] = DraftRecord(step.toDraft(), step, saved.project.revision)
+                drafts[key] = DraftRecord(step.toDraft(), step, saved.project.revision)
             }
             applyProject(saved)
             message("步骤已保存")
@@ -319,9 +334,50 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         if (state.value.busy) return
         val project = state.value.project ?: return
         val step = state.value.selectedStep ?: return
-        drafts.remove(project.project.id to step.id)
+        val key = project.project.id to step.id
+        invalidateStaging(key)
+        execute("放弃本步修改", editing = true, afterRefresh = {
+            if (drafts[key]?.draft?.dirty == true) queueStage(key)
+        }) {
+            draftWriteLock.withLock {
+                // Once clearing starts, keep its committed result and in-memory state together.
+                // Cancellation while waiting for the lock still leaves the author's input intact.
+                withContext(NonCancellable) {
+                    val session = sessionFor(project.project.id)
+                    check(withContext(Dispatchers.IO) { store.clearEditorDraft(project.project.id, step.id, session) })
+                    drafts[key] = DraftRecord(step.toDraft(), step, project.project.revision)
+                    applyProject(project)
+                }
+            }
+        }
+    }
+
+    fun editPendingForm(projectId: String, stepId: String, form: EditorPendingForm?) {
+        if (state.value.project?.project?.id != projectId || state.value.selectedStepId != stepId) return
+        editDraft { it.copy(pendingForm = form) }
+    }
+
+    fun retryDraftStaging() {
+        val projectId = state.value.project?.project?.id ?: return
+        drafts.keys.filter { it.first == projectId && drafts[it]?.draft?.recoveryStatus == DraftRecoveryStatus.FAILED }
+            .forEach(::queueStage)
+    }
+
+    fun resolveDraftConflict(keepMine: Boolean) {
+        if (state.value.busy || state.value.loadFailed) return
+        val project = state.value.project ?: return
+        val step = state.value.selectedStep ?: return
+        val key = project.project.id to step.id
+        val record = drafts[key] ?: return
+        val fields = if (keepMine) record.draft.fields() else EditorDraftReconciliation.merge(
+            record.baseStep.editorFields(), record.draft.fields(), step.editorFields(), useSavedConflicts = true).fields
+        val pending = if (keepMine) record.draft.pendingForm else EditorDraftReconciliation.mergePending(
+            record.draft.pendingForm, record.baseStep.editorFields(), step.editorFields(), useSavedConflicts = true).first
+        val draft = fields.toDraft(step, pending).copy(recoveryStatus = DraftRecoveryStatus.STAGING)
+        drafts[key] = DraftRecord(draft, step, project.project.revision)
         invalidatePreview(edited = true)
-        mutableState.update { it.copy(stepDraft = draftFor(project, step), dirtyStepIds = dirtyIds(project.project.id), message = null) }
+        publishDraftState(project)
+        queueStage(key)
     }
 
     fun setStart(stepId: String) {
@@ -396,7 +452,8 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
                 pruneDeletedTargets(project.project.id, stepId)
             }
         }) {
-            val result = withContext(Dispatchers.IO) { store.deleteStep(project.project.id, stepId) }
+            invalidateStaging(project.project.id to stepId)
+            val result = draftWriteLock.withLock { withContext(Dispatchers.IO) { store.deleteStep(project.project.id, stepId) } }
             drafts.remove(project.project.id to stepId)
             applyProject(result.snapshot)
             // Never resurrect a just-deleted target from another step's retained dirty draft.
@@ -531,28 +588,9 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
             }
         }
 
-    /** Clear invalidated media on every retained draft, including incoming edges on other steps. */
-    private fun reconcileReplacementDrafts(fresh: ProjectSnapshot, replacedStepId: String) {
-        drafts.keys.filter { it.first == fresh.project.id }.forEach { key ->
-            val record = drafts[key] ?: return@forEach
-            val actual = fresh.steps.firstOrNull { it.id == key.second } ?: return@forEach
-            val clearedEdges = record.baseStep.hotspots.filter {
-                it.transition != null && (record.baseStep.id == replacedStepId || it.targetStepId == replacedStepId) &&
-                    actual.hotspots.firstOrNull { current -> current.edgeId == it.edgeId }?.transition == null
-            }.map { it.edgeId }.toSet()
-            val clearedNext = record.baseStep.nextAction?.takeIf {
-                it.transition != null && (record.baseStep.id == replacedStepId || it.targetStepId == replacedStepId) &&
-                    actual.nextAction?.takeIf { current -> current.id == it.id }?.transition == null
-            }?.id
-            fun clearMedia(draft: StepEditDraft) = draft.copy(
-                hotspots = draft.hotspots.map { if (it.edgeId in clearedEdges) it.copy(transition = null) else it },
-                nextAction = draft.nextAction?.let { if (it.id == clearedNext) it.copy(transition = null) else it })
-            val updated = clearMedia(record.draft)
-            // Only a media-only saved change may rebase unsaved author edits automatically.
-            if (sameEdits(clearMedia(record.baseStep.toDraft()), actual))
-                drafts[key] = DraftRecord(updated.copy(dirty = !sameEdits(updated, actual)), actual, fresh.project.revision)
-            else drafts[key] = record.copy(draft = updated)
-        }
+    /** Rebinding always reads current official media, including every incoming edge. */
+    private fun reconcileReplacementDrafts(fresh: ProjectSnapshot, @Suppress("UNUSED_PARAMETER") replacedStepId: String) {
+        reconcileDrafts(fresh)
     }
 
     private fun selectCommittedStep(stepId: String) {
@@ -577,6 +615,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
             val fresh = withContext(Dispatchers.IO) { store.readProject(project.project.id) }
                 ?: error("项目已不存在")
             applyProject(fresh)
+            require(dirtyIds(project.project.id).isEmpty()) { "请先保存或放弃恢复的修改，再预览" }
             val start = fresh.steps.firstOrNull { it.id == requestedId }
                 ?: error("预览步骤已不存在，请重新选择")
             mutableState.update { it.copy(bitmap = null) }
@@ -875,7 +914,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         }
         mutableState.update { it.copy(projects = loaded.summaries,
             retainedMediaWorkspaces = loaded.retainedMediaWorkspaces, loadFailed = false) }
-        if (loaded.selected != null) applyProject(loaded.selected)
+        if (loaded.selected != null) { restoreDrafts(loaded.selected); applyProject(loaded.selected) }
         else if (selectedId != null) {
             drafts.keys.removeAll { it.first == selectedId }
             invalidatePreview()
@@ -891,17 +930,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
             message("项目修订已变化，旧预览已关闭")
         }
         val stepsById = project.steps.associateBy { it.id }
-        drafts.keys.filter { it.first == project.project.id }.forEach { key ->
-            val step = stepsById[key.second]
-            val existing = drafts[key] ?: return@forEach
-            if (step == null) drafts.remove(key)
-            else if (!existing.draft.dirty || sameSavedEdits(existing.draft, step)) {
-                drafts[key] = DraftRecord(step.toDraft(), step, project.project.revision)
-            } else if (sameEdits(existing.baseStep.toDraft(), step)) {
-                // An unrelated reorder/add/rename may advance revision; it did not change these edits.
-                drafts[key] = existing.copy(baseStep = step, baseRevision = project.project.revision)
-            }
-        }
+        reconcileDrafts(project)
         val selectedId = current.selectedStepId?.takeIf { it in stepsById }
         val selectedDraft = selectedId?.let { draftFor(project, stepsById.getValue(it)) }
         mutableState.update { old -> old.copy(project = project, selectedStepId = selectedId,
@@ -917,43 +946,141 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         drafts.getOrPut(project.project.id to step.id) { DraftRecord(step.toDraft(), step, project.project.revision) }.draft
 
     private fun ProjectStep.toDraft() = StepEditDraft(id, title, description, isTerminal, hotspots, nextAction = nextAction)
-    private fun sameEdits(draft: StepEditDraft, step: ProjectStep): Boolean =
-        draft.title == step.title && draft.description == step.description && draft.isTerminal == step.isTerminal &&
-            draft.hotspots.sortedBy { it.id } == step.hotspots.sortedBy { it.id } && draft.nextAction == step.nextAction
+    private fun sameEdits(draft: StepEditDraft, step: ProjectStep): Boolean = draft.fields() == step.editorFields()
 
     private fun sameSavedEdits(draft: StepEditDraft, step: ProjectStep): Boolean = sameEdits(draft.copy(
         title = draft.title.trim(), description = draft.description.trim(), hotspots = draft.hotspots.map {
             it.copy(label = it.label.trim(), endLabel = it.endLabel?.trim())
         }, nextAction = draft.nextAction?.let { it.copy(label = it.label.trim()) }), step)
 
-    private fun pruneDeletedTargets(projectId: String, deletedStepId: String) {
-        // Preserve unrelated typed work and explicitly rerouted drafts while removing the deleted
-        // target. Rebase only when that deletion fully explains the persisted step's differences.
-        drafts.keys.filter { it.first == projectId }.forEach { key ->
-            val record = drafts[key] ?: return@forEach
-            val actual = state.value.project?.steps?.firstOrNull { it.id == key.second } ?: return@forEach
-            val filtered = record.draft.hotspots.filterNot { it.targetStepId == deletedStepId }
-            val nextAction = record.draft.nextAction?.withoutTarget(deletedStepId)
-            val baseAfterDelete = record.baseStep.toDraft().copy(
-                hotspots = record.baseStep.hotspots.filterNot { it.targetStepId == deletedStepId },
-                nextAction = record.baseStep.nextAction?.withoutTarget(deletedStepId))
-            val draft = record.draft.copy(hotspots = filtered, nextAction = nextAction)
-            if (sameEdits(baseAfterDelete, actual)) {
-                drafts[key] = DraftRecord(draft.copy(dirty = !sameEdits(draft, actual)), actual,
-                    state.value.project!!.project.revision)
-            } else {
-                // Keep the old revision conflict, but never retain a deleted target in the form.
-                drafts[key] = record.copy(draft = draft.copy(dirty = !sameEdits(draft, record.baseStep)))
-            }
-        }
-        state.value.project?.let { project ->
-            mutableState.update { it.copy(dirtyStepIds = dirtyIds(projectId),
-                stepDraft = it.selectedStep?.let { step -> draftFor(project, step) }) }
+    private fun pruneDeletedTargets(projectId: String, @Suppress("UNUSED_PARAMETER") deletedStepId: String) {
+        state.value.project?.takeIf { it.project.id == projectId }?.let { project ->
+            reconcileDrafts(project)
+            publishDraftState(project)
         }
     }
 
-    private fun ProjectNextAction.withoutTarget(deletedStepId: String): ProjectNextAction =
-        if (targetStepId == deletedStepId) copy(targetStepId = null) else this
+    private fun StepEditDraft.fields() = EditorDraftFields(title, description, isTerminal,
+        hotspots.map { it.copy(transition = null) }.sortedBy { it.id }, nextAction?.copy(transition = null))
+
+    private fun ProjectStep.withFields(fields: EditorDraftFields): ProjectStep = copy(title = fields.title,
+        description = fields.description, isTerminal = fields.isTerminal,
+        hotspots = fields.withCurrentMedia(this).hotspots, nextAction = fields.withCurrentMedia(this).nextAction)
+
+    private fun EditorDraftFields.toDraft(step: ProjectStep, pending: EditorPendingForm? = null,
+        conflicts: Set<String> = emptySet()): StepEditDraft {
+        val bound = withCurrentMedia(step)
+        return StepEditDraft(step.id, title, description, isTerminal, bound.hotspots,
+            dirty = pending != null || conflicts.isNotEmpty() || this != step.editorFields(),
+            nextAction = bound.nextAction, pendingForm = pending, conflicts = conflicts)
+    }
+
+    private fun publishDraftState(project: ProjectSnapshot) {
+        mutableState.update { current -> current.copy(dirtyStepIds = dirtyIds(project.project.id),
+            stepDraft = current.selectedStepId?.let { drafts[project.project.id to it]?.draft }) }
+    }
+
+    /** The generation is read and changed only on Main; writes and destructive boundaries share a mutex. */
+    private fun invalidateStaging(key: Pair<String, String>) {
+        draftGenerations[key] = (draftGenerations[key] ?: 0L) + 1
+        pendingStages.remove(key)
+    }
+
+    private suspend fun sessionFor(projectId: String): Long = draftSessions[projectId] ?: withContext(Dispatchers.IO) {
+        store.beginEditorDraftSession(projectId)
+    }.also { draftSessions[projectId] = it }
+
+    private fun queueStage(key: Pair<String, String>) {
+        val record = drafts[key] ?: return
+        invalidateStaging(key)
+        pendingStages[key] = draftGenerations.getValue(key)
+        drafts[key] = record.copy(draft = record.draft.copy(recoveryStatus = DraftRecoveryStatus.STAGING,
+            dirty = true))
+        state.value.project?.takeIf { it.project.id == key.first }?.let(::publishDraftState)
+        if (stagingTask?.isActive == true) return
+        stagingTask = viewModelScope.launch {
+            while (pendingStages.isNotEmpty()) {
+                val (nextKey, generation) = pendingStages.entries.first().let { it.key to it.value }
+                pendingStages.remove(nextKey)
+                var staged: StoredEditorDraft? = null
+                try {
+                    val accepted = draftWriteLock.withLock {
+                        if (draftGenerations[nextKey] != generation) return@withLock false
+                        val latest = drafts[nextKey] ?: return@withLock false
+                        staged = latest.takeIf { it.draft.pendingForm != null || it.draft.conflicts.isNotEmpty() ||
+                            !sameEdits(it.draft, it.baseStep) }?.let {
+                            StoredEditorDraft(it.baseRevision, it.baseStep.editorFields(), it.draft.fields(), it.draft.pendingForm)
+                        }
+                        val session = sessionFor(nextKey.first)
+                        withContext(Dispatchers.IO) { store.writeEditorDraft(nextKey.first, nextKey.second, session, staged) }
+                    }
+                    if (draftGenerations[nextKey] == generation && drafts[nextKey] != null) {
+                        check(accepted) { "编辑暂存会话已改变，请重新读取项目" }
+                        val latest = drafts.getValue(nextKey)
+                        drafts[nextKey] = latest.copy(draft = latest.draft.copy(dirty = staged != null,
+                            recoveryStatus = if (staged == null) DraftRecoveryStatus.NONE else DraftRecoveryStatus.STAGED))
+                    }
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) {
+                    if (draftGenerations[nextKey] == generation) drafts[nextKey]?.let { latest ->
+                        drafts[nextKey] = latest.copy(draft = latest.draft.copy(dirty = true,
+                            recoveryStatus = DraftRecoveryStatus.FAILED))
+                    }
+                }
+                state.value.project?.takeIf { it.project.id == nextKey.first }?.let(::publishDraftState)
+            }
+        }
+    }
+
+    /** All rows are loaded before applyProject computes any dirty gates. */
+    private suspend fun restoreDrafts(project: ProjectSnapshot) {
+        if (project.project.id in loadedDraftProjects) return
+        val restored = draftWriteLock.withLock {
+            sessionFor(project.project.id)
+            withContext(Dispatchers.IO) { store.readEditorDrafts(project.project.id) }
+        }
+        restored.forEach { (stepId, saved) ->
+            val step = project.steps.firstOrNull { it.id == stepId } ?: return@forEach
+            val base = step.withFields(saved.base)
+            drafts.putIfAbsent(project.project.id to stepId, DraftRecord(saved.edit.toDraft(step, saved.pendingForm)
+                .copy(recoveryStatus = DraftRecoveryStatus.STAGED), base, saved.baseRevision))
+        }
+        loadedDraftProjects += project.project.id
+        if (restored.isNotEmpty()) message("已恢复上次未保存的编辑，可以继续修改")
+    }
+
+    private fun reconcileDrafts(project: ProjectSnapshot) {
+        val steps = project.steps.associateBy { it.id }
+        drafts.keys.filter { it.first == project.project.id }.forEach { key ->
+            val record = drafts[key] ?: return@forEach
+            val step = steps[key.second]
+            if (step == null) {
+                invalidateStaging(key)
+                drafts.remove(key)
+                return@forEach
+            }
+            if (key in savingDrafts && record.draft.pendingForm == null &&
+                project.project.revision != record.baseRevision && sameSavedEdits(record.draft, step)) {
+                invalidateStaging(key)
+                drafts[key] = DraftRecord(step.toDraft(), step, project.project.revision)
+                return@forEach
+            }
+            val base = EditorDraftReconciliation.prune(record.baseStep.editorFields(), steps.keys)
+            val edit = EditorDraftReconciliation.prune(record.draft.fields(), steps.keys)
+            val saved = step.editorFields()
+            val merged = EditorDraftReconciliation.merge(base, edit, saved)
+            val pending = EditorDraftReconciliation.prune(record.draft.pendingForm, steps.keys)
+            val pendingMerged = EditorDraftReconciliation.mergePending(pending, base, saved)
+            val conflicts = merged.conflicts + pendingMerged.second
+            val nextBase = if (conflicts.isEmpty()) step else step.withFields(
+                EditorDraftReconciliation.advanceBase(base, edit, saved, pending))
+            val next = DraftRecord(merged.fields.toDraft(step, pendingMerged.first, conflicts)
+                .copy(recoveryStatus = record.draft.recoveryStatus), nextBase,
+                if (conflicts.isEmpty()) project.project.revision else record.baseRevision)
+            drafts[key] = next
+            if (next != record && (record.draft.dirty || next.draft.dirty)) queueStage(key)
+        }
+    }
 
     private suspend fun loadBitmap(project: ProjectSnapshot, step: ProjectStep) {
         mutableState.update { it.copy(bitmap = null) }

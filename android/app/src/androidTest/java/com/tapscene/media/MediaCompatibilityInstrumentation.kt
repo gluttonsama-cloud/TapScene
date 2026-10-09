@@ -55,6 +55,8 @@ class MediaCompatibilityInstrumentation : Instrumentation() {
     private suspend fun runChecks() {
         AvcOutputPolicyChecks.run(::status)
         com.tapscene.data.ProjectEditingChecks.run(targetContext, ::status)
+        com.tapscene.data.EditorDraftStoreChecks.run(targetContext, ::status)
+        com.tapscene.ui.EditorDraftWorkspaceChecks.run(targetContext, ::status)
         com.tapscene.data.AuthoredPathChecks.run(targetContext, ::status)
         com.tapscene.ui.AuthoredPreviewChecks.run(targetContext, ::status)
         com.tapscene.data.ReleaseStoreChecks.run(targetContext, ::status)

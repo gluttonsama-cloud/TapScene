@@ -46,6 +46,63 @@ class ProjectStore(context: Context) {
 
     fun readProject(projectId: String): ProjectSnapshot? = access { db -> snapshot(db, projectId) }
 
+    /** Start before reading/resuming drafts. Persisted generations reject writers from old editors,
+     * even when they use another ProjectStore instance. This never changes the formal revision. */
+    fun beginEditorDraftSession(projectId: String): Long = access { db -> transaction(db) {
+        validId(projectId)
+        require(count(db, "projects", "project_id=?", projectId) == 1) { "项目已不存在。" }
+        val previous = currentEditorDraftSession(db, projectId) ?: 0L
+        check(previous < Long.MAX_VALUE) { "编辑暂存会话已达上限，请保留本机数据。" }
+        val next = previous + 1
+        check(db.insertWithOnConflict("editor_draft_sessions", null, ContentValues().apply {
+            put("project_id", projectId); put("generation", next)
+        }, SQLiteDatabase.CONFLICT_REPLACE) != -1L) { "无法开始编辑暂存，请重试。" }
+        next
+    } }
+
+    /** All-or-error read: an unreadable record is retained and reported, never silently discarded. */
+    fun readEditorDrafts(projectId: String): Map<String, StoredEditorDraft> = access { db ->
+        validId(projectId)
+        db.rawQuery("SELECT state_id,draft_json FROM editor_drafts WHERE project_id=? ORDER BY state_id",
+            arrayOf(projectId)).use { cursor ->
+            buildMap {
+                while (cursor.moveToNext()) {
+                    val stepId = cursor.getString(0)
+                    val draft = try { EditorDraftCodec.decode(cursor.getString(1)) }
+                    catch (failure: Exception) { throw IllegalStateException("无法读取步骤编辑暂存；原记录已保留，请重试。", failure) }
+                    put(stepId, draft)
+                }
+            }
+        }
+    }
+
+    /** The workspace serializes one writer with save/discard and per-step event generations.
+     * This session guard additionally prevents old project sessions and deleted targets writing.
+     * Null clears only this row. A failed size/codec/SQLite check leaves the last good row intact. */
+    fun writeEditorDraft(projectId: String, stepId: String, session: Long, draft: StoredEditorDraft?): Boolean = access { db ->
+        validId(projectId); validId(stepId)
+        transaction(db) {
+            if (currentEditorDraftSession(db, projectId) != session ||
+                count(db, "states", "project_id=? AND state_id=?", projectId, stepId) != 1) return@transaction false
+            if (draft == null) db.delete("editor_drafts", "project_id=? AND state_id=?", arrayOf(projectId, stepId))
+            else {
+                val encoded = EditorDraftCodec.encode(draft)
+                check(db.insertWithOnConflict("editor_drafts", null, ContentValues().apply {
+                    put("project_id", projectId); put("state_id", stepId); put("draft_json", encoded)
+                }, SQLiteDatabase.CONFLICT_REPLACE) != -1L) { "步骤编辑暂存失败，请重试。" }
+            }
+            true
+        }
+    }
+
+    fun clearEditorDraft(projectId: String, stepId: String, session: Long): Boolean =
+        writeEditorDraft(projectId, stepId, session, null)
+
+    private fun currentEditorDraftSession(db: SQLiteDatabase, projectId: String): Long? =
+        db.rawQuery("SELECT generation FROM editor_draft_sessions WHERE project_id=?", arrayOf(projectId)).use {
+            if (it.moveToFirst()) it.getLong(0) else null
+        }
+
     fun createProject(title: String, goal: String = ""): ProjectSnapshot {
         val cleanTitle = text(title, "项目名称", 120)
         val cleanGoal = text(goal, "项目目标", 1_000, allowEmpty = true)
@@ -447,6 +504,8 @@ class ProjectStore(context: Context) {
     /**
      * Atomically save the whole editor form; a stale draft never overwrites a newer revision.
      * nextAction is the complete edited value: null explicitly removes the saved button.
+     * A supplied editor session must still be current. Success clears its recovery row in this
+     * transaction; callers serialize queued same-session writes with this save before resuming.
      */
     fun saveStepDraft(
         projectId: String,
@@ -457,6 +516,7 @@ class ProjectStore(context: Context) {
         hotspots: List<ProjectHotspot>,
         expectedRevision: Long? = null,
         nextAction: ProjectNextAction? = null,
+        editorDraftSession: Long? = null,
     ): ProjectSnapshot {
         val cleanTitle = text(title, "步骤标题", 120)
         val cleanDescription = text(description, "步骤说明", 4_000, allowEmpty = true)
@@ -482,6 +542,9 @@ class ProjectStore(context: Context) {
             "终点不能保留热点或下一步动作，请先处理这些动作。"
         }
         return edit(projectId) { db ->
+            check(editorDraftSession == null || currentEditorDraftSession(db, projectId) == editorDraftSession) {
+                "编辑会话已改变，当前修改尚未保存；请重新载入后编辑。"
+            }
             val current = requireSnapshot(db, projectId)
             check(expectedRevision == null || current.project.revision == expectedRevision) {
                 "项目已发生其他修改，当前草稿尚未保存；请重新载入后编辑。"
@@ -527,6 +590,9 @@ class ProjectStore(context: Context) {
             db.update("states", ContentValues().apply {
                 put("title", cleanTitle); put("description", cleanDescription); put("is_terminal", if (isTerminal) 1 else 0)
             }, "project_id=? AND state_id=?", arrayOf(projectId, stepId))
+            // The surrounding edit transaction also bumps revision/reconciles media. Failure in
+            // any later step rolls this clear back alongside the graph and its original draft.
+            db.delete("editor_drafts", "project_id=? AND state_id=?", arrayOf(projectId, stepId))
         }
     }
 
@@ -1372,7 +1438,7 @@ class ProjectStore(context: Context) {
         } }
     }
 
-    private class Database(context: Context, path: String) : SQLiteOpenHelper(context, path, null, 4) {
+    private class Database(context: Context, path: String) : SQLiteOpenHelper(context, path, null, 5) {
         override fun onConfigure(db: SQLiteDatabase) { db.setForeignKeyConstraintsEnabled(true) }
         override fun onCreate(db: SQLiteDatabase) {
             db.execSQL("""CREATE TABLE projects (
@@ -1430,6 +1496,7 @@ class ProjectStore(context: Context) {
             createNextActions(db)
             createTransitions(db)
             createRegions(db)
+            createEditorDrafts(db)
         }
 
         private fun createNextActions(db: SQLiteDatabase) {
@@ -1484,13 +1551,28 @@ class ProjectStore(context: Context) {
             db.execSQL("CREATE INDEX regions_state ON regions(project_id,state_id)")
         }
 
+        private fun createEditorDrafts(db: SQLiteDatabase) {
+            // No media/source/path columns: this is private editor recovery, never official graph.
+            db.execSQL("""CREATE TABLE editor_drafts (
+                project_id TEXT NOT NULL, state_id TEXT NOT NULL, draft_json TEXT NOT NULL,
+                PRIMARY KEY(project_id,state_id),
+                CHECK(length(CAST(draft_json AS BLOB)) BETWEEN 1 AND 262144),
+                FOREIGN KEY(project_id,state_id) REFERENCES states(project_id,state_id) ON DELETE CASCADE
+            )""")
+            db.execSQL("""CREATE TABLE editor_draft_sessions (
+                project_id TEXT PRIMARY KEY NOT NULL, generation INTEGER NOT NULL CHECK(generation>0),
+                FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+            )""")
+        }
+
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            check(oldVersion in 1..3 && newVersion == 4) { "项目数据库需要安全迁移；请保留现有本机数据。" }
+            check(oldVersion in 1..4 && newVersion == 5) { "项目数据库需要安全迁移；请保留现有本机数据。" }
             // SQLiteOpenHelper commits both additive migrations and user_version together. Never
             // rebuild old tables or drop pending image cleanup/import records during an upgrade.
             if (oldVersion < 2) createNextActions(db)
             if (oldVersion < 3) createTransitions(db)
             if (oldVersion < 4) createRegions(db)
+            if (oldVersion < 5) createEditorDrafts(db)
         }
     }
 
