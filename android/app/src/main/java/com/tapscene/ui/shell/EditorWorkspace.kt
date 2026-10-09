@@ -30,14 +30,12 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -51,14 +49,16 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.tapscene.data.EditorFormKind
+import com.tapscene.data.EditorPendingForm
 import com.tapscene.data.ProjectHotspot
 import com.tapscene.data.ProjectLimits
 import com.tapscene.data.ProjectNextAction
 import com.tapscene.data.ProjectSnapshot
 import com.tapscene.data.ProjectStep
 import com.tapscene.media.OpaqueMask
+import com.tapscene.ui.DraftRecoveryStatus
 import com.tapscene.ui.StepEditDraft
-import java.util.Locale
 import java.util.UUID
 
 /** A single correction workspace. This does not own project persistence or source media. */
@@ -81,6 +81,9 @@ data class EditorCallbacks(
     val onRemoveNextAction: () -> Unit = {},
     val onOpenRegions: () -> Unit = {},
     val onCorrectImage: (Boolean) -> Unit = {},
+    val onPendingFormChange: (EditorPendingForm?) -> Unit = {},
+    val onRetryStaging: () -> Unit = {},
+    val onResolveConflict: (Boolean) -> Unit = {},
 )
 
 @Composable
@@ -98,13 +101,11 @@ fun EditorWorkspaceContent(
     var mode by rememberSaveable(draft.stepId) { mutableStateOf(EditorMode.FRAME) }
     var adding by rememberSaveable(draft.stepId) { mutableStateOf(false) }
     var selectedId by rememberSaveable(draft.stepId) { mutableStateOf<String?>(null) }
-    var showName by rememberSaveable(draft.stepId) { mutableStateOf(false) }
-    var editingHotspot by remember(draft.stepId) { mutableStateOf<ProjectHotspot?>(null) }
-    var editingNextAction by remember(draft.stepId) { mutableStateOf<ProjectNextAction?>(null) }
     var terminalConflict by rememberSaveable(draft.stepId) { mutableStateOf(false) }
     var showDiscard by rememberSaveable(draft.stepId) { mutableStateOf(false) }
     val step = project.steps.firstOrNull { it.id == draft.stepId }
     val selected = draft.hotspots.firstOrNull { it.id == selectedId }
+    val pendingForm = draft.pendingForm
     val hasBitmap = bitmap != null && !bitmap.isRecycled
     val canAdd = !busy && hasBitmap && !draft.isTerminal && draft.hotspots.size < ProjectLimits.MAX_HOTSPOTS_PER_STEP
     val goBack: () -> Unit = {
@@ -116,10 +117,11 @@ fun EditorWorkspaceContent(
             }
         }
     }
-    BackHandler(enabled = !showName && editingHotspot == null && editingNextAction == null && !showDiscard) { goBack() }
+    BackHandler(enabled = pendingForm == null && draft.conflicts.isEmpty() && !showDiscard) { goBack() }
     val openNew: (OpaqueMask) -> Unit = { rect ->
         if (canAdd) {
-            editingHotspot = ProjectHotspot(UUID.randomUUID().toString(), "", rect, null, "演示结束", UUID.randomUUID().toString())
+            callbacks.onPendingFormChange(ProjectHotspot(UUID.randomUUID().toString(), "", rect, null,
+                "演示结束", UUID.randomUUID().toString()).toPendingForm())
             adding = false
         }
     }
@@ -130,15 +132,36 @@ fun EditorWorkspaceContent(
             Row(Modifier.fillMaxWidth().heightIn(min = 60.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = goBack, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("返回") }
                 Column(Modifier.weight(1f).clickable(enabled = !busy, role = Role.Button,
-                    onClickLabel = "编辑步骤名称与讲解") { showName = true }.padding(vertical = 8.dp)) {
+                    onClickLabel = "编辑步骤名称与讲解") {
+                    callbacks.onPendingFormChange(EditorPendingForm(EditorFormKind.NAME,
+                        title = draft.title, description = draft.description))
+                }.padding(vertical = 8.dp)) {
                     Text(draft.title.ifBlank { "未命名步骤" }, style = MaterialTheme.typography.titleMedium,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    val saveStatus = if (busy) "处理中" else if (draft.dirty) "未保存" else "已保存"
+                    val saveStatus = when {
+                        draft.conflicts.isNotEmpty() -> "需核对"
+                        draft.recoveryStatus == DraftRecoveryStatus.FAILED -> "暂存失败"
+                        busy -> "处理中"
+                        draft.recoveryStatus == DraftRecoveryStatus.STAGING -> "暂存中"
+                        draft.recoveryStatus == DraftRecoveryStatus.STAGED -> "已暂存"
+                        draft.dirty || pendingForm != null -> "未保存"
+                        else -> "已保存"
+                    }
                     Text("步骤 ${project.steps.indexOfFirst { it.id == draft.stepId } + 1} · $saveStatus",
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (draft.dirty) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                        color = when {
+                            draft.recoveryStatus == DraftRecoveryStatus.FAILED -> MaterialTheme.colorScheme.error
+                            draft.dirty || pendingForm != null -> MaterialTheme.colorScheme.primary
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        })
                 }
-                TextButton(onClick = callbacks.onSave, enabled = !busy && draft.dirty, modifier = Modifier.heightIn(min = 48.dp)) { Text("保存") }
+                if (draft.recoveryStatus == DraftRecoveryStatus.FAILED) {
+                    TextButton(onClick = callbacks.onRetryStaging, enabled = !busy,
+                        modifier = Modifier.heightIn(min = 48.dp)) { Text("重试") }
+                }
+                TextButton(onClick = callbacks.onSave,
+                    enabled = !busy && draft.dirty && pendingForm == null && draft.conflicts.isEmpty(),
+                    modifier = Modifier.heightIn(min = 48.dp)) { Text("保存") }
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             EditorCanvas(bitmap = bitmap,
@@ -199,7 +222,7 @@ fun EditorWorkspaceContent(
                         if (selected != null) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Text("→ ${editorTargetLabel(selected, project.steps)}", Modifier.weight(1f),
                                 style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            TextButton(onClick = { editingHotspot = selected }, enabled = !busy) { Text("精调 / 动作") }
+                            TextButton(onClick = { callbacks.onPendingFormChange(selected.toPendingForm()) }, enabled = !busy) { Text("精调 / 动作") }
                             TextButton(onClick = { callbacks.onRemoveHotspot(selected.id); selectedId = null }, enabled = !busy) { Text("移除") }
                         } else TextButton(onClick = { openNew(OpaqueMask(0.25f, 0.3f, 0.75f, 0.5f)) }, enabled = canAdd) {
                             Text("按比例添加（无需拖动）")
@@ -209,7 +232,7 @@ fun EditorWorkspaceContent(
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Text("本步的出口", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
                             if (draft.nextAction == null) TextButton(onClick = {
-                                editingNextAction = ProjectNextAction(UUID.randomUUID().toString(), "下一步", null)
+                                callbacks.onPendingFormChange(ProjectNextAction(UUID.randomUUID().toString(), "下一步", null).toPendingForm())
                             }, enabled = !busy && !draft.isTerminal) { Text("+ 下一步按钮") }
                         }
                         if (draft.isTerminal) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -221,14 +244,14 @@ fun EditorWorkspaceContent(
                             val validTarget = project.steps.any { it.id == action.targetStepId }
                             Row(Modifier.fillMaxWidth().heightIn(min = 56.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Column(Modifier.weight(1f).clickable(enabled = !busy && !draft.isTerminal, role = Role.Button,
-                                    onClickLabel = "编辑下一步按钮") { editingNextAction = action }.padding(vertical = 4.dp)) {
+                                    onClickLabel = "编辑下一步按钮") { callbacks.onPendingFormChange(action.toPendingForm()) }.padding(vertical = 4.dp)) {
                                     Text(action.label, style = MaterialTheme.typography.bodyMedium)
                                     Text("画布外按钮 · 作者编排", style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     Text("→ ${editorNextTargetLabel(action, project.steps)}", style = MaterialTheme.typography.bodySmall,
                                         color = if (validTarget) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
                                 }
-                                TextButton(onClick = { editingNextAction = action }, enabled = !busy && !draft.isTerminal) {
+                                TextButton(onClick = { callbacks.onPendingFormChange(action.toPendingForm()) }, enabled = !busy && !draft.isTerminal) {
                                     Text(if (validTarget) "编辑" else "选目标")
                                 }
                                 TextButton(onClick = { callbacks.onOpenTransition(action.id) }, enabled = !busy && validTarget) {
@@ -244,7 +267,7 @@ fun EditorWorkspaceContent(
                         }
                         draft.hotspots.forEachIndexed { index, hotspot ->
                             Row(Modifier.fillMaxWidth().heightIn(min = 56.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Column(Modifier.weight(1f).clickable(enabled = !busy) { editingHotspot = hotspot }.padding(vertical = 4.dp)) {
+                                Column(Modifier.weight(1f).clickable(enabled = !busy) { callbacks.onPendingFormChange(hotspot.toPendingForm()) }.padding(vertical = 4.dp)) {
                                     Text("${index + 1}  ${hotspot.label}", style = MaterialTheme.typography.bodyMedium)
                                     Text("→ ${editorTargetLabel(hotspot, project.steps)}", style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -292,21 +315,34 @@ fun EditorWorkspaceContent(
         }
     }
 
-    if (showName) StepNameSheet(draft, !busy, onDismiss = { showName = false }, onConfirm = { title, description ->
-        callbacks.onTitleChange(title); callbacks.onDescriptionChange(description); showName = false
-    })
-    editingHotspot?.let { hotspot ->
-        HotspotEditorSheet(hotspot, project.steps, !busy, onDismiss = { editingHotspot = null }, onConfirm = {
-            callbacks.onPutHotspot(it); selectedId = it.id; editingHotspot = null
-        })
+    // The persisted pending form is the only source of modal inputs, including invalid text.
+    // A restored form opens automatically; a conflict must be resolved before applying it.
+    if (draft.conflicts.isEmpty()) pendingForm?.let { form ->
+        val dismiss = { callbacks.onPendingFormChange(null) }
+        when (form.kind) {
+            EditorFormKind.NAME -> StepNameSheet(form, !busy, draft.recoveryStatus,
+                callbacks.onRetryStaging, callbacks.onPendingFormChange, dismiss) { title, description ->
+                callbacks.onTitleChange(title)
+                callbacks.onDescriptionChange(description)
+                callbacks.onPendingFormChange(null)
+            }
+            EditorFormKind.HOTSPOT -> HotspotEditorSheet(form,
+                draft.hotspots.firstOrNull { it.id == form.objectId }, project.steps, !busy && !draft.isTerminal,
+                draft.recoveryStatus, callbacks.onRetryStaging, callbacks.onPendingFormChange, dismiss) {
+                callbacks.onPutHotspot(it)
+                selectedId = it.id
+                callbacks.onPendingFormChange(null)
+            }
+            EditorFormKind.NEXT_ACTION -> NextActionEditorSheet(form,
+                draft.nextAction?.takeIf { it.id == form.objectId }, project.steps, !busy && !draft.isTerminal,
+                draft.recoveryStatus, callbacks.onRetryStaging, callbacks.onPendingFormChange, dismiss) {
+                callbacks.onPutNextAction(it)
+                callbacks.onPendingFormChange(null)
+            }
+        }
     }
-    editingNextAction?.let { action ->
-        NextActionEditorSheet(action, project.steps, !busy && !draft.isTerminal,
-            onDismiss = { editingNextAction = null }, onConfirm = {
-                callbacks.onPutNextAction(it); editingNextAction = null
-            })
-    }
-    if (showDiscard) AlertDialog(onDismissRequest = { showDiscard = false }, title = { Text("放弃本步修改？") },
+    if (draft.conflicts.isNotEmpty()) DraftConflictDialog(project, draft, !busy, callbacks.onResolveConflict)
+    if (showDiscard && draft.conflicts.isEmpty()) AlertDialog(onDismissRequest = { showDiscard = false }, title = { Text("放弃本步修改？") },
         text = { Text("这一步将恢复到最近一次保存的内容。") },
         confirmButton = { TextButton(onClick = { callbacks.onDiscard(); showDiscard = false }, enabled = !busy) { Text("放弃修改") } },
         dismissButton = { TextButton(onClick = { showDiscard = false }) { Text("继续编辑") } })
@@ -360,80 +396,96 @@ private fun EditorModeIcon(mode: EditorMode, tint: Color) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun StepNameSheet(draft: StepEditDraft, enabled: Boolean, onDismiss: () -> Unit,
+private fun StepNameSheet(form: EditorPendingForm, enabled: Boolean, recoveryStatus: DraftRecoveryStatus,
+    onRetry: () -> Unit, onChange: (EditorPendingForm) -> Unit, onDismiss: () -> Unit,
     onConfirm: (String, String) -> Unit) {
-    var title by rememberSaveable(draft.stepId) { mutableStateOf(draft.title) }
-    var description by rememberSaveable(draft.stepId) { mutableStateOf(draft.description) }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp),
+        StepNameFormContent(form, enabled, recoveryStatus, onRetry, onChange, onDismiss, onConfirm)
+    }
+}
+
+/** Shared production content: host rendering cannot capture the platform modal window. */
+@Composable
+internal fun StepNameFormContent(form: EditorPendingForm, enabled: Boolean, recoveryStatus: DraftRecoveryStatus,
+    onRetry: () -> Unit, onChange: (EditorPendingForm) -> Unit, onDismiss: () -> Unit,
+    onConfirm: (String, String) -> Unit) {
+    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("名称与讲解", style = MaterialTheme.typography.titleMedium)
-            OutlinedTextField(title, { title = it }, label = { Text("步骤名称") }, singleLine = true,
+            PendingFormStatus(recoveryStatus, enabled, onRetry)
+            OutlinedTextField(form.title, { onChange(form.copy(title = it)) }, label = { Text("步骤名称") }, singleLine = true,
                 enabled = enabled, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(description, { description = it }, label = { Text("讲解（可选）") }, minLines = 3,
+            OutlinedTextField(form.description, { onChange(form.copy(description = it)) }, label = { Text("讲解（可选）") }, minLines = 3, maxLines = 8,
                 enabled = enabled, modifier = Modifier.fillMaxWidth())
             Text("应用后记得保存步骤。关闭此面板将丢弃未应用的内容。", style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 TextButton(onClick = onDismiss) { Text("取消") }
-                Button(onClick = { onConfirm(title.trim(), description.trim()) }, enabled = enabled && title.isNotBlank()) { Text("应用") }
+                Button(onClick = { onConfirm(form.title.trim(), form.description.trim()) },
+                    enabled = enabled && form.title.isNotBlank()) { Text("应用") }
             }
         }
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun HotspotEditorSheet(hotspot: ProjectHotspot, steps: List<ProjectStep>, enabled: Boolean,
+private fun HotspotEditorSheet(form: EditorPendingForm, original: ProjectHotspot?, steps: List<ProjectStep>, enabled: Boolean,
+    recoveryStatus: DraftRecoveryStatus, onRetry: () -> Unit, onChange: (EditorPendingForm) -> Unit,
     onDismiss: () -> Unit, onConfirm: (ProjectHotspot) -> Unit) {
-    var label by rememberSaveable(hotspot.id) { mutableStateOf(hotspot.label) }
-    var targetId by rememberSaveable(hotspot.id) { mutableStateOf(hotspot.targetStepId) }
-    var ends by rememberSaveable(hotspot.id) { mutableStateOf(hotspot.endLabel != null) }
-    var endLabel by rememberSaveable(hotspot.id) { mutableStateOf(hotspot.endLabel ?: "演示结束") }
-    var showGeometry by rememberSaveable(hotspot.id) { mutableStateOf(false) }
-    var geometryChanged by rememberSaveable(hotspot.id) { mutableStateOf(false) }
-    var left by rememberSaveable(hotspot.id) { mutableStateOf(editorPercent(hotspot.rect.left)) }
-    var top by rememberSaveable(hotspot.id) { mutableStateOf(editorPercent(hotspot.rect.top)) }
-    var width by rememberSaveable(hotspot.id) { mutableStateOf(editorPercent(hotspot.rect.right - hotspot.rect.left)) }
-    var height by rememberSaveable(hotspot.id) { mutableStateOf(editorPercent(hotspot.rect.bottom - hotspot.rect.top)) }
-    val rectangle = if (geometryChanged) editorPercentageRect(left, top, width, height) else hotspot.rect
-    val validTarget = if (ends) endLabel.isNotBlank() else steps.any { it.id == targetId }
+    // Visibility is presentation-only; every editable value belongs to the pending form.
+    var showGeometry by rememberSaveable(form.objectId) { mutableStateOf(false) }
+    val rectangle = if (original != null && listOf(form.left, form.top, form.right, form.bottom) ==
+        listOf(original.rect.left, original.rect.top, original.rect.right, original.rect.bottom).map(::editorPercent)) {
+        original.rect // Editing only the label or target must not round an existing rectangle.
+    } else editorPercentageRect(form.left, form.top, form.right, form.bottom)
+    val validTarget = if (form.endsDemo) form.endLabel.isNotBlank() else steps.any { it.id == form.targetStepId }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("热点动作", style = MaterialTheme.typography.titleMedium)
-            OutlinedTextField(label, { label = it }, label = { Text("动作名称") }, singleLine = true,
+            PendingFormStatus(recoveryStatus, enabled, onRetry)
+            OutlinedTextField(form.label, { onChange(form.copy(label = it)) }, label = { Text("动作名称") }, singleLine = true,
                 enabled = enabled, modifier = Modifier.fillMaxWidth())
             Text("点击后前往", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 8.dp))
-            EditorTargetRow("结束演示", null, ends, enabled) { ends = true }
-            if (ends) OutlinedTextField(endLabel, { endLabel = it }, label = { Text("结束说明") },
+            EditorTargetRow("结束演示", null, form.endsDemo, enabled) { onChange(form.copy(endsDemo = true)) }
+            if (form.endsDemo) OutlinedTextField(form.endLabel, { onChange(form.copy(endLabel = it)) }, label = { Text("结束说明") },
                 enabled = enabled, modifier = Modifier.fillMaxWidth())
             steps.forEachIndexed { index, step ->
-                EditorTargetRow("${index + 1}  ${step.title}", step.source.displayName, !ends && targetId == step.id, enabled) {
-                    targetId = step.id; ends = false
+                EditorTargetRow("${index + 1}  ${step.title}", step.source.displayName,
+                    !form.endsDemo && form.targetStepId == step.id, enabled) {
+                    onChange(form.copy(targetStepId = step.id, endsDemo = false))
                 }
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             TextButton(onClick = { showGeometry = !showGeometry }, modifier = Modifier.fillMaxWidth()) {
                 Text(if (showGeometry) "收起范围精调 ↑" else "范围精调（画面百分比） ↓")
             }
-            if (showGeometry) {
+            if (showGeometry || rectangle == null) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    EditorPercentageField("左边 %", left, { left = it; geometryChanged = true }, enabled, Modifier.weight(1f))
-                    EditorPercentageField("顶部 %", top, { top = it; geometryChanged = true }, enabled, Modifier.weight(1f))
+                    EditorPercentageField("左边 %", form.left, { onChange(form.copy(left = it)) }, enabled, Modifier.weight(1f))
+                    EditorPercentageField("顶部 %", form.top, { onChange(form.copy(top = it)) }, enabled, Modifier.weight(1f))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    EditorPercentageField("宽度 %", width, { width = it; geometryChanged = true }, enabled, Modifier.weight(1f))
-                    EditorPercentageField("高度 %", height, { height = it; geometryChanged = true }, enabled, Modifier.weight(1f))
+                    EditorPercentageField("右边 %", form.right, { onChange(form.copy(right = it)) }, enabled, Modifier.weight(1f))
+                    EditorPercentageField("底部 %", form.bottom, { onChange(form.copy(bottom = it)) }, enabled, Modifier.weight(1f))
                 }
             }
-            if (rectangle == null) Text("范围须在画面内，宽高须大于 0。", color = MaterialTheme.colorScheme.error,
+            if (rectangle == null) Text("范围须在 0–100% 内，右边大于左边，底部大于顶部。", color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 TextButton(onClick = onDismiss) { Text("取消") }
-                Button(onClick = { rectangle?.let { rect -> onConfirm(hotspot.copy(label = label.trim(), rect = rect,
-                    targetStepId = if (ends) null else targetId, endLabel = if (ends) endLabel.trim() else null)) } },
-                    enabled = enabled && label.isNotBlank() && rectangle != null && validTarget) { Text("应用动作") }
+                Button(onClick = {
+                    val rect = rectangle
+                    val objectId = form.objectId
+                    val edgeId = form.edgeId
+                    if (rect != null && objectId != null && edgeId != null) onConfirm(ProjectHotspot(
+                        id = objectId, label = form.label.trim(), rect = rect,
+                        targetStepId = if (form.endsDemo) null else form.targetStepId,
+                        endLabel = if (form.endsDemo) form.endLabel.trim() else null, edgeId = edgeId,
+                        transition = original?.transition,
+                    ))
+                }, enabled = enabled && form.label.isNotBlank() && rectangle != null && validTarget &&
+                    form.objectId != null && form.edgeId != null) { Text("应用动作") }
             }
         }
     }
@@ -442,34 +494,122 @@ private fun HotspotEditorSheet(hotspot: ProjectHotspot, steps: List<ProjectStep>
 /** This action has no rectangle and remains separate from the canvas hotspot editor. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun NextActionEditorSheet(action: ProjectNextAction, steps: List<ProjectStep>, enabled: Boolean,
+private fun NextActionEditorSheet(form: EditorPendingForm, original: ProjectNextAction?, steps: List<ProjectStep>, enabled: Boolean,
+    recoveryStatus: DraftRecoveryStatus, onRetry: () -> Unit, onChange: (EditorPendingForm) -> Unit,
     onDismiss: () -> Unit, onConfirm: (ProjectNextAction) -> Unit) {
-    var label by rememberSaveable(action.id) { mutableStateOf(action.label) }
-    var targetId by rememberSaveable(action.id) { mutableStateOf(action.targetStepId) }
-    val validTarget = steps.any { it.id == targetId }
+    val validTarget = steps.any { it.id == form.targetStepId }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("下一步按钮", style = MaterialTheme.typography.titleMedium)
+            PendingFormStatus(recoveryStatus, enabled, onRetry)
             Text("画布外按钮 · 作者编排", style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
-            OutlinedTextField(label, { label = it }, label = { Text("按钮文字") }, singleLine = true,
+            OutlinedTextField(form.label, { onChange(form.copy(label = it)) }, label = { Text("按钮文字") }, singleLine = true,
                 enabled = enabled, modifier = Modifier.fillMaxWidth())
             Text("点击后前往", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 8.dp))
-            if (!validTarget) Text(if (action.targetStepId == null) "请选择目标步骤。" else "原目标已失效，请重新选择。",
+            if (!validTarget) Text(if (form.targetStepId == null) "请选择目标步骤。" else "原目标已失效，请重新选择。",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             steps.forEachIndexed { index, step ->
-                EditorTargetRow("${index + 1}  ${step.title}", step.source.displayName, targetId == step.id, enabled) {
-                    targetId = step.id
+                EditorTargetRow("${index + 1}  ${step.title}", step.source.displayName, form.targetStepId == step.id, enabled) {
+                    onChange(form.copy(targetStepId = step.id))
                 }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 TextButton(onClick = onDismiss) { Text("取消") }
-                Button(onClick = { onConfirm(action.copy(label = label.trim(), targetStepId = targetId)) },
-                    enabled = enabled && label.isNotBlank() && validTarget) { Text("应用动作") }
+                Button(onClick = { form.objectId?.let { id -> onConfirm(ProjectNextAction(
+                    id, form.label.trim(), form.targetStepId, original?.transition)) } },
+                    enabled = enabled && form.objectId != null && form.label.isNotBlank() && validTarget) { Text("应用动作") }
             }
         }
     }
+}
+
+@Composable
+private fun PendingFormStatus(status: DraftRecoveryStatus, enabled: Boolean, onRetry: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(when (status) {
+            DraftRecoveryStatus.NONE -> "尚未应用到步骤"
+            DraftRecoveryStatus.STAGING -> "暂存中 · 尚未应用"
+            DraftRecoveryStatus.STAGED -> "已暂存 · 尚未应用"
+            DraftRecoveryStatus.FAILED -> "暂存失败 · 退出前请重试"
+        }, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+            color = if (status == DraftRecoveryStatus.FAILED) MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.onSurfaceVariant)
+        if (status == DraftRecoveryStatus.FAILED) TextButton(onClick = onRetry, enabled = enabled) { Text("重试暂存") }
+    }
+}
+
+private fun ProjectHotspot.toPendingForm() = EditorPendingForm(
+    kind = EditorFormKind.HOTSPOT, objectId = id, edgeId = edgeId, label = label,
+    left = editorPercent(rect.left), top = editorPercent(rect.top),
+    right = editorPercent(rect.right), bottom = editorPercent(rect.bottom),
+    targetStepId = targetStepId, endLabel = endLabel ?: "演示结束", endsDemo = endLabel != null,
+)
+
+private fun ProjectNextAction.toPendingForm() = EditorPendingForm(
+    kind = EditorFormKind.NEXT_ACTION, objectId = id, label = label, targetStepId = targetStepId,
+)
+
+@Composable
+private fun DraftConflictDialog(project: ProjectSnapshot, draft: StepEditDraft, enabled: Boolean,
+    onResolve: (Boolean) -> Unit) {
+    val saved = project.steps.firstOrNull { it.id == draft.stepId }
+    val pending = draft.pendingForm
+    fun hotspotText(hotspots: List<ProjectHotspot>): String = hotspots.joinToString("\n\n") { hotspot ->
+        "${hotspot.label.ifBlank { "未命名动作" }} → ${editorTargetLabel(hotspot, project.steps)}\n" +
+            "左 ${editorPercent(hotspot.rect.left)}% · 上 ${editorPercent(hotspot.rect.top)}%\n" +
+            "右 ${editorPercent(hotspot.rect.right)}% · 下 ${editorPercent(hotspot.rect.bottom)}%"
+    }.ifEmpty { "没有热点" }
+    fun nextText(action: ProjectNextAction?): String = action?.let {
+        "${it.label}\n→ ${editorNextTargetLabel(it, project.steps)}"
+    } ?: "没有下一步按钮"
+    fun pendingTarget(form: EditorPendingForm): String = if (form.endsDemo) "结束 · ${form.endLabel}" else
+        project.steps.firstOrNull { it.id == form.targetStepId }?.title ?: "尚未选择或目标已失效"
+    val pendingHotspot = pending?.takeIf { it.kind == EditorFormKind.HOTSPOT }?.let {
+        "\n\n面板中待应用：\n${it.label.ifBlank { "未命名动作" }} → ${pendingTarget(it)}\n" +
+            "左 ${it.left}% · 上 ${it.top}%\n右 ${it.right}% · 下 ${it.bottom}%"
+    }.orEmpty()
+    val pendingNext = pending?.takeIf { it.kind == EditorFormKind.NEXT_ACTION }?.let {
+        "\n\n面板中待应用：\n${it.label}\n→ ${pendingTarget(it)}"
+    }.orEmpty()
+    val fields = listOf(
+        Triple("标题", saved?.title ?: "步骤已移除",
+            if (pending?.kind == EditorFormKind.NAME) "${pending.title}\n（面板中待应用）" else draft.title),
+        Triple("讲解", saved?.description.orEmpty().ifBlank { "未填写" },
+            if (pending?.kind == EditorFormKind.NAME) "${pending.description.ifBlank { "未填写" }}\n（面板中待应用）"
+            else draft.description.ifBlank { "未填写" }),
+        Triple("终点", if (saved?.isTerminal == true) "在这一步结束" else "继续演示",
+            if (draft.isTerminal) "在这一步结束" else "继续演示"),
+        Triple("热点", hotspotText(saved?.hotspots.orEmpty()), hotspotText(draft.hotspots) + pendingHotspot),
+        Triple("下一步", nextText(saved?.nextAction), nextText(draft.nextAction) + pendingNext),
+    ).filter { it.first in draft.conflicts }
+    AlertDialog(
+        onDismissRequest = {},
+        title = { Text("核对有冲突的修改") },
+        text = {
+            Column(Modifier.fillMaxWidth().heightIn(max = 480.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("已保存内容有更新。选择前，两份内容都会保留；其它已合并的修改不受影响。",
+                    style = MaterialTheme.typography.bodySmall)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("当前已保存", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                    Text("我的本机草稿", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary)
+                }
+                fields.forEach { (label, formal, local) ->
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Text(label, style = MaterialTheme.typography.labelLarge)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(formal.ifBlank { "未填写" }, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                        Text(local.ifBlank { "未填写" }, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onResolve(true) }, enabled = enabled) { Text("保留我的修改") } },
+        dismissButton = { TextButton(onClick = { onResolve(false) }, enabled = enabled) { Text("使用已保存内容") } },
+    )
 }
 
 @Composable
@@ -501,13 +641,12 @@ internal fun editorNextTargetLabel(action: ProjectNextAction, steps: List<Projec
         if (index >= 0) "${index + 1} ${steps[index].title}" else "待修复 · 请选择目标"
     }
 
-private fun editorPercent(value: Float): String = String.format(Locale.ROOT, "%.2f", value * 100f).trimEnd('0').trimEnd('.')
+private fun editorPercent(value: Float): String = (value * 100f).toString().removeSuffix(".0")
 
-private fun editorPercentageRect(left: String, top: String, width: String, height: String): OpaqueMask? {
-    val values = listOf(left, top, width, height).map { it.toFloatOrNull() ?: return null }
-    if (values.any { !it.isFinite() }) return null
-    val (x, y, w, h) = values.map { it / 100f }
-    if (x < 0 || y < 0 || x >= 1 || y >= 1 || w <= 0 || h <= 0 || x + w <= x || y + h <= y ||
-        x + w > 1.000001f || y + h > 1.000001f) return null
-    return OpaqueMask(x, y, (x + w).coerceAtMost(1f), (y + h).coerceAtMost(1f))
+private fun editorPercentageRect(left: String, top: String, right: String, bottom: String): OpaqueMask? {
+    val values = listOf(left, top, right, bottom).map { it.toFloatOrNull() ?: return null }
+    if (values.any { !it.isFinite() || it < 0f || it > 100f }) return null
+    val (x1, y1, x2, y2) = values.map { it / 100f }
+    if (x2 <= x1 || y2 <= y1) return null
+    return OpaqueMask(x1, y1, x2, y2)
 }

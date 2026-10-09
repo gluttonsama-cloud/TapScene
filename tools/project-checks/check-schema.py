@@ -75,13 +75,15 @@ single_line = re.findall(r'db.execSQL\("(CREATE (?:INDEX|TABLE).*?)"\)', s)
 next_sql = [sql for sql in tables + single_line if re.match(r'CREATE (?:TABLE|INDEX) next_actions', sql)]
 transition_sql = [sql for sql in tables + single_line if re.match(r'CREATE (?:TABLE|INDEX) (?:edge_transitions|transition_imports)', sql)]
 region_sql = [sql for sql in tables + single_line if re.match(r'CREATE (?:TABLE|INDEX) regions', sql)]
+editor_sql = [sql for sql in tables + single_line if re.match(r'CREATE TABLE editor_draft(?:s|_sessions)', sql)]
+assert len(editor_sql) == 2
 assert len(region_sql) == 2
 assert len(transition_sql) == 3
 assert len(next_sql) == 2
 legacy = sqlite3.connect(':memory:')
 legacy.execute('PRAGMA foreign_keys=ON')
 for sql in tables + single_line:
- if sql not in next_sql + transition_sql + region_sql: legacy.execute(sql)
+ if sql not in next_sql + transition_sql + region_sql + editor_sql: legacy.execute(sql)
 legacy.execute('PRAGMA user_version=1')
 legacy.execute("INSERT INTO projects VALUES('legacy','Title','Goal',11,12,9,'a')")
 legacy.execute("INSERT INTO sources VALUES('legacy','source','{\"kept\":true}')")
@@ -158,7 +160,7 @@ for previous_version in (1, 2):
  migrated = sqlite3.connect(':memory:')
  migrated.execute('PRAGMA foreign_keys=ON')
  for sql in tables + single_line:
-  if sql not in transition_sql + region_sql and (previous_version == 2 or sql not in next_sql): migrated.execute(sql)
+  if sql not in transition_sql + region_sql + editor_sql and (previous_version == 2 or sql not in next_sql): migrated.execute(sql)
  migrated.execute('PRAGMA user_version=' + str(previous_version))
  migrated.execute("INSERT INTO projects VALUES('migration','Kept','Goal',11,12,7,'a')")
  migrated.execute("INSERT INTO sources VALUES('migration','source','source-private-json')")
@@ -224,7 +226,7 @@ for previous_version in (1, 2):
 for previous_version in (1, 2, 3):
  m = sqlite3.connect(':memory:'); m.execute('PRAGMA foreign_keys=ON')
  for sql in tables + single_line:
-  if sql in region_sql or (previous_version < 2 and sql in next_sql) or (previous_version < 3 and sql in transition_sql): continue
+  if sql in region_sql + editor_sql or (previous_version < 2 and sql in next_sql) or (previous_version < 3 and sql in transition_sql): continue
   m.execute(sql)
  m.execute("INSERT INTO projects VALUES('p','Kept','Goal',1,2,7,'s')")
  m.execute("INSERT INTO sources VALUES('p','src','private')")
@@ -254,3 +256,83 @@ for previous_version in (1, 2, 3):
  assert m.execute('SELECT COUNT(*) FROM asset_cleanup').fetchone()[0]==1
  assert not list(m.execute('PRAGMA foreign_key_check'))
  print('PASS v%d-to-v4 additive region migration, pixel/anchor/layer/FK constraints, stale dependency and cascade' % previous_version)
+
+# v5 recovery is additive from every deployed schema. Existing rows, graph revision and recovery
+# journals are unchanged; raw form strings live only in the new private whitelist JSON record.
+for previous_version in (1, 2, 3, 4):
+ m = sqlite3.connect(':memory:'); m.execute('PRAGMA foreign_keys=ON')
+ for sql in tables + single_line:
+  if sql in editor_sql or (previous_version < 2 and sql in next_sql) or (previous_version < 3 and sql in transition_sql) or (previous_version < 4 and sql in region_sql): continue
+  m.execute(sql)
+ m.execute('PRAGMA user_version=' + str(previous_version))
+ m.execute("INSERT INTO projects VALUES('p','Kept','Goal',1,2,7,'s')")
+ m.execute("INSERT INTO sources VALUES('p','src','private-source')")
+ m.execute("INSERT INTO local_assets VALUES('base','p','base.png','sha',50,20,30)")
+ m.execute("INSERT INTO states VALUES('p','s','capture',0,'Step','Text',0,'src','base',0,1000,'[]')")
+ m.execute("INSERT INTO asset_cleanup VALUES('deleted','queued.png')")
+ m.execute("INSERT INTO asset_imports VALUES('p','pending')")
+ if previous_version >= 2: m.execute("INSERT INTO next_actions VALUES('p','next','s','Again','s')")
+ if previous_version >= 3: m.execute("INSERT INTO transition_imports VALUES('p','pending-video')")
+ if previous_version >= 4: m.execute("INSERT INTO regions VALUES('p','r','s','base','sha','Kept',NULL,1,2,3,4,20,30,0,.5,.5,NULL,NULL)")
+ m.commit()
+ old_tables=[r[0] for r in m.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+ old={t:list(m.execute('SELECT * FROM '+t)) for t in old_tables}
+ with m:
+  for sql in (next_sql if previous_version < 2 else []) + (transition_sql if previous_version < 3 else []) + (region_sql if previous_version < 4 else []) + editor_sql: m.execute(sql)
+  m.execute('PRAGMA user_version=5')
+ assert old == {t:list(m.execute('SELECT * FROM '+t)) for t in old_tables}
+ assert m.execute('PRAGMA user_version').fetchone()[0] == 5
+ assert m.execute('SELECT COUNT(*) FROM editor_drafts').fetchone()[0] == 0
+ assert m.execute('SELECT COUNT(*) FROM editor_draft_sessions').fetchone()[0] == 0
+ m.execute("INSERT INTO editor_draft_sessions VALUES('p',1)")
+ m.execute("INSERT INTO editor_drafts VALUES('p','s',?)", ('{"pendingForm":{"left":"not-a-number","label":"  unfinished  "}}',))
+ m.commit()
+ assert old == {t:list(m.execute('SELECT * FROM '+t)) for t in old_tables}
+ for payload in ('', 'x' * 262145, '界' * 87382):
+  try: m.execute("UPDATE editor_drafts SET draft_json=?", (payload,));m.commit();raise AssertionError('invalid byte length accepted')
+  except sqlite3.IntegrityError:m.rollback()
+ try:
+  m.execute("INSERT INTO editor_drafts VALUES('p','missing','{}')"); m.commit(); raise AssertionError('missing step draft accepted')
+ except sqlite3.IntegrityError: m.rollback()
+ # Deferred FK failure occurs after both text and recovery clear. SQLite restores both together.
+ staged = list(m.execute('SELECT * FROM editor_drafts'))
+ try:
+  m.execute("UPDATE states SET title='Saved',source_id='missing' WHERE state_id='s'")
+  m.execute("DELETE FROM editor_drafts WHERE project_id='p' AND state_id='s'")
+  m.execute("UPDATE projects SET draft_revision=draft_revision+1")
+  m.commit(); raise AssertionError('partial staged save accepted')
+ except sqlite3.IntegrityError: m.rollback()
+ assert staged == list(m.execute('SELECT * FROM editor_drafts'))
+ assert m.execute('SELECT title FROM states').fetchone()[0] == 'Step'
+ assert m.execute('SELECT draft_revision FROM projects').fetchone()[0] == 7
+ # A successful formal save clears the recovery row in the same transaction.
+ with m:
+  m.execute("UPDATE states SET title='Saved' WHERE state_id='s'")
+  m.execute("DELETE FROM editor_drafts WHERE project_id='p' AND state_id='s'")
+  m.execute("UPDATE projects SET draft_revision=draft_revision+1")
+ assert m.execute('SELECT COUNT(*) FROM editor_drafts').fetchone()[0] == 0
+ assert m.execute('SELECT draft_revision FROM projects').fetchone()[0] == 8
+ assert m.execute('SELECT generation FROM editor_draft_sessions').fetchone()[0] == 1
+ m.execute("INSERT INTO editor_drafts VALUES('p','s','{}')")
+ m.execute("UPDATE projects SET start_state_id=NULL")
+ m.execute("DELETE FROM states WHERE state_id='s'");m.commit()
+ assert m.execute('SELECT COUNT(*) FROM editor_drafts').fetchone()[0] == 0
+ assert m.execute('SELECT COUNT(*) FROM editor_draft_sessions').fetchone()[0] == 1
+ m.execute("DELETE FROM projects WHERE project_id='p'");m.commit()
+ assert m.execute('SELECT COUNT(*) FROM editor_draft_sessions').fetchone()[0] == 0
+ assert not list(m.execute('PRAGMA foreign_key_check'))
+ print('PASS v%d-to-v5 additive editor recovery, unchanged revision/journals, UTF-8 byte bound, save-clear rollback and cascades' % previous_version)
+
+# Project cascade removes editor rows and generations without touching a different project.
+# Use the production schema initialized at the start of this file.
+project('draft-p'); step('draft-p','draft-a'); step('draft-p','draft-b')
+for p, state in [('draft-p','draft-a'), ('draft-p','draft-b'), ('other','c')]:
+ c.execute('INSERT INTO editor_drafts VALUES(?,?,?)', (p,state,'{}'))
+for p in ('draft-p', 'other'): c.execute('INSERT INTO editor_draft_sessions VALUES(?,1)', (p,))
+c.commit()
+c.execute("DELETE FROM projects WHERE project_id='draft-p'");c.commit()
+assert list(c.execute('SELECT project_id,state_id FROM editor_drafts')) == [('other','c')]
+assert list(c.execute('SELECT project_id,generation FROM editor_draft_sessions')) == [('other',1)]
+assert not list(c.execute('PRAGMA foreign_key_check'))
+print('PASS editor project cascade preserves other project draft/session')
+print('NOTE codec, raw invalid form restoration and session writer races are covered by EditorDraftStoreChecks on Android; host DDL is not runtime proof')

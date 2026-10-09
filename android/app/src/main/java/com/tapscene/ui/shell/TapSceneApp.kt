@@ -469,7 +469,9 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                         closeEditor, projects::editTitle, projects::editDescription, projects::editTerminal,
                                         projects::putHotspot, projects::removeHotspot, projects::saveStepDraft, projects::discardStepDraft,
                                         {}, { id -> projects.saveBeforeTransition { transitionEdgeId = id; push("transition") } }, projects::putNextAction, projects::removeNextAction,
-                                        onOpenRegions = { if (state.dirtyStepIds.isEmpty()) push("regions") }, onCorrectImage = openStepCorrection),
+                                        onOpenRegions = { if (state.dirtyStepIds.isEmpty()) push("regions") }, onCorrectImage = openStepCorrection,
+                                        onPendingFormChange = { form -> projects.editPendingForm(snapshot.project.id, requireNotNull(state.stepDraft).stepId, form) }, onRetryStaging = projects::retryDraftStaging,
+                                        onResolveConflict = projects::resolveDraftConflict),
                                         previewEnabled = false, regionsEnabled = state.dirtyStepIds.isEmpty(), correctionEnabled = scopeReady && !mediaState.busy)
                                 } else AuthoredPathScreen(snapshot, pathStepIds, unavailable || mediaState.busy,
                                     { if (!state.busy) pop() },
@@ -551,7 +553,9 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 projects::putHotspot, projects::removeHotspot, projects::saveStepDraft, projects::discardStepDraft,
                                 { projects.startPreview(true) }, { id -> projects.saveBeforeTransition { transitionEdgeId = id; push("transition") } },
                                 projects::putNextAction, projects::removeNextAction,
-                                onOpenRegions = { if (state.dirtyStepIds.isEmpty()) push("regions") }, onCorrectImage = openStepCorrection),
+                                onOpenRegions = { if (state.dirtyStepIds.isEmpty()) push("regions") }, onCorrectImage = openStepCorrection,
+                                        onPendingFormChange = { form -> projects.editPendingForm(snapshot.project.id, requireNotNull(state.stepDraft).stepId, form) }, onRetryStaging = projects::retryDraftStaging,
+                                        onResolveConflict = projects::resolveDraftConflict),
                                 previewEnabled = state.dirtyStepIds.isEmpty(), regionsEnabled = state.dirtyStepIds.isEmpty(),
                                 correctionEnabled = scopeReady && !mediaState.busy)
                         } }
