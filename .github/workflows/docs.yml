@@ -64,6 +64,7 @@ jobs:
           candidates = list(Path("android/app/build/intermediates/merged_manifests").glob("debug/**/AndroidManifest.xml"))
           assert len(candidates) == 1, candidates
           root = ET.parse(candidates[0]).getroot()
+          assert root.get("package") == "com.tapscene.preview.hevc"
           namespace = "{http://schemas.android.com/apk/res/android}"
           permissions = {item.get(namespace + "name") for item in root.findall("uses-permission")}
           forbidden = {
@@ -75,6 +76,8 @@ jobs:
           assert root.find("application").get(namespace + "allowBackup") == "false"
           print("Merged manifest: no network or broad storage permission; backup disabled.")
           PY
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs \
+            android/app/build/outputs/apk/debug/app-debug.apk | tee "$RUNNER_TEMP/apk-signature.txt"
       - name: Keep the debug APK and lint result
         if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -114,5 +117,6 @@ jobs:
             ${{ runner.temp }}/bitstream-checks.txt
             ${{ runner.temp }}/media-instrumentation.txt
             ${{ runner.temp }}/emulator.txt
+            ${{ runner.temp }}/apk-signature.txt
           retention-days: 7
           if-no-files-found: ignore

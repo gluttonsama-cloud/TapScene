@@ -94,12 +94,45 @@ class VideoFrameDecoder(context: Context) {
     private data class PassResult(val frame: DecodedFrame?, val lastPts: Long?)
     private data class Colour(val standard: Int, val range: Int, val transfer: Int)
     private data class Layout(val width: Int, val height: Int, val crop: Rect, val colour: Colour)
+    private data class StartedDecoder(val codec: MediaCodec, val name: String)
+    private class DecoderSelection {
+        // One finite snapshot per pass; failed names are never retried during that pass.
+        val codecs: List<MediaCodecInfo> by lazy { MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.toList() }
+        val excludedNames = mutableSetOf<String>()
+    }
+    private class DecoderImageUnavailable(val codecName: String, val mime: String) : Exception()
 
     private suspend fun decodePass(
         file: File,
         metadata: SourceMetadata,
         targetUs: Long?,
         onFrame: (suspend (Image) -> Unit)? = null,
+    ): PassResult {
+        val selection = DecoderSelection()
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            try {
+                return decodePassOnce(file, metadata, targetUs, onFrame, selection)
+            } catch (unavailable: DecoderImageUnavailable) {
+                currentCoroutineContext().ensureActive()
+                // decodePassOnce has closed every image/buffer, codec and extractor before retry.
+                // A failed cleanup is not permission to open more device resources.
+                if (unavailable.suppressed.isNotEmpty()) {
+                    throw FrameDecodeException("解码资源未能正常释放，请重试。", unavailable)
+                }
+                if (!selection.excludedNames.add(unavailable.codecName)) {
+                    throw FrameDecodeException(decoderUnavailableMessage(unavailable.mime), unavailable)
+                }
+            }
+        }
+    }
+
+    private suspend fun decodePassOnce(
+        file: File,
+        metadata: SourceMetadata,
+        targetUs: Long?,
+        onFrame: (suspend (Image) -> Unit)?,
+        selection: DecoderSelection,
     ): PassResult {
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
@@ -133,7 +166,8 @@ class VideoFrameDecoder(context: Context) {
             inputFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
             // Rotation is applied exactly once after YUV conversion, not by the decoder.
             inputFormat.setInteger(MediaFormat.KEY_ROTATION, 0)
-            val decoder = createStartedDecoder(inputFormat, inputMime)
+            val startedDecoder = createStartedDecoder(inputFormat, inputMime, selection)
+            val decoder = startedDecoder.codec
             codec = decoder
             val info = MediaCodec.BufferInfo()
             var inputEos = false
@@ -142,6 +176,13 @@ class VideoFrameDecoder(context: Context) {
             var lastPts: Long? = null
             val recentPts = ArrayDeque<Long>()
             var layout: Layout? = null
+            var producedInspectableOutput = false
+            fun imageUnavailable(): Nothing {
+                // Never replay validated frames or callbacks. Content/colour/geometry failures use
+                // FrameDecodeException, which the outer retry loop deliberately does not catch.
+                if (producedInspectableOutput) throw FrameDecodeException(decoderUnavailableMessage(inputMime))
+                throw DecoderImageUnavailable(startedDecoder.name, inputMime)
+            }
             val startedAt = SystemClock.elapsedRealtime()
             var lastOutputAt = startedAt
             while (true) {
@@ -211,10 +252,11 @@ class VideoFrameDecoder(context: Context) {
                                 }
                                 val outputFormat = decoder.getOutputFormat(outputIndex)
                                 val colour = verifyOutputFormat(outputFormat, inputFormat, metadata)
-                                val outputImage = decoder.getOutputImage(outputIndex)
-                                    ?: throw FrameDecodeException(decoderUnavailableMessage(inputMime))
+                                val outputImage = decoder.getOutputImage(outputIndex) ?: imageUnavailable()
                                 outputImage.use { image ->
+                                    if (image.format != ImageFormat.YUV_420_888) imageUnavailable()
                                     checkImage(image, metadata)
+                                    producedInspectableOutput = true
                                     val currentLayout = Layout(image.width, image.height, Rect(image.cropRect), colour)
                                     if (layout != null && layout != currentLayout) {
                                         throw FrameDecodeException("录屏中途改变了尺寸、方向或色彩格式，请使用固定竖屏录屏。")
@@ -394,11 +436,16 @@ class VideoFrameDecoder(context: Context) {
     }
 
     /** Try only advertised byte-buffer/YUV420 decoders; no Surface or tone-mapping fallback. */
-    private suspend fun createStartedDecoder(format: MediaFormat, mime: String): MediaCodec {
+    private suspend fun createStartedDecoder(
+        format: MediaFormat,
+        mime: String,
+        selection: DecoderSelection,
+    ): StartedDecoder {
         var lastFailure: Exception? = null
         val candidates = try {
-            MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { candidate ->
-                if (candidate.isEncoder || !candidate.supportedTypes.any { it.equals(mime, ignoreCase = true) }) false
+            selection.codecs.filter { candidate ->
+                if (candidate.name in selection.excludedNames || candidate.isEncoder ||
+                    !candidate.supportedTypes.any { it.equals(mime, ignoreCase = true) }) false
                 else try {
                     val capabilities = candidate.getCapabilitiesForType(mime)
                     MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible in capabilities.colorFormats &&
@@ -415,13 +462,17 @@ class VideoFrameDecoder(context: Context) {
                 decoder = MediaCodec.createByCodecName(candidate.name)
                 decoder.configure(format, null, null, 0)
                 decoder.start()
-                return decoder
+                return StartedDecoder(decoder, candidate.name)
             } catch (cancelled: CancellationException) {
                 try { decoder?.release() } catch (cleanup: Exception) { cancelled.addSuppressed(cleanup) }
                 throw cancelled
             } catch (error: Exception) {
-                try { decoder?.release() } catch (cleanup: Exception) { error.addSuppressed(cleanup) }
+                try { decoder?.release() } catch (cleanup: Exception) {
+                    error.addSuppressed(cleanup)
+                    throw FrameDecodeException("解码资源未能正常释放，请重试。", error)
+                }
                 lastFailure = error
+                selection.excludedNames.add(candidate.name)
             } catch (fatal: Throwable) {
                 try { decoder?.release() } catch (cleanup: Throwable) { fatal.addSuppressed(cleanup) }
                 throw fatal
