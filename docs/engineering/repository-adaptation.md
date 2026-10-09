@@ -29,6 +29,7 @@
 5. 产品目录增加完整 Markdown、基线清单和45项需求追溯；README说明来源、转换和状态。追溯的依赖、F/A 与 ADR 关联是供审查的初始映射。
 6. 模板索引同步实际路径；PR 模板复制到 .github/pull_request_template.md，两份内容一致；本次没有虚构 CODEOWNERS 或审查者。
 7. 登记 [ENG-001](requirements.json) 对应本次规范基线与文档门禁；纯工程/缺陷 PR 可关联真实登记的 ENG/BUG ID，不强迫附会功能 ID。增加 Python 标准库文档检查、故意错误测试样例及最小 Actions workflow，详见[文档 CI](../testing/docs-ci.md)。没有加入 App 骨架、业务代码、运行 schema 或产品假测试。
+8. 首次 Draft 的真实 Actions 日志暴露 checkout v4 的 Node20 弃用提醒；同一 PR 内核实并固定 Node24 的官方稳定 checkout v7.0.1，同步workflow合同测试及兼容依据，重跑最终提交。产品原文、ADR、授权与保护范围均未变化。
 
 首批全文入库超过通常建议的400行审查提示。大部分为已交付规范的完整导入，不能为行数删掉产品需求；可按产品、工程/架构、检查脚本分块审查。后续实现继续按小 PR 与依赖拆分。
 

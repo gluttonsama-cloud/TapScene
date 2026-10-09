@@ -305,10 +305,10 @@ class WorkflowChecksTest(unittest.TestCase):
         text = (ROOT / ".github/workflows/docs.yml").read_text()
         for required in ("  pull_request:\n", "permissions:\n  contents: read\n", "  cancel-in-progress: true\n", "    needs: [docs-checks]\n    if: ${{ always() }}\n", "    name: ci/gate\n", 'run: python3 scripts/check_gate.py --event "$GITHUB_EVENT_PATH"', "NEEDS_JSON: ${{ toJSON(needs) }}", "run: python3 tests/test_checks.py", "run: python3 scripts/check_docs.py"):
             self.assertIn(required, text)
-        for forbidden in ("pull_request_target", "continue-on-error", "secrets.", "paths:", "paths-ignore:", "contents: write", "workflow_dispatch", "push:"):
+        for forbidden in ("pull_request_target", "continue-on-error", "secrets.", "paths:", "paths-ignore:", "contents: write", "workflow_dispatch", "push:", "allow-unsafe-pr-checkout: true"):
             self.assertNotIn(forbidden, text)
         self.assertEqual(text.count("uses:"), 2)
-        self.assertEqual(text.count("uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"), 2)
+        self.assertEqual(text.count("uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"), 2)
         self.assertEqual(text.count("persist-credentials: false"), 2)
         self.assertEqual(text.count("timeout-minutes: 5"), 2)
         self.assertEqual(text.count("runs-on: ubuntu-24.04"), 2)

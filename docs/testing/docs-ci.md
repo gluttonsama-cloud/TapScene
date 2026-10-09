@@ -19,7 +19,11 @@ python3 tests/test_checks.py
 
 [workflow](../../.github/workflows/docs.yml)仅由 pull_request 触发，覆盖所有路径；不使用 pull_request_target。PR token 只有 contents:read，checkout 不持久化凭据，不提供生产 secrets。并发更新取消旧运行，任务设置超时，不上传原始素材或启用部署/付费服务。
 
-仅使用官方 actions/checkout，固定完整 commit SHA 11bd71901bbe5b1630ceea73d27597364c9af683；该 SHA 已从[官方 v4.2.2 tag](https://api.github.com/repos/actions/checkout/git/ref/tags/v4.2.2)核实。Runner 使用 ubuntu-24.04 已有 Python 标准库，不动态安装包。固定 Action 不等于已审计其全部源代码，后续升级仍须独立 PR。
+仅使用官方 actions/checkout，固定完整 commit SHA 3d3c42e5aac5ba805825da76410c181273ba90b1（v7.0.1）。2026-10-09 已核对[官方稳定发布](https://github.com/actions/checkout/releases/tag/v7.0.1)和[对应 tag](https://api.github.com/repos/actions/checkout/git/ref/tags/v7.0.1)，并读取该固定提交的 [action.yml](https://github.com/actions/checkout/blob/3d3c42e5aac5ba805825da76410c181273ba90b1/action.yml)，确认原生使用 Node24。版本于2026-07-20发布，非 draft 或 prerelease；选择依据是受支持运行时及当前工作流兼容性，不是使用浮动 latest 标签。
+
+首次远端运行使用 v4.2.2，出现 Node20 弃用并由 Runner 强制切换 Node24 的提醒，因此在同一 Draft PR 内升级，避免保留依赖兼容重写的工具链配置。v7 的高信任事件 fork 检出保护保持默认关闭危险检出，本流程仍只用 pull_request，不添加 allow-unsafe-pr-checkout 绕过。凭据持久化继续关闭。
+
+[官方 README](https://github.com/actions/checkout/blob/3d3c42e5aac5ba805825da76410c181273ba90b1/README.md)要求 Node24 至少 Actions Runner 2.327.1；首次实际运行版本2.337.0已满足。README中2.329.0要求专指Docker容器Action内认证Git命令，本流程不使用该路径。Runner继续为 ubuntu-24.04，使用已有Python标准库，不动态安装包。完整SHA固定与兼容核查不等于全部源码安全审计；后续升级仍须PR、同步workflow合同测试并实际运行。
 
 - docs-checks 运行文档检查和检查器测试，Draft 也运行。
 - ci/gate 无条件汇总实际依赖结果；成功、失败、取消、skipped 和缺失结果分别处理，只有明确 success 可继续。
