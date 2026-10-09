@@ -98,7 +98,7 @@ fun MediaScreen(workspace: MediaWorkspace) {
                 Text("素材与遮挡", style = MaterialTheme.typography.titleLarge)
                 Text("MP4 / H.264 / SDR 竖屏，单段不超过 3 分钟、200 MiB。原片只保存在本机。",
                     style = MaterialTheme.typography.bodyMedium)
-                Button(onClick = { import.launch(arrayOf("video/mp4")) }, enabled = !state.busy && !savePending && !state.loadFailed,
+                Button(onClick = { import.launch(arrayOf("video/mp4")) }, enabled = !state.busy && !savePending && !state.loadFailed && !state.unsavedEdits,
                     modifier = Modifier.fillMaxWidth()) { Text("选择录屏") }
                 if (state.loadFailed) {
                     Text("已保存记录暂时无法读取。为保留原有内容，当前不能导入新素材。")
@@ -112,6 +112,10 @@ fun MediaScreen(workspace: MediaWorkspace) {
                     }
                 }
                 state.message?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
+                if (state.unsavedEdits) {
+                    Text("遮挡尚未保存，修改仍保留在当前画面。保存成功后才能生成成品。")
+                    OutlinedButton(onClick = workspace::retryEdits, enabled = !state.busy && !savePending) { Text("重试保存遮挡") }
+                }
                 state.drafts.forEachIndexed { index, draft ->
                     OutlinedButton(onClick = { workspace.selectSource(draft.source.sourceId) },
                         enabled = !state.busy && !savePending, modifier = Modifier.fillMaxWidth()) {

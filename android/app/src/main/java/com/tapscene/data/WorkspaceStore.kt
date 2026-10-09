@@ -9,6 +9,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileNotFoundException
+import java.io.FileOutputStream
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 data class SourceDraft(
     val source: ImportedSource,
@@ -21,15 +24,14 @@ class WorkspaceStore(context: Context) {
     private val root = context.noBackupFilesDir
     private val state = AtomicFile(File(root, "media-workspace.json"))
 
-    @Synchronized
-    fun read(): List<SourceDraft> {
+    fun read(): List<SourceDraft> = synchronized(lock) {
         // openRead restores the backup first on API 26. A missing base file alone can mean
         // an interrupted atomic write, not an empty workspace.
         val saved = try {
             state.openRead()
         } catch (missing: FileNotFoundException) {
             if (!state.baseFile.exists() && !File(state.baseFile.path + ".bak").exists() &&
-                !File(state.baseFile.path + ".new").exists()) return emptyList()
+                !File(state.baseFile.path + ".new").exists()) return@synchronized emptyList()
             throw missing
         }
         val document = saved.use { input ->
@@ -41,7 +43,7 @@ class WorkspaceStore(context: Context) {
         require(document.getInt("version") == 1) { "素材记录版本不受支持" }
         val items = document.getJSONArray("sources")
         require(items.length() <= 3) { "素材记录数量超限" }
-        return List(items.length()) { index ->
+        List(items.length()) { index ->
             val item = items.getJSONObject(index)
             val metadata = item.getJSONObject("metadata")
             val relativePath = item.getString("path")
@@ -79,8 +81,7 @@ class WorkspaceStore(context: Context) {
         }
     }
 
-    @Synchronized
-    fun write(drafts: List<SourceDraft>) {
+    fun write(drafts: List<SourceDraft>): Unit = synchronized(lock) {
         require(drafts.size <= 3) { "最多保留 3 段录屏" }
         require(drafts.sumOf { it.source.metadata.byteLength } <= 500L * 1024 * 1024) {
             "全部录屏不能超过 500 MiB"
@@ -114,13 +115,22 @@ class WorkspaceStore(context: Context) {
             })
         }
         val bytes = JSONObject().put("version", 1).put("sources", items).toString().toByteArray()
-        val output = state.startWrite()
+        val temporary = File.createTempFile(".workspace-", ".json.part", root)
         try {
-            output.write(bytes)
-            state.finishWrite(output)
-        } catch (error: Throwable) {
-            state.failWrite(output)
-            throw error
+            FileOutputStream(temporary).use { output ->
+                output.write(bytes)
+                // Unlike AtomicFile.finishWrite, these failures propagate to the caller.
+                output.fd.sync()
+            }
+            // Same-directory replacement is the commit point. Do not perform fallible work
+            // afterward: import registration must never report failure after it committed.
+            Files.move(temporary.toPath(), state.baseFile.toPath(),
+                StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        } finally {
+            runCatching { temporary.delete() }
         }
+        Unit
     }
+
+    companion object { private val lock = Any() }
 }

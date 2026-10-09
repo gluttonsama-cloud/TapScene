@@ -16,9 +16,12 @@ import com.tapscene.media.SourceImporter
 import com.tapscene.media.VideoFrameDecoder
 import java.io.File
 import java.security.MessageDigest
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,6 +29,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.coroutineContext
 
 data class WorkspaceUiState(
@@ -40,6 +45,7 @@ data class WorkspaceUiState(
     val stage: String? = null,
     val message: String? = null,
     val loadFailed: Boolean = false,
+    val unsavedEdits: Boolean = false,
 ) {
     val selected: SourceDraft? get() = drafts.firstOrNull { it.source.sourceId == selectedId }
 }
@@ -55,17 +61,26 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
     private var task: Job? = null
     private var savePickerPending = false
     private var cancellationNote: String? = null
+    private val sessionId = UUID.randomUUID().toString()
+    @Volatile private var closed = false
 
-    init { reload() }
+    init {
+        synchronized(activeSessions) { activeSessions.add(sessionId) }
+        reload()
+    }
 
     fun reload() = execute("读取已保存素材") {
         invalidateCandidate()
-        val drafts = withContext(Dispatchers.IO) { store.read() }
+        val drafts = withContext(Dispatchers.IO) {
+            cleanInactiveSessions()
+            store.read()
+        }
         mutableState.update { it.copy(drafts = drafts, selectedId = drafts.lastOrNull()?.source?.sourceId,
             frame = null, loadFailed = false) }
     }
 
     fun importVideo(uri: Uri) {
+        if (!requireSavedEdits()) return
         if (state.value.loadFailed) return
         if (state.value.drafts.size >= 3) {
             message("最多保留 3 段录屏，请先删除不再需要的素材")
@@ -86,6 +101,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectSource(id: String) {
+        if (!requireSavedEdits()) return
         if (state.value.busy || savePickerPending || state.value.selectedId == id) return
         invalidateCandidate()
         mutableState.update { it.copy(selectedId = id, frame = null, candidate = null,
@@ -93,6 +109,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
     }
 
     fun takeFrame(timeUs: Long) {
+        if (!requireSavedEdits()) return
         val selected = state.value.selected ?: return
         execute("解码实际帧") {
             invalidateCandidate()
@@ -124,13 +141,27 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
             val drafts = state.value.drafts.map {
                 if (it.source.sourceId == selectedId) it.copy(masks = masks) else it
             }
+            mutableState.update { it.copy(drafts = drafts, unsavedEdits = true) }
             withContext(Dispatchers.IO) { store.write(drafts) }
             mutableState.update { it.copy(drafts = drafts, candidate = null, candidateImage = null,
-                watchedDigest = null, reviewedDigest = null) }
+                watchedDigest = null, reviewedDigest = null, unsavedEdits = false) }
         }
     }
 
+    fun retryEdits() = execute("重试保存遮挡") {
+        val drafts = state.value.drafts
+        withContext(Dispatchers.IO) { store.write(drafts) }
+        mutableState.update { it.copy(unsavedEdits = false) }
+    }
+
+    private fun requireSavedEdits(): Boolean {
+        if (!state.value.unsavedEdits) return true
+        message("遮挡尚未保存，请先重试保存")
+        return false
+    }
+
     fun makeImage() {
+        if (!requireSavedEdits()) return
         val snapshot = state.value
         val frame = snapshot.frame ?: return
         val selected = snapshot.selected ?: return
@@ -144,6 +175,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
     }
 
     fun makeVideo(startUs: Long, endUs: Long) {
+        if (!requireSavedEdits()) return
         val selected = state.value.selected ?: return
         execute("生成遮挡视频") {
             require(startUs >= 0 && endUs > startUs && endUs <= selected.source.metadata.durationUs) {
@@ -244,7 +276,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
     fun beginSave(digest: String): Boolean {
         val snapshot = state.value
         if (savePickerPending || snapshot.busy || snapshot.candidate?.sha256 != digest ||
-            snapshot.reviewedDigest != digest) return false
+            snapshot.reviewedDigest != digest || snapshot.unsavedEdits) return false
         savePickerPending = true
         return true
     }
@@ -253,7 +285,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
 
     private fun discardCreatedDocument(uri: Uri, reason: String) {
         viewModelScope.launch {
-            val removed = withContext(Dispatchers.IO) {
+            val removed = withContext(NonCancellable + Dispatchers.IO) {
                 runCatching { DocumentsContract.deleteDocument(app.contentResolver, uri) }.getOrDefault(false)
             }
             message(if (removed) reason else "$reason。所选位置可能仍有未完成文件，请手动删除")
@@ -263,6 +295,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
     private class SaveDocumentException(message: String, cause: Throwable) : Exception(message, cause)
 
     fun deleteSelected() {
+        if (!requireSavedEdits()) return
         val selected = state.value.selected ?: return
         execute("删除选定素材") {
             invalidateCandidate()
@@ -284,14 +317,17 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
     fun cancel() { task?.cancel() }
     fun message(text: String) { mutableState.update { it.copy(message = text) } }
 
-    private fun outputDirectory() = File(app.noBackupFilesDir, "candidates")
+    private fun outputDirectory() = File(app.noBackupFilesDir, "candidates/$sessionId")
 
     private fun execute(label: String, block: suspend () -> Unit) {
         if (state.value.busy || savePickerPending) return
         cancellationNote = null
         mutableState.update { it.copy(busy = true, stage = label, message = null) }
         task = viewModelScope.launch {
+            var locked = false
             try {
+                operationLock.lock()
+                locked = true
                 block()
             } catch (cancelled: CancellationException) {
                 message(cancellationNote ?: "已取消当前处理")
@@ -308,30 +344,72 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
                 if (label == "读取已保存素材") mutableState.update { it.copy(loadFailed = true) }
             } finally {
                 // Import's final registration is atomic even if cancellation arrives at that boundary.
-                withContext(NonCancellable + Dispatchers.IO) {
-                    runCatching { store.read() }.getOrNull()?.let { drafts ->
-                        mutableState.update { old ->
-                            val selectedId = old.selectedId?.takeIf { id -> drafts.any { it.source.sourceId == id } }
-                                ?: drafts.lastOrNull()?.source?.sourceId
-                            val selected = drafts.firstOrNull { it.source.sourceId == selectedId }
-                            // A write may commit just before cancellation. Never pair newly loaded
-                            // edits or a different source with an old frame or old privacy review.
-                            if (old.selected != selected) old.copy(drafts = drafts, selectedId = selectedId,
-                                frame = null, candidate = null, candidateImage = null,
-                                watchedDigest = null, reviewedDigest = null)
-                            else old.copy(drafts = drafts, selectedId = selectedId)
+                try {
+                    if (locked) withContext(NonCancellable + Dispatchers.IO) {
+                        runCatching { store.read() }.getOrNull()?.takeUnless { state.value.unsavedEdits }?.let { drafts ->
+                            mutableState.update { old ->
+                                val selectedId = old.selectedId?.takeIf { id -> drafts.any { it.source.sourceId == id } }
+                                    ?: drafts.lastOrNull()?.source?.sourceId
+                                val selected = drafts.firstOrNull { it.source.sourceId == selectedId }
+                                // A write may commit just before cancellation. Never pair newly loaded
+                                // edits or a different source with an old frame or old privacy review.
+                                if (old.selected != selected) old.copy(drafts = drafts, selectedId = selectedId,
+                                    frame = null, candidate = null, candidateImage = null,
+                                    watchedDigest = null, reviewedDigest = null)
+                                else old.copy(drafts = drafts, selectedId = selectedId)
+                            }
+                        }
+                        runCatching {
+                            val keep = if (closed) null else state.value.candidate?.file?.canonicalPath
+                            outputDirectory().listFiles()?.forEach { file ->
+                                if (file.canonicalPath != keep) removeCandidate(file)
+                            }
+                        }.onFailure {
+                            mutableState.update { old -> old.copy(message = listOfNotNull(old.message,
+                                "临时成品清理失败，请检查本机存储空间").joinToString("。")) }
                         }
                     }
-                    runCatching {
-                        val keep = state.value.candidate?.file?.canonicalPath
-                        outputDirectory().listFiles()?.forEach { file ->
-                            if (file.canonicalPath != keep) removeCandidate(file)
-                        }
-                    }.onFailure { message("处理已结束，临时成品清理失败。请检查本机存储空间") }
+                } finally {
+                    if (locked) operationLock.unlock()
+                    mutableState.update { it.copy(busy = false, stage = null) }
                 }
-                mutableState.update { it.copy(busy = false, stage = null) }
             }
         }
+    }
+
+    override fun onCleared() {
+        closed = true
+        task?.cancel()
+        cleanupScope.launch {
+            operationLock.withLock {
+                runCatching { outputDirectory().listFiles()?.forEach(::removeCandidate); outputDirectory().delete() }
+                synchronized(activeSessions) { activeSessions.remove(sessionId) }
+            }
+        }
+        super.onCleared()
+    }
+
+    private fun cleanInactiveSessions() {
+        val active = synchronized(activeSessions) { activeSessions.toSet() }
+        val root = File(app.noBackupFilesDir, "candidates").canonicalFile
+        root.listFiles()?.forEach { directory ->
+            if (directory.isDirectory && directory.canonicalFile.parentFile == root &&
+                directory.name.matches(Regex("[0-9a-f-]{36}")) && directory.name !in active) {
+                directory.listFiles()?.forEach { file ->
+                    if (file.canonicalFile.parentFile == directory.canonicalFile && file.isFile &&
+                        (file.name.startsWith("candidate-") || file.name.startsWith(".candidate-"))) {
+                        check(file.delete() || !file.exists()) { "临时成品清理失败" }
+                    }
+                }
+                directory.delete()
+            }
+        }
+    }
+
+    companion object {
+        private val operationLock = Mutex()
+        private val activeSessions = mutableSetOf<String>()
+        private val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     }
 
     private fun removeCandidate(file: File) {
