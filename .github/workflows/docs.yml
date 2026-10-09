@@ -91,9 +91,15 @@ jobs:
       - name: Check native media on an Android emulator
         timeout-minutes: 15
         run: |
+          export ANDROID_USER_HOME="$RUNNER_TEMP/android-user"
+          export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "emulator" "system-images;android-35;default;x86_64"
           echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd --force \
-            --name tapscene-media --package "system-images;android-35;default;x86_64"
+            --name tapscene-media --path "$ANDROID_AVD_HOME/tapscene-media.avd" \
+            --package "system-images;android-35;default;x86_64"
+          test -f "$ANDROID_AVD_HOME/tapscene-media.ini"
+          "$ANDROID_HOME/emulator/emulator" -list-avds | grep -Fx tapscene-media
           acceleration=off
           if test -r /dev/kvm && test -w /dev/kvm; then acceleration=on; fi
           "$ANDROID_HOME/emulator/emulator" -avd tapscene-media -no-window -noaudio -no-boot-anim \
@@ -101,7 +107,8 @@ jobs:
             > "$RUNNER_TEMP/emulator.txt" 2>&1 &
           emulator_pid=$!
           trap 'kill "$emulator_pid" 2>/dev/null || true' EXIT
-          timeout 600 bash -c 'until adb shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; do sleep 5; done'
+          export EMULATOR_PID="$emulator_pid"
+          timeout 600 bash -c 'until adb shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; do kill -0 "$EMULATOR_PID" || exit 1; sleep 5; done'
           adb install android/app/build/outputs/apk/debug/app-debug.apk
           adb install android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
           timeout 300 adb shell am instrument -w \
