@@ -26,16 +26,34 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
-/** Fail-closed, offline-only static viewer package. This is not a general-purpose ZIP/JSON loader. */
+/** Fail-closed, offline-only versioned viewer package. This is not a general-purpose ZIP/JSON loader. */
 public final class ViewerPackageCodec {
     public static final long MAX_PACKAGE_BYTES = 50L * 1024 * 1024;
-    public static final int MAX_SCENE_BYTES = 512 * 1024, MAX_MANIFEST_BYTES = 64 * 1024, MAX_FILES = 42;
+    public static final int MAX_SCENE_BYTES = 512 * 1024, MAX_MANIFEST_BYTES = 64 * 1024, MAX_FILES = 122;
+    public static final int MAX_ASSETS = 120;
+    public static final long MAX_TRANSITION_MS = 10_000, MAX_TOTAL_TRANSITION_MS = 60_000;
     public static final String POLICY_VERSION = "static-viewer-1", COMPILER_VERSION = "tapscene-android-1";
+    public static final String VIDEO_POLICY_VERSION = "video-viewer-2";
     private static final Pattern UUID = Pattern.compile("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
     private static final Pattern HASH = Pattern.compile("[0-9a-f]{64}");
     private ViewerPackageCodec() {}
 
     @FunctionalInterface public interface CancelCheck { void check(); }
+    /**
+     * Mandatory platform trust boundary for each transition, after size/hash checks.
+     * Implementations must inspect the actual MP4 tracks and fully decode the only track:
+     * exactly one H.264/AVC video track, SDR 8-bit 4:2:0, no audio/subtitle/data tracks,
+     * no encryption, rotation or format changes, package-declared dimensions and duration.
+     * Reject missing dimensions/duration and unsupported media facts rather than trust a
+     * MIME or filename. Duration must be positive, at most MAX_TRANSITION_MS, and
+     * ceil(actualUs / 1000) must equal durationMs. Decode
+     * through EOS, reject corrupt/truncated samples and check cancellation throughout.
+     * Media may not access network/external resources. Never register or publish the root
+     * from this callback: the caller commits only after the entire package has succeeded.
+     */
+    @FunctionalInterface public interface VideoValidator {
+        void validate(File file, ViewerScene.Asset declared, CancelCheck cancel) throws IOException;
+    }
     public static final class FileEntry {
         public final String path, sha256;
         public final long byteLength;
@@ -62,9 +80,10 @@ public final class ViewerPackageCodec {
         Map<String, Object> root = object(StrictJson.parse(bytes, MAX_SCENE_BYTES),
                 "schemaVersion", "policyVersion", "compilerVersion", "releaseId", "title", "goal", "createdAt",
                 "startStateId", "states", "edges", "hotspots", "regions", "assets");
-        require(integer(root.get("schemaVersion")) == 1 && POLICY_VERSION.equals(string(root.get("policyVersion")))
-                && COMPILER_VERSION.equals(string(root.get("compilerVersion"))), "Unsupported static viewer version");
-        require(array(root.get("regions")).isEmpty(), "Regions are not supported by the static profile");
+        int schemaVersion = smallInt(root.get("schemaVersion"));
+        String policyVersion = string(root.get("policyVersion")), compilerVersion = string(root.get("compilerVersion"));
+        version(schemaVersion, policyVersion, compilerVersion);
+        require(array(root.get("regions")).isEmpty(), "Regions are not supported by this viewer profile");
         List<ViewerScene.State> states = new ArrayList<>();
         for (Object raw : array(root.get("states"))) {
             Map<String, Object> s = object(raw, "id", "imageAssetId", "width", "height", "title", "description", "sourceKind", "terminal");
@@ -76,13 +95,13 @@ public final class ViewerPackageCodec {
         List<ViewerScene.Edge> edges = new ArrayList<>();
         for (Object raw : array(root.get("edges"))) {
             Map<String, Object> e = object(raw, "id", "fromStateId", "to", "hotspotId", "label", "trigger", "transitionAssetId", "sourceKind");
-            require(e.get("transitionAssetId") == null, "Transitions are not supported by the static profile");
             Map<String, Object> to = map(e.get("to"));
             require(to.size() == 1 && (to.containsKey("stateId") || to.containsKey("endLabel")), "Invalid edge destination");
             edges.add(new ViewerScene.Edge(string(e.get("id")), string(e.get("fromStateId")),
                     to.containsKey("stateId") ? string(to.get("stateId")) : null,
                     to.containsKey("endLabel") ? string(to.get("endLabel")) : null,
-                    nullableString(e.get("hotspotId")), string(e.get("label")), string(e.get("trigger")), string(e.get("sourceKind"))));
+                    nullableString(e.get("hotspotId")), string(e.get("label")), string(e.get("trigger")), string(e.get("sourceKind")),
+                    nullableString(e.get("transitionAssetId"))));
         }
         List<ViewerScene.Hotspot> hotspots = new ArrayList<>();
         for (Object raw : array(root.get("hotspots"))) {
@@ -95,11 +114,12 @@ public final class ViewerPackageCodec {
         List<ViewerScene.Asset> assets = new ArrayList<>();
         for (Object raw : array(root.get("assets"))) {
             Map<String, Object> a = object(raw, "id", "path", "role", "mime", "byteLength", "sha256", "width", "height", "durationMs");
-            require("state-image".equals(string(a.get("role"))) && a.get("durationMs") == null, "Unsupported asset role or duration");
             assets.add(new ViewerScene.Asset(string(a.get("id")), string(a.get("path")), string(a.get("mime")),
-                    integer(a.get("byteLength")), string(a.get("sha256")), smallInt(a.get("width")), smallInt(a.get("height"))));
+                    integer(a.get("byteLength")), string(a.get("sha256")), smallInt(a.get("width")), smallInt(a.get("height")),
+                    string(a.get("role")), a.get("durationMs") == null ? null : integer(a.get("durationMs"))));
         }
-        ViewerScene scene = new ViewerScene(string(root.get("releaseId")), string(root.get("title")),
+        ViewerScene scene = new ViewerScene(schemaVersion, policyVersion, compilerVersion,
+                string(root.get("releaseId")), string(root.get("title")),
                 string(root.get("goal")), integer(root.get("createdAt")), string(root.get("startStateId")), states, edges, hotspots, assets);
         validateScene(scene); return scene;
     }
@@ -113,22 +133,30 @@ public final class ViewerPackageCodec {
     public static byte[] manifestBytes(ViewerScene scene) {
         List<Object> files = new ArrayList<>();
         for (FileEntry f : fileList(scene)) files.add(obj("path", f.path, "byteLength", f.byteLength, "sha256", f.sha256));
-        byte[] manifest = StrictJson.canonical(obj("schemaVersion", 1, "exportKind", "viewer", "releaseId", scene.releaseId,
+        byte[] manifest = StrictJson.canonical(obj("schemaVersion", scene.schemaVersion, "exportKind", "viewer", "releaseId", scene.releaseId,
                 "contentDigest", contentDigest(scene), "files", files));
         require(manifest.length <= MAX_MANIFEST_BYTES, "Manifest exceeds budget"); return manifest;
     }
     public static void validateScene(ViewerScene scene) {
-        require(scene != null, "Missing scene"); id(scene.releaseId); text(scene.title, 240, true); text(scene.goal, 8192, false);
+        require(scene != null, "Missing scene"); version(scene.schemaVersion, scene.policyVersion, scene.compilerVersion); id(scene.releaseId); text(scene.title, 240, true); text(scene.goal, 8192, false);
         require(scene.createdAt >= 0 && scene.createdAt <= StrictJson.MAX_SAFE_INTEGER, "Invalid creation time"); id(scene.startStateId);
         require(!scene.states.isEmpty() && scene.states.size() <= 40 && scene.edges.size() <= 80
-                && scene.hotspots.size() <= 240 && !scene.assets.isEmpty() && scene.assets.size() <= 40, "Scene exceeds object budget");
+                && scene.hotspots.size() <= 240 && !scene.assets.isEmpty() && scene.assets.size() <= (scene.schemaVersion == 1 ? 40 : MAX_ASSETS), "Scene exceeds object budget");
         Set<String> allIds = new HashSet<>();
         Map<String, ViewerScene.State> states = new HashMap<>(); Map<String, ViewerScene.Asset> assets = new HashMap<>();
         Map<String, ViewerScene.Hotspot> hotspots = new HashMap<>();
         long total = 0;
         for (ViewerScene.Asset a : scene.assets) {
             require(a != null, "Missing asset"); unique(allIds, a.id); safePath(a.path);
-            require(a.path.equals("assets/" + a.id + ".png") && "image/png".equals(a.mime), "Only package-local PNG assets are supported");
+            if (ViewerScene.Asset.ROLE_IMAGE.equals(a.role)) {
+                require(a.path.equals("assets/" + a.id + ".png") && "image/png".equals(a.mime)
+                        && a.durationMs == null, "Invalid package-local PNG asset");
+            } else {
+                require(scene.schemaVersion == 2 && ViewerScene.Asset.ROLE_TRANSITION.equals(a.role)
+                        && a.path.equals("assets/" + a.id + ".mp4") && "video/mp4".equals(a.mime)
+                        && a.durationMs != null && a.durationMs > 0 && a.durationMs <= MAX_TRANSITION_MS,
+                        "Unsupported transition asset or duration");
+            }
             require(a.byteLength > 0 && a.byteLength <= MAX_PACKAGE_BYTES && HASH.matcher(a.sha256 == null ? "" : a.sha256).matches(), "Invalid asset size or digest");
             dimensions(a.width, a.height); assets.put(a.id, a); total += a.byteLength;
         }
@@ -136,10 +164,10 @@ public final class ViewerPackageCodec {
         Set<String> usedAssets = new HashSet<>();
         for (ViewerScene.State s : scene.states) {
             require(s != null, "Missing state"); unique(allIds, s.id); source(s.sourceKind); text(s.title, 240, true); text(s.description, 8192, false);
-            ViewerScene.Asset a = assets.get(s.imageAssetId); require(a != null && a.width == s.width && a.height == s.height, "Missing image or state dimensions mismatch");
+            ViewerScene.Asset a = assets.get(s.imageAssetId); require(a != null && ViewerScene.Asset.ROLE_IMAGE.equals(a.role) && a.width == s.width && a.height == s.height, "Missing image or state dimensions mismatch");
             usedAssets.add(a.id); states.put(s.id, s);
         }
-        require(states.containsKey(scene.startStateId) && usedAssets.size() == assets.size(), "Missing start state or unreferenced asset");
+        require(states.containsKey(scene.startStateId), "Missing start state");
         Map<String, Integer> hotspotCounts = new HashMap<>();
         for (ViewerScene.Hotspot h : scene.hotspots) {
             require(h != null, "Missing hotspot"); unique(allIds, h.id); text(h.label, 240, true);
@@ -154,6 +182,7 @@ public final class ViewerPackageCodec {
         Map<String, List<String>> forward = new HashMap<>(), reverse = new HashMap<>();
         Set<String> hasExit = new HashSet<>(), ending = new HashSet<>(), usedHotspots = new HashSet<>(), continueStates = new HashSet<>();
         for (ViewerScene.State s : scene.states) if (s.terminal) ending.add(s.id);
+        long boundTransitionMs = 0;
         for (ViewerScene.Edge e : scene.edges) {
             require(e != null, "Missing edge"); unique(allIds, e.id); text(e.label, 240, true); source(e.sourceKind);
             ViewerScene.State from = states.get(e.fromStateId);
@@ -173,8 +202,16 @@ public final class ViewerPackageCodec {
                         "Only tap or explicitly authored continue actions are supported");
                 require(continueStates.add(e.fromStateId), "A state may have only one continue action");
             }
+            if (e.transitionAssetId != null) {
+                ViewerScene.Asset transition = assets.get(e.transitionAssetId);
+                require(scene.schemaVersion == 2 && transition != null
+                        && ViewerScene.Asset.ROLE_TRANSITION.equals(transition.role), "Missing transition video or invalid role");
+                usedAssets.add(transition.id); boundTransitionMs += transition.durationMs;
+                require(boundTransitionMs <= MAX_TOTAL_TRANSITION_MS, "Bound transitions exceed 60 seconds");
+            }
             hasExit.add(e.fromStateId);
         }
+        require(usedAssets.size() == assets.size(), "Unreferenced asset");
         require(usedHotspots.size() == hotspots.size(), "Hotspot has no action");
         for (ViewerScene.State s : scene.states) require(s.terminal || hasExit.contains(s.id), "Nonterminal state has no exit");
         require(reachable(Collections.singleton(scene.startStateId), forward).size() == states.size(), "Unreachable state");
@@ -184,13 +221,21 @@ public final class ViewerPackageCodec {
         StrictJson.parse(json, MAX_SCENE_BYTES);
     }
     public static void validateDirectory(ViewerScene scene, File root, CancelCheck cancel) throws IOException {
+        validateDirectory(scene, root, cancel, null);
+    }
+    public static void validateDirectory(ViewerScene scene, File root, CancelCheck cancel, VideoValidator validator) throws IOException {
         check(cancel); validateScene(scene); secureRoot(root);
         Set<String> expected = new HashSet<>();
         for (ViewerScene.Asset asset : scene.assets) {
             check(cancel); expected.add(asset.path); File file = resolve(root, asset.path);
             require(Files.isRegularFile(file.toPath(), LinkOption.NOFOLLOW_LINKS) && file.length() == asset.byteLength, "Missing or wrong-sized asset");
             require(hash(file, cancel).equals(asset.sha256), "Asset digest mismatch");
-            SafePng.validate(file, asset.width, asset.height, cancel);
+            if (ViewerScene.Asset.ROLE_IMAGE.equals(asset.role)) SafePng.validate(file, asset.width, asset.height, cancel);
+            else {
+                require(validator != null, "Video assets require a platform full-decode validator");
+                validator.validate(file, asset, cancel); check(cancel);
+                require(file.length() == asset.byteLength && hash(file, cancel).equals(asset.sha256), "Video changed during validation");
+            }
         }
         // Authoring roots may also contain the canonical scene/manifest; no arbitrary payloads.
         expected.add("scene.json"); expected.add("manifest.json");
@@ -201,13 +246,19 @@ public final class ViewerPackageCodec {
         require(total <= MAX_PACKAGE_BYTES, "Package exceeds unpacked byte budget"); check(cancel);
     }
     public static void writePackage(ViewerScene scene, File assetRoot, File outputZip, CancelCheck cancel) throws IOException {
-        validateDirectory(scene, assetRoot, cancel);
+        writePackage(scene, assetRoot, outputZip, cancel, null);
+    }
+    public static void writePackage(ViewerScene scene, File assetRoot, File outputZip, CancelCheck cancel, VideoValidator validator) throws IOException {
+        validateDirectory(scene, assetRoot, cancel, validator);
         require(!outputZip.exists(), "Package output must be a new file");
         require(!outputZip.toPath().toAbsolutePath().normalize().startsWith(assetRoot.toPath().toAbsolutePath().normalize()), "Package output must be outside the asset root");
         Map<String, byte[]> json = new LinkedHashMap<>(); json.put("manifest.json", manifestBytes(scene)); json.put("scene.json", writeScene(scene));
         StrictZip.write(outputZip, assetRoot, fileList(scene), json, cancel);
     }
     public static LoadedPackage readPackage(File zip, File emptyDestination, CancelCheck cancel) throws IOException {
+        return readPackage(zip, emptyDestination, cancel, null);
+    }
+    public static LoadedPackage readPackage(File zip, File emptyDestination, CancelCheck cancel, VideoValidator validator) throws IOException {
         check(cancel); secureRoot(emptyDestination);
         String[] existing = emptyDestination.list(); require(existing != null && existing.length == 0, "Import destination must be empty");
         // Destination is owned by the caller and remains isolated until this method AND platform decode succeed.
@@ -216,8 +267,9 @@ public final class ViewerPackageCodec {
             byte[] manifestBytes = readBytes(resolve(emptyDestination, "manifest.json"), MAX_MANIFEST_BYTES, cancel);
             Map<String, Object> manifest = object(StrictJson.parse(manifestBytes, MAX_MANIFEST_BYTES),
                     "schemaVersion", "exportKind", "releaseId", "contentDigest", "files");
-            require(integer(manifest.get("schemaVersion")) == 1 && "viewer".equals(string(manifest.get("exportKind"))), "Unsupported package type or schema");
+            require("viewer".equals(string(manifest.get("exportKind"))), "Unsupported package type");
             ViewerScene scene = parseScene(readBytes(resolve(emptyDestination, "scene.json"), MAX_SCENE_BYTES, cancel));
+            require(integer(manifest.get("schemaVersion")) == scene.schemaVersion, "Manifest/scene schema mismatch");
             String digest = contentDigest(scene);
             require(scene.releaseId.equals(string(manifest.get("releaseId"))) && digest.equals(string(manifest.get("contentDigest"))), "Manifest identity mismatch");
             Map<String, FileEntry> declared = new HashMap<>();
@@ -242,7 +294,7 @@ public final class ViewerPackageCodec {
             }
             listDirectory(emptyDestination.toPath(), emptyDestination.toPath(), expected, cancel);
             require(countFiles(emptyDestination) == expected.size(), "Missing or undeclared package file");
-            validateDirectory(scene, emptyDestination, cancel); check(cancel);
+            validateDirectory(scene, emptyDestination, cancel, validator); check(cancel);
             List<FileEntry> actualFiles = new ArrayList<>(declared.values()); actualFiles.sort((a,b) -> a.path.compareTo(b.path));
             return new LoadedPackage(scene, digest, actualFiles);
         } catch (IOException | RuntimeException failure) {
@@ -270,7 +322,7 @@ public final class ViewerPackageCodec {
     static String hex(byte[] bytes) { StringBuilder b = new StringBuilder(bytes.length * 2); for (byte n : bytes) b.append(Character.forDigit((n >>> 4) & 15, 16)).append(Character.forDigit(n & 15, 16)); return b.toString(); }
     static void safePath(String path) {
         require(path != null && (path.equals("manifest.json") || path.equals("scene.json")
-                || path.startsWith("assets/") && path.endsWith(".png") && UUID.matcher(path.substring(7, path.length() - 4)).matches()), "Unsafe or unsupported package path");
+                || path.startsWith("assets/") && (path.endsWith(".png") || path.endsWith(".mp4")) && UUID.matcher(path.substring(7, path.length() - 4)).matches()), "Unsafe or unsupported package path");
     }
     static File resolve(File root, String relative) throws IOException {
         safePath(relative); Path base = root.toPath().toAbsolutePath().normalize(); Path target = base.resolve(relative).normalize();
@@ -310,7 +362,12 @@ public final class ViewerPackageCodec {
         while (!queue.isEmpty()) for (String target : graph.getOrDefault(queue.removeFirst(), Collections.emptyList())) if (visited.add(target)) queue.add(target);
         return visited;
     }
-    private static void dimensions(int w, int h) { require(w > 0 && h > 0 && Math.min(w, h) <= 1080 && Math.max(w, h) <= 2400, "PNG dimensions exceed profile"); }
+    private static void version(int schemaVersion, String policyVersion, String compilerVersion) {
+        require((schemaVersion == 1 && POLICY_VERSION.equals(policyVersion)
+                || schemaVersion == 2 && VIDEO_POLICY_VERSION.equals(policyVersion))
+                && COMPILER_VERSION.equals(compilerVersion), "Unsupported viewer schema, policy or compiler version");
+    }
+    private static void dimensions(int w, int h) { require(w > 0 && h > 0 && Math.min(w, h) <= 1080 && Math.max(w, h) <= 2400, "Media dimensions exceed profile"); }
     private static void id(String value) { require(value != null && UUID.matcher(value).matches(), "Invalid canonical UUID"); }
     private static void unique(Set<String> ids, String value) { id(value); require(ids.add(value), "Duplicate object id"); }
     private static void source(String value) { require("recorded".equals(value) || "authored".equals(value) || "imported".equals(value), "Unsupported source kind"); }
@@ -325,12 +382,12 @@ public final class ViewerPackageCodec {
                 "title", a.title, "description", a.description, "sourceKind", a.sourceKind, "terminal", a.terminal));
         for (ViewerScene.Edge a : s.edges) edges.add(obj("id", a.id, "fromStateId", a.fromStateId,
                 "to", a.toStateId == null ? obj("endLabel", a.endLabel) : obj("stateId", a.toStateId), "hotspotId", a.hotspotId,
-                "label", a.label, "trigger", a.trigger, "transitionAssetId", null, "sourceKind", a.sourceKind));
+                "label", a.label, "trigger", a.trigger, "transitionAssetId", a.transitionAssetId, "sourceKind", a.sourceKind));
         for (ViewerScene.Hotspot a : s.hotspots) hotspots.add(obj("id", a.id, "stateId", a.stateId, "label", a.label,
                 "coordinateSpace", "state-normalized", "rect", obj("x", coord(a.rect.x), "y", coord(a.rect.y), "width", coord(a.rect.width), "height", coord(a.rect.height))));
-        for (ViewerScene.Asset a : s.assets) assets.add(obj("id", a.id, "path", a.path, "role", "state-image", "mime", a.mime,
-                "byteLength", a.byteLength, "sha256", a.sha256, "width", a.width, "height", a.height, "durationMs", null));
-        return obj("schemaVersion", 1, "policyVersion", POLICY_VERSION, "compilerVersion", COMPILER_VERSION,
+        for (ViewerScene.Asset a : s.assets) assets.add(obj("id", a.id, "path", a.path, "role", a.role, "mime", a.mime,
+                "byteLength", a.byteLength, "sha256", a.sha256, "width", a.width, "height", a.height, "durationMs", a.durationMs));
+        return obj("schemaVersion", s.schemaVersion, "policyVersion", s.policyVersion, "compilerVersion", s.compilerVersion,
                 "releaseId", s.releaseId, "title", s.title, "goal", s.goal, "createdAt", s.createdAt, "startStateId", s.startStateId,
                 "states", states, "edges", edges, "hotspots", hotspots, "regions", Collections.emptyList(), "assets", assets);
     }

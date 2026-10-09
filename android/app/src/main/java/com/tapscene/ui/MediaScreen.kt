@@ -412,22 +412,23 @@ fun MediaScreen(
 
 /** Fit the complete image inside a generous canvas, without a second window-inset owner. */
 @Composable
-private fun MediaCanvas(width: Int, height: Int, content: @Composable BoxScope.() -> Unit) {
+private fun MediaCanvas(width: Int, height: Int, modifier: Modifier = Modifier, fitHeight: Boolean = false, content: @Composable BoxScope.() -> Unit) {
     val ratio = width.toFloat() / height
     BoxWithConstraints(
-        modifier = Modifier.fillMaxWidth().background(ShellColors.Quiet, RoundedCornerShape(8.dp)).padding(12.dp),
+        modifier = modifier.fillMaxWidth().background(ShellColors.Quiet, RoundedCornerShape(8.dp)).padding(12.dp),
         contentAlignment = Alignment.Center,
     ) {
-        val canvasWidth = minOf(maxWidth, 440.dp * ratio)
+        val canvasWidth = minOf(maxWidth, (if (fitHeight) maxHeight else 440.dp) * ratio)
         Box(Modifier.width(canvasWidth).aspectRatio(ratio), content = content)
     }
 }
 
 @Composable
-private fun FrameEditor(bitmap: Bitmap, masks: List<OpaqueMask>, enabled: Boolean, onMask: (OpaqueMask) -> Unit) {
+internal fun FrameEditor(bitmap: Bitmap, masks: List<OpaqueMask>, enabled: Boolean, onMask: (OpaqueMask) -> Unit,
+    modifier: Modifier = Modifier, fitHeight: Boolean = false) {
     var start by remember(bitmap) { mutableStateOf<Offset?>(null) }
     var end by remember(bitmap) { mutableStateOf<Offset?>(null) }
-    MediaCanvas(bitmap.width, bitmap.height) {
+    MediaCanvas(bitmap.width, bitmap.height, modifier, fitHeight) {
         Image(bitmap.asImageBitmap(), contentDescription = if (enabled) "本机原片，拖动画面可添加遮挡" else "本机原片及当前遮挡，仅供编辑参考", modifier = Modifier.fillMaxSize())
         Canvas(Modifier.fillMaxSize().pointerInput(bitmap, enabled, masks.size) {
             if (enabled) detectDragGestures(
@@ -461,7 +462,7 @@ private fun FrameEditor(bitmap: Bitmap, masks: List<OpaqueMask>, enabled: Boolea
 }
 
 @Composable
-private fun MaskDialog(onDismiss: () -> Unit, onConfirm: (OpaqueMask) -> Unit) {
+internal fun MaskDialog(onDismiss: () -> Unit, onConfirm: (OpaqueMask) -> Unit) {
     var left by remember { mutableStateOf("10") }
     var top by remember { mutableStateOf("10") }
     var right by remember { mutableStateOf("60") }

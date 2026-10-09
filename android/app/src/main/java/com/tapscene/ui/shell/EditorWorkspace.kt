@@ -227,6 +227,9 @@ fun EditorWorkspaceContent(
                                 TextButton(onClick = { editingNextAction = action }, enabled = !busy && !draft.isTerminal) {
                                     Text(if (validTarget) "编辑" else "选目标")
                                 }
+                                TextButton(onClick = { callbacks.onOpenTransition(action.id) }, enabled = !busy && validTarget) {
+                                    Text(if (action.transition == null) "静态 ›" else "短片 ›")
+                                }
                                 TextButton(onClick = callbacks.onRemoveNextAction, enabled = !busy) { Text("移除") }
                             }
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -242,8 +245,8 @@ fun EditorWorkspaceContent(
                                     Text("→ ${editorTargetLabel(hotspot, project.steps)}", style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
-                                TextButton(onClick = { callbacks.onOpenTransition(hotspot.id) },
-                                    enabled = !busy && hotspot.targetStepId != null) { Text("静态 ›") }
+                                TextButton(onClick = { callbacks.onOpenTransition(hotspot.edgeId) },
+                                    enabled = !busy && (hotspot.targetStepId != null || hotspot.endLabel != null)) { Text(if (hotspot.transition == null) "静态 ›" else "短片 ›") }
                             }
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         }
@@ -484,52 +487,6 @@ private fun EditorTargetRow(title: String, subtitle: String?, selected: Boolean,
             Text(title, style = MaterialTheme.typography.bodyMedium)
             subtitle?.let { Text(it, style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-        }
-    }
-}
-
-/** Page 06 is an honest capability scaffold: no transition persistence or generation is claimed. */
-@Composable
-fun TransitionWorkspaceContent(project: ProjectSnapshot, stepId: String, hotspotId: String?, bitmap: Bitmap?, busy: Boolean,
-    onBack: () -> Unit, modifier: Modifier = Modifier, draft: StepEditDraft? = null) {
-    val step = project.steps.firstOrNull { it.id == stepId }
-    val currentDraft = draft?.takeIf { it.stepId == stepId }
-    val hotspot = (currentDraft?.hotspots ?: step?.hotspots)?.firstOrNull { it.id == hotspotId }
-    BackHandler { if (!busy) onBack() }
-    BoxWithConstraints(modifier.fillMaxSize()) {
-        val panelMaxHeight = (maxHeight * 0.46f).coerceIn(100.dp, 310.dp)
-        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-            ShellTopBar("录制过渡", onBack = { if (!busy) onBack() })
-            Text("${currentDraft?.title ?: step?.title ?: "当前步骤"} → ${hotspot?.let { editorTargetLabel(it, project.steps) } ?: "目标步骤"}",
-                style = MaterialTheme.typography.titleSmall, maxLines = 2,
-                modifier = Modifier.fillMaxWidth().padding(16.dp))
-            EditorCanvas(bitmap, emptyList(), Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
-                enabled = false, busy = busy)
-            Column(Modifier.fillMaxWidth().heightIn(max = panelMaxHeight).verticalScroll(rememberScrollState()).padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("当前为静态切换", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
-                    TextButton(onClick = {}, enabled = false) { Text("选择已有片段") }
-                }
-                Text("尚未绑定过渡片段", style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Slider(value = 0f, onValueChange = {}, enabled = false, modifier = Modifier.fillMaxWidth())
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("起点 —  /  终点 —", style = MaterialTheme.typography.labelSmall)
-                    Text("单段 —  ·  累计 —", style = MaterialTheme.typography.labelSmall)
-                }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    TextButton(onClick = {}, enabled = false) { Text("播放 / 重放") }
-                    TextButton(onClick = {}, enabled = false) { Text("逐帧") }
-                    TextButton(onClick = {}, enabled = false) { Text("固定遮挡") }
-                }
-                Text("过渡绑定、裁剪和整段安全生成尚未接入。后续需完整复核视频。", style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedButton(onClick = onBack, enabled = !busy, modifier = Modifier.weight(1f)) { Text("返回编辑") }
-                    Button(onClick = {}, enabled = false, modifier = Modifier.weight(1f)) { Text("保存过渡") }
-                }
-            }
         }
     }
 }

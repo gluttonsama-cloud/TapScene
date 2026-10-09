@@ -7,6 +7,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.tapscene.data.ProjectHotspot
 import com.tapscene.data.ProjectLimits
+import com.tapscene.data.ProjectTransition
 import com.tapscene.data.ProjectNextAction
 import com.tapscene.data.ProjectSnapshot
 import com.tapscene.data.ProjectStep
@@ -45,6 +46,15 @@ data class StepEditDraft(
 
 data class ProjectIssue(val stepId: String?, val message: String)
 
+data class PreviewTransition(
+    val actionId: String,
+    val edgeId: String,
+    val targetStepId: String?,
+    val endLabel: String?,
+    val transition: ProjectTransition,
+    val video: LocalVideoRun,
+)
+
 /** [history] contains actual visits, including repeated visits through explicit cycles. */
 data class PreviewState(
     val projectId: String,
@@ -56,8 +66,9 @@ data class PreviewState(
     val matchingHotspotIds: List<String> = emptyList(),
     val endActionId: String? = null,
     val visitedActionIds: Set<String> = emptySet(),
+    val pendingTransition: PreviewTransition? = null,
 ) {
-    val canGoBack: Boolean get() = history.size > 1 || endActionId != null
+    val canGoBack: Boolean get() = pendingTransition != null || history.size > 1 || endActionId != null
 }
 
 data class ProjectUiState(
@@ -94,6 +105,9 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     private var task: Job? = null
     private var previewSnapshot: ProjectSnapshot? = null
     private var previewEditRevision = -1L
+    private var previewTask: Job? = null
+    private var previewGeneration = 0L
+    private var mediaRunSequence = 0L
     private val drafts = mutableMapOf<Pair<String, String>, DraftRecord>()
 
     private data class DraftRecord(
@@ -110,6 +124,36 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     init { reload() }
 
     fun reload() = execute("读取本地项目") { refresh() }
+
+    /** Refresh an external transition save without throwing away the author's typed text. */
+    fun refreshAfterTransition(projectId: String, stepId: String) = execute("读取已保存过渡") {
+        if (state.value.project?.project?.id != projectId) return@execute
+        val fresh = withContext(Dispatchers.IO) { store.readProject(projectId) } ?: return@execute
+        val step = fresh.steps.firstOrNull { it.id == stepId } ?: return@execute
+        val key = projectId to stepId
+        drafts[key]?.let { record ->
+            val old = record.baseStep
+            val withoutMedia = step.copy(hotspots = step.hotspots.map { spot ->
+                spot.copy(transition = old.hotspots.firstOrNull { it.id == spot.id }?.transition)
+            }, nextAction = step.nextAction?.let { action -> action.copy(transition = old.nextAction?.takeIf { it.id == action.id }?.transition) })
+            if (sameEdits(old.toDraft(), withoutMedia)) {
+                val updatedDraft = record.draft.copy(hotspots = record.draft.hotspots.map { spot ->
+                    val actual = step.hotspots.firstOrNull { it.id == spot.id }
+                    val base = old.hotspots.firstOrNull { it.id == spot.id }
+                    if (actual != null && base != null && spot.copy(transition = base.transition) == base) spot.copy(transition = actual.transition) else spot
+                }, nextAction = record.draft.nextAction?.let { action ->
+                    val actual = step.nextAction
+                    val base = old.nextAction
+                    if (actual != null && base != null && action.copy(transition = base.transition) == base) action.copy(transition = actual.transition) else action
+                })
+                drafts[key] = DraftRecord(updatedDraft.copy(dirty = !sameEdits(updatedDraft, step)), step, fresh.project.revision)
+            }
+        }
+        invalidatePreview()
+        applyProject(fresh)
+        mutableState.update { it.copy(route = ProjectRoute.EDIT, selectedStepId = step.id, stepDraft = draftFor(fresh, step)) }
+        loadBitmap(fresh, step)
+    }
 
     /** Creation is explicit; importing/cancelling media never implicitly creates another project. */
     fun createProject(title: String, goal: String = "") = execute("创建项目", editing = true) {
@@ -242,10 +286,15 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         mutableState.update { it.copy(stepDraft = next, dirtyStepIds = dirtyIds(project.project.id), message = null) }
     }
 
-    fun saveStepDraft() {
+    fun saveStepDraft() = saveStepDraftInternal(null)
+
+    fun saveBeforeTransition(onSaved: () -> Unit) = saveStepDraftInternal(onSaved)
+
+    private fun saveStepDraftInternal(onSaved: (() -> Unit)?) {
+        if (state.value.busy || state.value.loadFailed) return
         val project = state.value.project ?: return
         val draft = state.value.stepDraft ?: return
-        if (!draft.dirty) return
+        if (!draft.dirty) { onSaved?.invoke(); return }
         val record = drafts[project.project.id to draft.stepId] ?: return
         if (record.baseRevision != project.project.revision) {
             message("此步骤已有其他已保存修改，你的草稿仍保留。请先记录要保留的内容，再放弃草稿查看新版本")
@@ -262,6 +311,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
             }
             applyProject(saved)
             message("步骤已保存")
+            onSaved?.invoke()
         }
     }
 
@@ -464,7 +514,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         if (state.value.busy || state.value.bitmap == null || !x.isFinite() || !y.isFinite() || x !in 0f..1f || y !in 0f..1f) return
         val snapshot = validPreview() ?: return
         val preview = state.value.preview ?: return
-        if (preview.ended) return
+        if (preview.ended || preview.pendingTransition != null) return
         val step = snapshot.steps.firstOrNull { it.id == preview.currentStepId } ?: return
         val matches = step.hotspots.filter { x >= it.rect.left && x <= it.rect.right && y >= it.rect.top && y <= it.rect.bottom }
         when (matches.size) {
@@ -482,15 +532,11 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         if (state.value.busy || state.value.bitmap == null) return
         val snapshot = validPreview() ?: return
         val preview = state.value.preview ?: return
-        if (preview.ended) return
+        if (preview.ended || preview.pendingTransition != null) return
         val step = snapshot.steps.firstOrNull { it.id == preview.currentStepId } ?: return
         val hotspot = step.hotspots.firstOrNull { it.id == id } ?: return
-        if (hotspot.endLabel != null && hotspot.targetStepId == null) {
-            mutableState.update { it.copy(preview = preview.copy(ended = true, endLabel = hotspot.endLabel,
-                endActionId = hotspot.id, matchingHotspotIds = emptyList(), visitedActionIds = preview.visitedActionIds + id)) }
-            return
-        }
-        advancePreview(snapshot, preview, hotspot.id, hotspot.targetStepId, "这个热点的目标已缺失，请回编辑修正")
+        selectPreviewAction(snapshot, preview, hotspot.id, hotspot.targetStepId, hotspot.endLabel,
+            hotspot.transition, "这个热点的目标已缺失，请回编辑修正", edgeId = hotspot.edgeId)
     }
 
     /** Invoked only by the authored button, never by canvas hit testing or list position. */
@@ -498,35 +544,139 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         if (state.value.busy || state.value.bitmap == null) return
         val snapshot = validPreview() ?: return
         val preview = state.value.preview ?: return
-        if (preview.ended) return
+        if (preview.ended || preview.pendingTransition != null) return
         val action = snapshot.steps.firstOrNull { it.id == preview.currentStepId }?.nextAction ?: return
-        advancePreview(snapshot, preview, action.id, action.targetStepId, "下一步目标已缺失，请回编辑重新选择；此处不是结束")
+        selectPreviewAction(snapshot, preview, action.id, action.targetStepId, null, action.transition,
+            "下一步目标已缺失，请回编辑重新选择；此处不是结束")
     }
 
-    private fun advancePreview(snapshot: ProjectSnapshot, preview: PreviewState, actionId: String,
-        targetStepId: String?, missingTargetMessage: String) {
-        val target = snapshot.steps.firstOrNull { it.id == targetStepId }
-        if (target == null) {
+    private fun selectPreviewAction(snapshot: ProjectSnapshot, preview: PreviewState, actionId: String,
+        targetStepId: String?, endLabel: String?, transition: ProjectTransition?, missingTargetMessage: String,
+        edgeId: String = actionId) {
+        if (targetStepId == null && endLabel == null || targetStepId != null && snapshot.steps.none { it.id == targetStepId }) {
             message(missingTargetMessage)
             return
         }
-        if (preview.history.size >= MAX_PREVIEW_VISITS) {
+        if (targetStepId != null && preview.history.size >= MAX_PREVIEW_VISITS) {
             dismissPreviewChoices()
             message("已试走 256 次，请点“重来”开启新一轮预览")
             return
         }
-        execute("读取目标安全画面") {
-            mutableState.update { it.copy(bitmap = null, preview = preview.copy(matchingHotspotIds = emptyList())) }
-            val bitmap = decodeBitmap(snapshot, target) ?: return@execute
-            // The visit and its edge become real only after the target's exact saved bytes decode.
-            mutableState.update { it.copy(selectedStepId = target.id, bitmap = bitmap,
-                preview = preview.copy(currentStepId = target.id, history = preview.history + target.id,
-                    ended = target.isTerminal, endLabel = target.title.takeIf { _ -> target.isTerminal },
-                    endActionId = null, matchingHotspotIds = emptyList(), visitedActionIds = preview.visitedActionIds + actionId)) }
+        if (transition != null) {
+            val pending = PreviewTransition(actionId, edgeId, targetStepId, endLabel, transition,
+                LocalVideoRun(null, transition.asset.width, transition.asset.height, ++mediaRunSequence))
+            mutableState.update { it.copy(preview = preview.copy(matchingHotspotIds = emptyList(), pendingTransition = pending)) }
+            loadPreviewTransition(snapshot, pending)
+        } else commitPreviewAction(snapshot, preview, actionId, targetStepId, endLabel)
+    }
+
+    private fun loadPreviewTransition(snapshot: ProjectSnapshot, pending: PreviewTransition) = launchPreviewWork {
+        try {
+            val file = withContext(Dispatchers.IO) {
+                val resolved = store.resolveTransition(snapshot.project.id, pending.edgeId)
+                val expected = pending.transition.asset
+                require(resolved.length() == expected.byteLength) { "过渡已变化" }
+                val digest = MessageDigest.getInstance("SHA-256")
+                resolved.inputStream().use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        coroutineContext.ensureActive()
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        digest.update(buffer, 0, count)
+                    }
+                }
+                require(digest.digest().joinToString("") { "%02x".format(it) } == expected.sha256) { "过渡已变化" }
+                resolved
+            }
+            val active = state.value.preview?.pendingTransition
+            if (active?.video?.runId == pending.video.runId) mutableState.update {
+                it.copy(preview = it.preview?.copy(pendingTransition = active.copy(video = active.video.copy(file = file))))
+            }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { failPreviewTransition(pending.video.runId) }
+    }
+
+    fun completePreviewTransition(runId: Long) {
+        val snapshot = validPreview() ?: return
+        val preview = state.value.preview ?: return
+        val pending = preview.pendingTransition ?: return
+        if (state.value.busy || pending.video.runId != runId || pending.video.failed || pending.video.file == null) return
+        commitPreviewAction(snapshot, preview, pending.actionId, pending.targetStepId, pending.endLabel)
+    }
+
+    fun failPreviewTransition(runId: Long) {
+        val preview = state.value.preview ?: return
+        val pending = preview.pendingTransition ?: return
+        if (pending.video.runId != runId) return
+        mutableState.update { it.copy(preview = preview.copy(pendingTransition = pending.copy(video = pending.video.copy(file = null, failed = true)))) }
+    }
+
+    fun retryPreviewTransition(runId: Long) {
+        if (state.value.busy) return
+        val snapshot = validPreview() ?: return
+        val preview = state.value.preview ?: return
+        val old = preview.pendingTransition ?: return
+        if (old.video.runId != runId) return
+        val pending = old.copy(video = old.video.copy(file = null, failed = false, runId = ++mediaRunSequence))
+        mutableState.update { it.copy(preview = preview.copy(pendingTransition = pending)) }
+        loadPreviewTransition(snapshot, pending)
+    }
+
+    fun skipPreviewTransition() {
+        if (state.value.busy) return
+        val snapshot = validPreview() ?: return
+        val preview = state.value.preview ?: return
+        val pending = preview.pendingTransition ?: return
+        commitPreviewAction(snapshot, preview, pending.actionId, pending.targetStepId, pending.endLabel)
+    }
+
+    private fun commitPreviewAction(snapshot: ProjectSnapshot, preview: PreviewState, actionId: String,
+        targetStepId: String?, endLabel: String?) = launchPreviewWork {
+        val target = snapshot.steps.firstOrNull { it.id == targetStepId }
+        val bitmap = if (target != null) decodeBitmap(snapshot, target) else state.value.bitmap
+        if (bitmap == null) {
+            preview.pendingTransition?.let { failPreviewTransition(it.video.runId) }
+            return@launchPreviewWork
+        }
+        coroutineContext.ensureActive()
+        mutableState.update { it.copy(selectedStepId = target?.id ?: preview.currentStepId, bitmap = bitmap,
+            preview = preview.copy(currentStepId = target?.id ?: preview.currentStepId,
+                history = if (target == null) preview.history else preview.history + target.id,
+                ended = target?.isTerminal ?: true,
+                endLabel = if (target == null) endLabel else target.title.takeIf { target.isTerminal },
+                endActionId = if (target == null) actionId else null, matchingHotspotIds = emptyList(),
+                pendingTransition = null, visitedActionIds = preview.visitedActionIds + actionId)) }
+    }
+
+    private fun launchPreviewWork(block: suspend () -> Unit) {
+        previewTask?.cancel()
+        val generation = ++previewGeneration
+        mutableState.update { it.copy(busy = true, stage = "读取安全画面") }
+        previewTask = viewModelScope.launch {
+            try { block() }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { message("播放未完成，请重试或静态前进") }
+            finally {
+                if (generation == previewGeneration) mutableState.update { it.copy(busy = false, stage = null) }
+            }
         }
     }
 
+    private fun cancelPreviewWork() {
+        previewGeneration++
+        val active = previewTask?.isActive == true
+        previewTask?.cancel()
+        previewTask = null
+        if (active) mutableState.update { it.copy(busy = false, stage = null) }
+    }
+
     fun previousPreview() {
+        if (state.value.preview?.pendingTransition != null) {
+            cancelPreviewWork()
+            mutableState.update { it.copy(preview = it.preview?.copy(pendingTransition = null, matchingHotspotIds = emptyList())) }
+            return
+        }
         if (state.value.busy) return
         val snapshot = validPreview() ?: return
         val preview = state.value.preview ?: return
@@ -548,6 +698,10 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     fun restartPreview() {
+        if (state.value.preview?.pendingTransition != null) {
+            cancelPreviewWork()
+            mutableState.update { it.copy(preview = it.preview?.copy(pendingTransition = null)) }
+        }
         if (state.value.busy) return
         val snapshot = validPreview() ?: return
         val old = state.value.preview ?: return
@@ -562,6 +716,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     fun exitPreview() {
+        if (state.value.preview?.pendingTransition != null) cancelPreviewWork()
         if (state.value.busy) return
         val id = state.value.preview?.currentStepId ?: state.value.selectedStepId
         invalidatePreview()
@@ -582,6 +737,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     private fun invalidatePreview(edited: Boolean = false) {
+        cancelPreviewWork()
         previewSnapshot = null
         previewEditRevision = -1
         mutableState.update { it.copy(preview = null,

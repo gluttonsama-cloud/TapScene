@@ -30,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.tapscene.data.ProjectSnapshot
+import com.tapscene.ui.LocalVideoPlayback
 import com.tapscene.ui.PreviewState
 
 /** Page 07 displays the host's real frozen preview state and never invents traversal or coverage. */
@@ -46,11 +47,17 @@ fun DraftPreviewContent(
     onExit: () -> Unit,
     modifier: Modifier = Modifier,
     onNextAction: () -> Unit = {},
+    onVideoCompleted: (Long) -> Unit = {},
+    onVideoFailed: (Long) -> Unit = {},
+    onVideoRetry: (Long) -> Unit = {},
+    onVideoSkip: () -> Unit = {},
 ) {
     val hasBitmap = bitmap != null && !bitmap.isRecycled
     val step = project.steps.firstOrNull { it.id == preview.currentStepId }
     var showExplanation by rememberSaveable(preview.currentStepId) { mutableStateOf(false) }
-    BackHandler { if (!busy) onExit() }
+    val video = preview.pendingTransition?.video
+    val actionsEnabled = !busy && video == null
+    BackHandler { if (!busy || video != null) onExit() }
     BoxWithConstraints(modifier.fillMaxSize()) {
         val panelMaxHeight = (maxHeight * 0.3f).coerceIn(64.dp, 220.dp)
         val explanationMaxHeight = (maxHeight * 0.16f).coerceIn(44.dp, 120.dp)
@@ -62,7 +69,7 @@ fun DraftPreviewContent(
                     Text("修订 ${preview.revision} · 本地试走", style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                TextButton(onClick = onExit, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("退出预览") }
+                TextButton(onClick = onExit, enabled = !busy || video != null, modifier = Modifier.heightIn(min = 48.dp)) { Text("退出预览") }
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(enabled = step != null) { showExplanation = !showExplanation }
@@ -78,12 +85,26 @@ fun DraftPreviewContent(
                 Text("本次访问 ${preview.history.size} 步 · 已试走 ${preview.visitedActionIds.size} 个动作",
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            EditorCanvas(bitmap = bitmap, hotspots = if (preview.ended) emptyList() else step?.hotspots.orEmpty(),
+            val videoFile = video?.file
+            if (video != null && videoFile != null && !video.failed) {
+                LocalVideoPlayback(videoFile, video.width, video.height, video.runId,
+                    Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
+                    onCompleted = onVideoCompleted, onError = onVideoFailed, onInterrupted = onVideoFailed, onReplay = onVideoRetry)
+            } else EditorCanvas(bitmap = bitmap, hotspots = if (preview.ended || video != null) emptyList() else step?.hotspots.orEmpty(),
                 modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
-                enabled = !busy && !preview.ended && step != null, busy = busy, onTap = onTap)
+                enabled = actionsEnabled && !preview.ended && step != null, busy = busy, onTap = onTap)
             Column(Modifier.fillMaxWidth().heightIn(max = panelMaxHeight).verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 when {
+                    video != null -> {
+                        Text(if (video.failed) "过渡播放失败" else "正在播放过渡", style = MaterialTheme.typography.titleSmall)
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            if (video.failed) OutlinedButton(onClick = { onVideoRetry(video.runId) }, enabled = !busy,
+                                modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("重试") }
+                            OutlinedButton(onClick = onVideoSkip, enabled = !busy,
+                                modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text(if (video.failed) "静态前进" else "跳过过渡") }
+                        }
+                    }
                     step == null -> Text("当前步骤不存在。退出预览后重新打开项目。", style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.error)
                     preview.ended -> {
@@ -97,7 +118,7 @@ fun DraftPreviewContent(
                     else -> {
                         step.nextAction?.let { action ->
                             val validTarget = project.steps.any { it.id == action.targetStepId }
-                            Button(onClick = onNextAction, enabled = !busy && hasBitmap && validTarget && !step.isTerminal,
+                            Button(onClick = onNextAction, enabled = actionsEnabled && hasBitmap && validTarget && !step.isTerminal,
                                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                                 Text(action.label)
                             }
@@ -110,7 +131,7 @@ fun DraftPreviewContent(
                         step.hotspots.forEachIndexed { index, hotspot ->
                             val validTarget = hotspot.endLabel != null || project.steps.any { it.id == hotspot.targetStepId }
                             val matching = hotspot.id in preview.matchingHotspotIds
-                            OutlinedButton(onClick = { onHotspot(hotspot.id) }, enabled = !busy && hasBitmap && validTarget,
+                            OutlinedButton(onClick = { onHotspot(hotspot.id) }, enabled = actionsEnabled && hasBitmap && validTarget,
                                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                     Text("${index + 1}", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(end = 12.dp))
@@ -126,9 +147,9 @@ fun DraftPreviewContent(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                TextButton(onClick = onPrevious, enabled = !busy && preview.canGoBack,
+                TextButton(onClick = onPrevious, enabled = (!busy || video != null) && preview.canGoBack,
                     modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("上一步") }
-                TextButton(onClick = onRestart, enabled = !busy,
+                TextButton(onClick = onRestart, enabled = !busy || video != null,
                     modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("重来") }
             }
         }

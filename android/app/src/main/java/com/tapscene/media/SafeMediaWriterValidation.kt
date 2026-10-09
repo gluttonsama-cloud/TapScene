@@ -16,6 +16,24 @@ import kotlinx.coroutines.ensureActive
 
 /** Internal technical checks. None of these substitute for the author's actual-output review. */
 internal object SafeMediaWriterValidation {
+    /** Shared with generation: map outward-rounded editor pixels onto the negotiated canvas. */
+    fun normalizeMasks(inputWidth: Int, inputHeight: Int, width: Int, height: Int,
+        masks: List<OpaqueMask>): List<OpaqueMask> {
+        require(inputWidth > 0 && inputHeight > 0 && width > 0 && height > 0)
+        val scale = minOf(width.toDouble() / inputWidth, height.toDouble() / inputHeight)
+        val xOffset = (width - inputWidth * scale) / 2
+        val yOffset = (height - inputHeight * scale) / 2
+        return masks.map { mask ->
+            val rect = mask.toPixelRect(inputWidth, inputHeight)
+            OpaqueMask(
+                ((xOffset + rect.left * scale - 1) / width).toFloat().coerceIn(0f, 1f),
+                ((yOffset + rect.top * scale - 1) / height).toFloat().coerceIn(0f, 1f),
+                ((xOffset + rect.right * scale + 1) / width).toFloat().coerceIn(0f, 1f),
+                ((yOffset + rect.bottom * scale + 1) / height).toFloat().coerceIn(0f, 1f),
+            )
+        }
+    }
+
     suspend fun verifyPng(file: File, width: Int, height: Int, masks: List<OpaqueMask>) {
         verifyPngChunks(file)
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -110,6 +128,17 @@ internal object SafeMediaWriterValidation {
 
     data class VideoInfo(val width: Int, val height: Int, val durationUs: Long)
 
+    /** Revalidates persisted/imported output from its actual tracks, samples and every frame.
+     * No encoder callback or manifest frame count is assumed for bytes reopened from storage. */
+    suspend fun verifyStoredVideoOutput(
+        context: Context,
+        file: File,
+        masks: List<OpaqueMask> = emptyList(),
+        expectedWidth: Int,
+        expectedHeight: Int,
+    ): VideoInfo = verifyVideoOutput(context, file, 10_000_000L, masks,
+        expectedWidth, expectedHeight, expectedFrameCount = null)
+
     suspend fun verifyVideoOutput(
         context: Context,
         file: File,
@@ -117,9 +146,10 @@ internal object SafeMediaWriterValidation {
         masks: List<OpaqueMask>,
         expectedWidth: Int,
         expectedHeight: Int,
-        expectedFrameCount: Int,
+        expectedFrameCount: Int?,
     ): VideoInfo {
         currentCoroutineContext().ensureActive()
+        check(file.isFile && file.length() in 1..50L * 1024 * 1024) { "实际 MP4 为空或超过 50 MiB。" }
         requireMp4(file)
         val extractor = MediaExtractor()
         val samplePts = mutableListOf<Long>()
@@ -150,7 +180,7 @@ internal object SafeMediaWriterValidation {
             check(format.containsKey(MediaFormat.KEY_DURATION)) { "输出缺少有效时长。" }
             val durationUs = format.getLong(MediaFormat.KEY_DURATION)
             check(durationUs in 1..selectedDurationUs + MediaLimits.TIMESTAMP_TOLERANCE_US &&
-                durationUs <= 10_000_000L + MediaLimits.TIMESTAMP_TOLERANCE_US
+                durationUs <= 10_000_000L
             ) {
                 "输出时长无效或超过选择的区间。"
             }
@@ -165,7 +195,8 @@ internal object SafeMediaWriterValidation {
             extractor.selectTrack(0)
             while (extractor.sampleTime >= 0) {
                 currentCoroutineContext().ensureActive()
-                check(extractor.sampleTime < selectedDurationUs + MediaLimits.TIMESTAMP_TOLERANCE_US &&
+                check(extractor.sampleTime < 10_000_000L &&
+                    extractor.sampleTime < selectedDurationUs + MediaLimits.TIMESTAMP_TOLERANCE_US &&
                     extractor.sampleTime < durationUs + MediaLimits.TIMESTAMP_TOLERANCE_US
                 ) { "输出包含裁剪区间外的视频样本。" }
                 check(extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_ENCRYPTED == 0) {
@@ -176,7 +207,8 @@ internal object SafeMediaWriterValidation {
                 if (!extractor.advance()) break
             }
             check(samplePts.isNotEmpty()) { "输出没有视频样本。" }
-            check(samplePts.size == expectedFrameCount && samplePts.distinct().size == samplePts.size) {
+            check((expectedFrameCount == null || samplePts.size == expectedFrameCount) &&
+                samplePts.distinct().size == samplePts.size) {
                 "实际输出的样本数或 PTS 与编码结果不一致，已丢弃。"
             }
             VideoInfo(width, height, durationUs)

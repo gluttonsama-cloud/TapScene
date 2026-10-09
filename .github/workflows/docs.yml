@@ -151,6 +151,8 @@ jobs:
             ${{ runner.temp }}/package-fixtures/smallest-viewer.tapscene
             ${{ runner.temp }}/package-fixtures/branch-viewer.tapscene
             ${{ runner.temp }}/package-fixtures/synthetic.tapscene
+            ${{ runner.temp }}/package-fixtures/video/video-viewer.tapscene
+            ${{ runner.temp }}/package-fixtures/video/results.txt
           retention-days: 7
           if-no-files-found: error
       - name: Build the arm64 phone preview and run lint
@@ -222,7 +224,7 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 13, f"Expected thirteen Compose review images, found {len(images)}"
+          assert len(images) == 15, f"Expected fifteen Compose review images, found {len(images)}"
           lines = [
               "TapScene shell review: host-side Compose / Layoutlib renders.",
               "Not device screenshots; does not validate media decoding, touch, or system pickers.",

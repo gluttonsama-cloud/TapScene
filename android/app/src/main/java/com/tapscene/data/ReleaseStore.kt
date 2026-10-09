@@ -93,8 +93,19 @@ class ReleaseStore(context: Context) {
         val candidate = boundCandidate(candidateId, digest)
         check(candidate.scene.states.any { it.id == stateId }) { "复核步骤不属于这个候选。" }
         val asset = stateAsset(candidate.scene, stateId)
-        ReleaseCompiler.verifyAsset(asset, File(child(candidates, candidateId), "package"))
+        ReleaseCompiler.verifyAsset(app, asset, File(child(candidates, candidateId), "package"))
         update(candidate.copy(reviewedStateIds = candidate.reviewedStateIds + stateId))
+    }
+
+    /** Call only after this fixed candidate clip reached EOS from zero without a seek/skip,
+     * then the author explicitly confirmed it. Traversal/decoder success alone is not review. */
+    suspend fun reviewTransition(candidateId: String, digest: String, assetId: String,
+        assetSha256: String): ReleaseCandidate = locked {
+        val candidate = boundCandidate(candidateId, digest)
+        val asset = transitionAsset(candidate.scene, assetId)
+        check(asset.sha256 == assetSha256) { "完整观看记录对应另一份视频，请重新播放。" }
+        ReleaseCompiler.verifyAsset(app, asset, File(child(candidates, candidateId), "package"))
+        update(candidate.copy(reviewedTransitionAssetIds = candidate.reviewedTransitionAssetIds + assetId))
     }
 
     suspend fun reviewSummary(candidateId: String, digest: String): ReleaseCandidate = locked {
@@ -167,6 +178,10 @@ class ReleaseStore(context: Context) {
         check(candidate.visitedEdgeIds == candidate.scene.edges.map { it.id }.toSet() && candidate.completedPath) {
             "请实际试走全部连线，并至少从起点完整到达一次终点。"
         }
+        check(candidate.reviewedTransitionAssetIds == candidate.scene.assets
+            .filter { it.role == ViewerScene.Asset.ROLE_TRANSITION }.map { it.id }.toSet()) {
+            "请从头完整观看并逐段确认固定候选的全部实际过渡视频。"
+        }
         val source = child(candidates, candidateId)
         verifyPackage(candidate.scene, File(source, "package"), decode = true)
         val summary = summary(candidate.scene, "local", System.currentTimeMillis())
@@ -202,6 +217,18 @@ class ReleaseStore(context: Context) {
         checkedAsset(readScene(payload), payload, stateId)
     }
 
+    suspend fun candidateTransitionFile(candidateId: String, assetId: String): File = locked {
+        val candidate = readCandidateDirectory(child(candidates, candidateId), verifyAssets = false)
+        checkedTransition(candidate.scene, File(child(candidates, candidateId), "package"), assetId)
+    }
+
+    suspend fun releaseTransitionFile(releaseId: String, assetId: String): File = locked {
+        val location = child(releases, releaseId)
+        readReleaseDirectory(location, verifyAssets = false)
+        val payload = File(location, "package")
+        checkedTransition(readScene(payload), payload, assetId)
+    }
+
     /** A verified ZIP is prepared privately; the UI still owns the explicit SAF save operation. */
     suspend fun exportRelease(releaseId: String): File = locked {
         val location = child(releases, releaseId)
@@ -211,9 +238,9 @@ class ReleaseStore(context: Context) {
         verifyPackage(scene, payload, decode = true)
         stage { operation ->
             val output = File(operation, "viewer.tapscene")
-            ViewerPackageCodec.writePackage(scene, payload, output, cancelCheck())
+            ViewerPackageCodec.writePackage(scene, payload, output, cancelCheck(), videoValidator())
             val verify = directory(File(operation, "verified"), operation)
-            val loaded = ViewerPackageCodec.readPackage(output, verify, cancelCheck())
+            val loaded = ViewerPackageCodec.readPackage(output, verify, cancelCheck(), videoValidator())
             check(loaded.contentDigest == stored.contentDigest) { "导出包内容校验失败。" }
             verifyPackage(loaded.scene, verify, decode = true)
             syncFile(output)
@@ -246,7 +273,7 @@ class ReleaseStore(context: Context) {
                 sink.fd.sync()
             }
             val payload = directory(File(operation, "package"), operation)
-            val loaded = ViewerPackageCodec.readPackage(zip, payload, cancelCheck())
+            val loaded = ViewerPackageCodec.readPackage(zip, payload, cancelCheck(), videoValidator())
             // Accepted external JSON may use whitespace/key-order variations. Persist only the
             // canonical, whitelisted representation whose file list is displayed and exported.
             writeSynced(File(payload, "scene.json"), ViewerPackageCodec.writeScene(loaded.scene))
@@ -286,8 +313,20 @@ class ReleaseStore(context: Context) {
 
     private suspend fun checkedAsset(scene: ViewerScene, payload: File, stateId: String): File {
         val asset = stateAsset(scene, stateId)
-        ReleaseCompiler.verifyAsset(asset, payload)
+        ReleaseCompiler.verifyAsset(app, asset, payload)
         return File(payload, asset.path)
+    }
+
+    private suspend fun checkedTransition(scene: ViewerScene, payload: File, assetId: String): File {
+        val asset = transitionAsset(scene, assetId)
+        ReleaseCompiler.verifyAsset(app, asset, payload)
+        return File(payload, asset.path)
+    }
+
+    private fun transitionAsset(scene: ViewerScene, assetId: String): ViewerScene.Asset {
+        check(scene.edges.any { it.transitionAssetId == assetId }) { "视频不属于当前固定版本的边。" }
+        return scene.assets.singleOrNull { it.id == assetId && it.role == ViewerScene.Asset.ROLE_TRANSITION }
+            ?: error("固定版本缺少这个过渡视频。")
     }
 
     private fun stateAsset(scene: ViewerScene, stateId: String): ViewerScene.Asset {
@@ -327,9 +366,11 @@ class ReleaseStore(context: Context) {
             "候选或复核所绑定的实际内容已改变。"
         }
         val reviewed = strings(json.getJSONArray("reviewedStates")).toSet()
+        val reviewedTransitions = json.optJSONArray("reviewedTransitions")?.let { strings(it).toSet() } ?: emptySet()
         val visited = strings(json.getJSONArray("visitedEdges")).toSet()
         val history = strings(json.getJSONArray("history"))
-        check(reviewed.all { id -> scene.states.any { it.id == id } } &&
+        check(reviewedTransitions.all { id -> scene.assets.any { it.id == id && it.role == ViewerScene.Asset.ROLE_TRANSITION } } &&
+            reviewed.all { id -> scene.states.any { it.id == id } } &&
             visited.all { id -> scene.edges.any { it.id == id } } && history.size <= MAX_HISTORY &&
             history.all { id -> scene.states.any { it.id == id } }) { "候选复核记录无效。" }
         val projectId = json.getString("projectId").also(::validId)
@@ -338,7 +379,7 @@ class ReleaseStore(context: Context) {
             json.getBoolean("summaryReviewed"), json.getBoolean("fileListReviewed"), visited,
             json.getBoolean("completedPath"), optional(json, "traversalStateId"),
             json.getBoolean("traversalStarted"), json.getBoolean("traversalEnded"), history,
-            optional(json, "traversalEndEdgeId"))
+            optional(json, "traversalEndEdgeId"), reviewedTransitions)
     }
 
     private fun writeCandidate(location: File, candidate: ReleaseCandidate) {
@@ -346,6 +387,7 @@ class ReleaseStore(context: Context) {
             put("version", 1); put("projectId", candidate.projectId); put("projectRevision", candidate.projectRevision)
             put("contentDigest", candidate.contentDigest); put("fileListDigest", fileListDigest(candidate.scene))
             put("reviewedStates", JSONArray(candidate.reviewedStateIds.sorted()))
+            put("reviewedTransitions", JSONArray(candidate.reviewedTransitionAssetIds.sorted()))
             put("summaryReviewed", candidate.summaryReviewed); put("fileListReviewed", candidate.fileListReviewed)
             put("visitedEdges", JSONArray(candidate.visitedEdgeIds.sorted())); put("completedPath", candidate.completedPath)
             put("traversalStateId", candidate.traversalStateId ?: JSONObject.NULL)
@@ -401,9 +443,14 @@ class ReleaseStore(context: Context) {
             manifestFile.length() == expectedManifest.size.toLong() && manifestFile.readBytes().contentEquals(expectedManifest)) {
             "实际成品描述或包文件清单已改变。"
         }
-        if (verifyAssets) ViewerPackageCodec.validateDirectory(scene, payload, cancelCheck())
-        if (decode) ReleaseCompiler.verifyMedia(scene, payload)
+        if (verifyAssets) ViewerPackageCodec.validateDirectory(scene, payload, cancelCheck(), videoValidator())
+        // validateDirectory already fully decoded every MP4 via its mandatory validator.
+        // Image decoding remains explicit here; avoid decoding all clips twice per operation.
+        if (decode) scene.assets.filter { !verifyAssets || it.role != ViewerScene.Asset.ROLE_TRANSITION }
+            .forEach { ReleaseCompiler.verifyAsset(app, it, payload) }
     }
+
+    private suspend fun videoValidator() = ReleaseCompiler.videoValidator(app, currentCoroutineContext())
 
     private suspend fun cancelCheck(): ViewerPackageCodec.CancelCheck {
         val owner = currentCoroutineContext()

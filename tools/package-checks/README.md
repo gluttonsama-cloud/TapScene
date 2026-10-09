@@ -1,6 +1,6 @@
-# 静态观看包离线安全检查
+# 离线观看包与受限视频过渡检查
 
-这组检查直接编译 `com.tapscene.packageformat` 的纯 Java 代码。无需 Gradle、Android SDK、网络、测试框架或额外安装。合成画面仅含一个 `#336699` 不透明像素，无用户数据。AWT / ImageIO 只用于桌面检查，未进入 Android 源码。
+这组检查直接编译 `com.tapscene.packageformat` 的纯 Java 代码。使用已安装的 JDK、FFprobe 和 FFmpeg，不使用 Gradle、Android SDK、网络或测试框架，不安装工具。PNG 是一个 `#336699` 不透明像素；MP4 是 FFmpeg 本机生成的 64×64 测试图案，含音反例用合成正弦波，均无用户数据。AWT / ImageIO、进程调用与 FFmpeg 验证器仅用于桌面检查，未进入 Android 源码。
 
 ## 运行
 
@@ -19,16 +19,19 @@ bash tools/package-checks/run-checks.sh /tmp/tapscene-package-checks
 - `fixtures/synthetic.tapscene`：三状态观看包，含两个点击分支、一个作者编排的继续动作及明确结束；与 `branch-viewer.tapscene` 字节相同。
 - `fixtures/smallest-viewer.tapscene`：本静态 profile 的最少对象示例，一张 1×1 PNG、一个终点状态、scene 与 manifest。并非声称最少压缩字节。
 - `fixtures/rejected-*.zip`：拒绝反例，全部是本次生成的合成数据。
-- `results.txt`：逐项结果；`fixtures/results.txt`：汇总及失败原因。
+- `fixtures/video/video-viewer.tapscene`：schema 2 的真实无声 H.264 SDR 过渡包，写出和读入均经完整解码。
+- `fixtures/video/boundary-122-files.tapscene`：40 步、80 条视频边、120 个资产与 122 个 ZIP 文件，按边计共 60 秒；所有视频是同一份 750 ms 合成字节。主机边界检查按真实 SHA-256、尺寸和时长缓存一次完整解码结果，每个资产仍重新核验字节。
+- `fixtures/video/rejected-*.tapscene`：正确重算资产与清单 hash 的视频反例；`fixtures/video/*.mp4`：本机生成的素材。
+- `results.txt`：逐项结果；`fixtures/results.txt` 和 `fixtures/video/results.txt`：汇总及失败原因。
 - `compiler.txt`：实际编译方式及 Java 运行时版本。
 
-成功必须出现 `TAPSCENE_PACKAGE_CHECKS_OK` 且退出码为 0；任一反例被接受、任一正常包无法重读、任何非预期异常或编译错误都使脚本失败。检查需要支持本地符号链接的文件系统；该项无法执行会报失败，不会伪装成通过。命令找不到 Java 或编译器时输出 `TAPSCENE_PACKAGE_CHECKS_NOT_RUN`，退出 77，且不会安装软件。
+成功必须出现 `TAPSCENE_PACKAGE_CHECKS_OK` 且退出码为 0；任一反例被接受、任一正常包无法重读、任何非预期异常或编译错误都使脚本失败。检查需要支持本地符号链接的文件系统；该项无法执行会报失败，不会伪装成通过。命令找不到 Java、编译器、FFprobe 或 FFmpeg 时输出 `TAPSCENE_PACKAGE_CHECKS_NOT_RUN`，退出 77，且不会安装软件。
 
 ## 编译环境与结论边界
 
 完整 JDK 优先走 `javac --release 17`，强制 Java 17 API、语言和字节码版本。若安装的精简运行时缺少 `javac` 启动器、但仍带 `jdk.compiler` 模块，脚本使用 `java -m jdk.compiler/com.sun.tools.javac.Main -source 17 -target 17`。后者在日志中明确标记 `Java 17 API-surface check NOT_RUN`，不把 source/target 编译等同于完整 `--release 17` 验证。
 
-本次本地实际运行：Java 21.0.12.1 的已安装编译器模块，source/target 17；148 项全部通过，输出 `TAPSCENE_PACKAGE_CHECKS_OK: passed=148 failed=0`。`4e91581` 的 JDK 17 CI 已通过同一编解码与播放器检查（`javac --release 17`）。Android 平台 PNG 解码、像素不透明检查、导入库事务、SAF 导入导出、页面操作、飞行模式播放及真机运行均不由这组桌面检查代替。
+本次本地主机检查使用 Java 21.0.12.1 的已安装编译器模块（source/target 17）及 FFmpeg/FFprobe 7.1.5，静态回归、真实视频包与播放器路径均通过；Java 17 API 面检查为 `NOT_RUN`。最终提交的 JDK 17 CI 状态须单独核对。Android 平台轨道/完整解码、PNG 解码与不透明检查、导入库事务、SAF、页面操作、飞行模式与真机运行均不由桌面检查代替。
 
 CI 也可以直接执行（JDK 17）：
 
@@ -37,12 +40,12 @@ mkdir -p /tmp/tapscene-checks/classes /tmp/tapscene-checks/fixtures
 javac --release 17 -encoding UTF-8 -Xlint:all -Werror \
   -d /tmp/tapscene-checks/classes \
   android/app/src/main/java/com/tapscene/packageformat/*.java \
-  tools/package-checks/PackageSecurityChecks.java
+  tools/package-checks/*.java
 java -Djava.awt.headless=true -cp /tmp/tapscene-checks/classes \
   PackageSecurityChecks /tmp/tapscene-checks/fixtures
 ```
 
-每次运行使用新的 fixtures 目录。主类名为 `PackageSecurityChecks`，唯一参数是输出目录。
+每次运行使用新的 fixtures 目录。主类名为 `PackageSecurityChecks`，唯一参数是输出目录；它会自动执行 `VideoPackageChecks`。只重跑视频部分可执行 `java -Djava.awt.headless=true -cp <classes> VideoPackageChecks <new-output-directory>`。
 
 ## 检查内容
 
@@ -64,3 +67,19 @@ java -Djava.awt.headless=true -cp /tmp/tapscene-checks/classes \
 - 缺失 / 符号链接资产、非空导入目的地保护、导入导出取消，以及开始写入后取消时清除本次半成品。路径穿越额外放置外部已有文件并确认其字节保持原样。
 
 反例要求明确拒绝，不依赖错误文案。某些畸形输入会同时违反多条规则，因此单个 `PASS` 表示拒绝该输入，不表示独立证明每一个内部校验分支。这是可重复的回归语料，不替代安全审计或 Android 真机验收。
+
+
+## schema 与平台边界
+
+- 旧构造器、schema 1、`static-viewer-1`、`tapscene-android-1` 和旧 canonical JSON 保持不变。固定最小/分支包的 SHA-256 与改动前基线逐字节相同；读旧包不自动迁移版本或破坏旧 digest。
+- 新包显式用 schema 2、`video-viewer-2`、`tapscene-android-1`，manifest 与 scene 的 schema 必须一致。PNG 角色是 `state-image`，无 duration；视频角色是 `transition`，路径仅 `assets/<uuid>.mp4`，`video/mp4` 和正整数 `durationMs`；边通过 nullable `transitionAssetId` 绑定。图片仍只支持 PNG，区域/脚本/外链等仍拒绝。
+- 每视频真实时长 ≤10 秒，`ceil(actualUs / 1000)` 必须等于声明时长。按边引用累计 ≤60 秒，同一资产被多条边引用时重复计入。状态/边、包与解压预算仍为 40/80、50 MiB；schema 2 最多 120 个已引用资产、122 个 ZIP 文件，schema 1 仍最多 40 个图片资产。
+- `ViewerPackageCodec.VideoValidator.validate(File, Asset, CancelCheck)` 是必须执行的平台信任边界。新 `readPackage`、`writePackage`、`validateDirectory` 重载接收 validator；旧重载遇视频明确拒绝。纯 Java 不实现自制 MP4/AVC parser，也不把文件后缀、MIME 或元数据 probe 当作解码成功。
+- Android 回调核验真实 MP4 只有一个未加密 H.264 SDR 8-bit 4:2:0 视频轨；通过既有 Media3 解析实际 SPS 位深，并核对色度及每个样本的新 SPS，限制 Baseline/Main/Extended/High profile。缺省或未识别的色彩标签按 SDR 默认解释，明确 PQ/HLG 拒绝；这不限制普通手机录屏导入。视频无音频/字幕/数据轨、旋转或动态格式变化，核对声明尺寸与严格时长，完整解码至 EOS，尊重取消。外部引用不允许访问。全部资产通过后才能原子登记；任何失败/取消清理隔离解包区。导出回调前后仍核验视频 hash。
+- 桌面回调由 FFprobe 核对真实容器、全部轨道、解码帧格式和时间线，再由 `ffmpeg -xerror -err_detect explode` 完整解码并确认 EOS 与帧数。仅允许 file 协议且关闭外部 data references，输出与运行时间有界。含音轨、非 AVC、High10、4:2:2、PQ、伪 MP4、错误尺寸/时长、超过 10 秒与损坏实际样本均重算包 hash 后测试拒绝。不能以此声称 Android 解码器也已通过。
+
+## 视频播放器检查
+
+`ViewerTraversal.advance` 对视频只固定 pending 边及目标，不推进当前步、历史、覆盖或完成路径。重复点击锁定；EOS 或显式 skip 才提交目标。错误保留原步，可 retry（新 `mediaRunId`）或静态前进。Back 取消本次过渡并留在来源步；Restart/Close 清除 pending；进程内不同会话的 mediaRunId 不复用。过时、重复、失败后或退出后的回调无效；播放期间替换 scene 并改动既定目标会被拒绝。静态边和历史返回语义保持旧行为。
+
+检查覆盖上述选择/完成/错误/重试/跳过/取消/退出路径，以及 manifest/scene 版本白名单、角色引用与孤立资产、重复边引用的 60 秒边界、缺 validator 的默认拒绝、validator 抛错/取消/改写字节后的隔离清理。主机结果是回归证据，不代替 Android 交互与生命周期实测。

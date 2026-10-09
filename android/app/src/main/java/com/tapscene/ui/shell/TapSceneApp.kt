@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.tapscene.data.*
 import com.tapscene.ui.*
 import com.tapscene.media.CandidateAnalysisStatus
@@ -28,6 +29,7 @@ import kotlinx.coroutines.withContext
 /** The shell routes existing capabilities; unavailable services never manufacture project data. */
 @Composable
 fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: CandidateWorkspace, releases: ReleaseWorkspace) {
+    val transitions: TransitionWorkspace = viewModel()
     val state by projects.state.collectAsStateWithLifecycle()
     val mediaState by media.state.collectAsStateWithLifecycle()
     val candidateState by candidates.state.collectAsStateWithLifecycle()
@@ -52,7 +54,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     var deletingStep by remember { mutableStateOf<ProjectStep?>(null) }
     var confirmLeave by rememberSaveable { mutableStateOf(false) }
     var projectMore by rememberSaveable { mutableStateOf(false) }
-    var transitionHotspot by rememberSaveable { mutableStateOf<String?>(null) }
+    var transitionEdgeId by rememberSaveable { mutableStateOf<String?>(null) }
     var retainedMedia by remember { mutableStateOf(false) }
     var pendingCandidateProject by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingCandidateSource by rememberSaveable { mutableStateOf<String?>(null) }
@@ -132,8 +134,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
         }
     }
     val closeReleasePlayer: () -> Unit = {
-        if (releaseState.busy) releases.cancel()
-        else { releases.closePlayer(); pop() }
+        releases.closePlayer(); pop()
     }
     LaunchedEffect(page, projectId, state.busy) {
         if ((page == "transition" || page == "path") && projectId == null && !state.busy) pop()
@@ -424,7 +425,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                     EditorWorkspaceContent(snapshot, requireNotNull(state.stepDraft), state.bitmap, unavailable, EditorCallbacks(
                                         closeEditor, projects::editTitle, projects::editDescription, projects::editTerminal,
                                         projects::putHotspot, projects::removeHotspot, projects::saveStepDraft, projects::discardStepDraft,
-                                        {}, { transitionHotspot = it; push("transition") }, projects::putNextAction, projects::removeNextAction),
+                                        {}, { id -> projects.saveBeforeTransition { transitionEdgeId = id; push("transition") } }, projects::putNextAction, projects::removeNextAction),
                                         previewEnabled = false)
                                 } else AuthoredPathScreen(snapshot, pathStepIds, unavailable || mediaState.busy,
                                     { if (!state.busy) pop() },
@@ -449,7 +450,10 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 releases::confirmSummary, releases::confirmFileList,
                                 { releases.startCandidatePreview(); push("player") },
                                 { pendingSealId = releaseState.candidate?.scene?.releaseId; releases.seal() },
-                                { replacingCandidate = releaseState.candidate })
+                                { replacingCandidate = releaseState.candidate },
+                                onReviewVideo = releases::selectReviewTransition, onVideoCompleted = releases::completeReviewTransition,
+                                onVideoInterrupted = releases::interruptReviewTransition, onVideoReplay = releases::replayReviewTransition,
+                                onConfirmVideo = releases::confirmReviewTransition, onCloseVideo = releases::closeReviewVideo)
                             "delivery" -> {
                                 val sealed = releaseState.releases.firstOrNull { it.id == releaseState.lastSealedId }
                                 DeliveryOptionsScreen(pop, openReleaseReview, { push("ai") }, { push("account") }, { push("versions") },
@@ -466,12 +470,20 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 }
                             }
                             "player" -> ReleasePlayerContent(releaseState, closeReleasePlayer,
-                                releases::tapPlayer, releases::chooseEdge, releases::previous, releases::restart, releases::dismissMatches)
+                                releases::tapPlayer, releases::chooseEdge, releases::previous, releases::restart, releases::dismissMatches,
+                                onVideoCompleted = releases::completePlayerTransition, onVideoFailed = releases::failPlayerTransition,
+                                onVideoRetry = releases::retryPlayerTransition, onVideoSkip = releases::skipPlayerTransition)
                             "task" -> TaskDetailsScreen(
                                 if (state.busy || mediaState.busy) ShellTaskInfo("本机处理", if (state.busy) state.stage.orEmpty() else mediaState.stage.orEmpty(), state.project?.project?.title) else null,
                                 pop, { pages.clear() }, { push("settings") })
                             "transition" -> state.project?.let { snapshot -> state.selectedStepId?.let { stepId ->
-                                TransitionWorkspaceContent(snapshot, stepId, transitionHotspot, state.bitmap, unavailable, pop, draft = state.stepDraft)
+                                val edgeId = transitionEdgeId
+                                if (edgeId != null) {
+                                    LaunchedEffect(snapshot.project.id, stepId, edgeId) { transitions.open(snapshot.project.id, stepId, edgeId) }
+                                    TransitionEditorScreen(transitions, pop) { savedProject, savedStep ->
+                                        projects.refreshAfterTransition(savedProject, savedStep); pop()
+                                    }
+                                } else ScreenEmpty("动作已改变", "返回步骤重新选择。", "返回", pop)
                             } }
                         }
                         state.route == ProjectRoute.MEDIA -> {
@@ -484,14 +496,16 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                             EditorWorkspaceContent(snapshot, draft, state.bitmap, unavailable, EditorCallbacks(
                                 closeEditor, projects::editTitle, projects::editDescription, projects::editTerminal,
                                 projects::putHotspot, projects::removeHotspot, projects::saveStepDraft, projects::discardStepDraft,
-                                { projects.startPreview(true) }, { transitionHotspot = it; push("transition") },
+                                { projects.startPreview(true) }, { id -> projects.saveBeforeTransition { transitionEdgeId = id; push("transition") } },
                                 projects::putNextAction, projects::removeNextAction),
                                 previewEnabled = state.dirtyStepIds.isEmpty())
                         } }
                         state.route == ProjectRoute.PREVIEW -> state.project?.let { snapshot -> state.preview?.let { preview ->
                             DraftPreviewContent(snapshot, preview, state.bitmap, unavailable, projects::chooseHotspot,
                                 projects::tapPreview, projects::previousPreview, projects::restartPreview, projects::exitPreview,
-                                onNextAction = projects::chooseNextAction)
+                                onNextAction = projects::chooseNextAction,
+                                onVideoCompleted = projects::completePreviewTransition, onVideoFailed = projects::failPreviewTransition,
+                                onVideoRetry = projects::retryPreviewTransition, onVideoSkip = projects::skipPreviewTransition)
                         } }
                         state.route == ProjectRoute.STEPS -> ProjectWorkspaceFrame(
                             state.project?.project?.title.orEmpty(), tab, { if (!state.busy && !mediaState.busy) tab = it },

@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
-# No Gradle, Android SDK, downloads, or test framework are needed.
+# Uses installed JDK, ffprobe and ffmpeg; no Android SDK, downloads or test framework.
 set -euo pipefail
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
 if ! command -v java >/dev/null 2>&1; then
   printf '%s\n' 'TAPSCENE_PACKAGE_CHECKS_NOT_RUN: java is missing; no software was installed.' >&2
   exit 77
 fi
+for media_tool in ffprobe ffmpeg; do
+  if ! command -v "$media_tool" >/dev/null 2>&1; then
+    printf 'TAPSCENE_PACKAGE_CHECKS_NOT_RUN: %s is missing; no software was installed.\n' "$media_tool" >&2
+    exit 77
+  fi
+done
 COMPILER=()
 FLAGS=()
 if command -v javac >/dev/null 2>&1; then
@@ -44,5 +50,5 @@ mkdir -p "$WORK/classes" "$WORK/fixtures"
 } | tee "$WORK/compiler.txt"
 "${COMPILER[@]}" "${FLAGS[@]}" -encoding UTF-8 -d "$WORK/classes" \
   "$ROOT"/android/app/src/main/java/com/tapscene/packageformat/*.java \
-  "$ROOT/tools/package-checks/PackageSecurityChecks.java"
+  "$ROOT"/tools/package-checks/*.java
 java -Djava.awt.headless=true -cp "$WORK/classes" PackageSecurityChecks "$WORK/fixtures" | tee "$WORK/results.txt"

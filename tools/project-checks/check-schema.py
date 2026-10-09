@@ -73,11 +73,13 @@ print('PASS step deletion removes incoming/outgoing/self links, keeps independen
 tables = re.findall(r'db.execSQL\("""(CREATE TABLE.*?)"""\)', s, re.S)
 single_line = re.findall(r'db.execSQL\("(CREATE (?:INDEX|TABLE).*?)"\)', s)
 next_sql = [sql for sql in tables + single_line if re.match(r'CREATE (?:TABLE|INDEX) next_actions', sql)]
+transition_sql = [sql for sql in tables + single_line if re.match(r'CREATE (?:TABLE|INDEX) (?:edge_transitions|transition_imports)', sql)]
+assert len(transition_sql) == 3
 assert len(next_sql) == 2
 legacy = sqlite3.connect(':memory:')
 legacy.execute('PRAGMA foreign_keys=ON')
 for sql in tables + single_line:
- if sql not in next_sql: legacy.execute(sql)
+ if sql not in next_sql + transition_sql: legacy.execute(sql)
 legacy.execute('PRAGMA user_version=1')
 legacy.execute("INSERT INTO projects VALUES('legacy','Title','Goal',11,12,9,'a')")
 legacy.execute("INSERT INTO sources VALUES('legacy','source','{\"kept\":true}')")
@@ -146,3 +148,71 @@ assert c.execute('SELECT COUNT(*) FROM next_actions').fetchone()[0] == 0
 assert c.execute("SELECT COUNT(*) FROM states WHERE project_id='other'").fetchone()[0] == 1
 assert not list(c.execute('PRAGMA foreign_key_check'))
 print('PASS project deletion cascades authored actions while another project remains intact')
+
+
+# Production v3 is wholly additive from either installed version. In-progress deletion/import
+# journals must survive alongside original IDs, revision, sources, images and authored edges.
+for previous_version in (1, 2):
+ migrated = sqlite3.connect(':memory:')
+ migrated.execute('PRAGMA foreign_keys=ON')
+ for sql in tables + single_line:
+  if sql not in transition_sql and (previous_version == 2 or sql not in next_sql): migrated.execute(sql)
+ migrated.execute('PRAGMA user_version=' + str(previous_version))
+ migrated.execute("INSERT INTO projects VALUES('migration','Kept','Goal',11,12,7,'a')")
+ migrated.execute("INSERT INTO sources VALUES('migration','source','source-private-json')")
+ for state in ('a', 'b'):
+  migrated.execute('INSERT INTO local_assets VALUES(?,?,?,?,?,?,?)',(state,'migration','private/'+state+'.png','hash',42,3,7))
+  migrated.execute('INSERT INTO states VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',('migration',state,state,0,state,'saved',0,'source',state,1000,1000,'[]'))
+ migrated.execute("INSERT INTO hotspots VALUES('migration','hotspot','a','Manual',0,0,1,1)")
+ migrated.execute("INSERT INTO edges VALUES('migration','edge','hotspot','a','b',NULL)")
+ if previous_version == 2: migrated.execute("INSERT INTO next_actions VALUES('migration','next','b','Next','a')")
+ migrated.execute("INSERT INTO asset_cleanup VALUES('deleted','queued.png')")
+ migrated.execute("INSERT INTO asset_imports VALUES('deleted','interrupted')")
+ migrated.commit()
+ original_tables = [row[0] for row in migrated.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+ original_rows = {name: list(migrated.execute('SELECT * FROM '+name)) for name in original_tables}
+ with migrated:
+  if previous_version < 2:
+   for sql in next_sql: migrated.execute(sql)
+  for sql in transition_sql: migrated.execute(sql)
+  migrated.execute('PRAGMA user_version=3')
+ assert original_rows == {name: list(migrated.execute('SELECT * FROM '+name)) for name in original_tables}
+ assert migrated.execute('SELECT COUNT(*) FROM edge_transitions').fetchone()[0] == 0
+ assert not list(migrated.execute('PRAGMA foreign_key_check'))
+ # A transition-only source survives removal of unrelated states and cannot be deleted while
+ # its video is referenced. Its private metadata is separate from the controlled asset row.
+ migrated.execute("INSERT INTO sources VALUES('migration','video-source','private-trim-provenance')")
+ migrated.execute("INSERT INTO local_assets VALUES('video','migration','project-assets/migration/video.mp4','video-hash',128,160,288)")
+ migrated.execute("INSERT INTO edge_transitions VALUES('migration','edge','video','video-source',0,10000000,10000000,'[]','review')")
+ migrated.commit()
+ for invalid in (0, -1, 10000001):
+  try:
+   migrated.execute('UPDATE edge_transitions SET duration_us=?', (invalid,))
+   migrated.commit(); raise AssertionError('invalid actual transition duration accepted')
+  except sqlite3.IntegrityError: migrated.rollback()
+ try:
+  migrated.execute("DELETE FROM sources WHERE source_id='video-source'")
+  migrated.commit(); raise AssertionError('referenced video source deleted')
+ except sqlite3.IntegrityError: migrated.rollback()
+ # A failed replacement transaction must retain old reviewed binding and no queued deletion.
+ try:
+  migrated.execute("INSERT INTO asset_cleanup VALUES('migration','project-assets/migration/video.mp4')")
+  migrated.execute("DELETE FROM edge_transitions WHERE edge_id='edge'")
+  migrated.execute("DELETE FROM local_assets WHERE asset_id='video'")
+  migrated.execute("INSERT INTO edge_transitions VALUES('migration','edge','missing','video-source',0,1000000,1000000,'[]','new-review')")
+  migrated.commit(); raise AssertionError('partial video replacement committed')
+ except sqlite3.IntegrityError: migrated.rollback()
+ assert migrated.execute("SELECT asset_id FROM edge_transitions WHERE edge_id='edge'").fetchone() == ('video',)
+ assert migrated.execute("SELECT COUNT(*) FROM asset_cleanup WHERE project_id='migration'").fetchone()[0] == 0
+ # Project cascade queues images plus video, preserves both kinds of interrupted import journal.
+ migrated.execute("INSERT INTO transition_imports VALUES('migration','interrupted-video')")
+ migrated.execute("INSERT INTO asset_cleanup SELECT project_id,relative_path FROM local_assets WHERE project_id='migration'")
+ migrated.execute("UPDATE projects SET start_state_id=NULL WHERE project_id='migration'")
+ migrated.execute("DELETE FROM projects WHERE project_id='migration'")
+ migrated.commit()
+ assert migrated.execute('SELECT COUNT(*) FROM edge_transitions').fetchone()[0] == 0
+ assert list(migrated.execute('SELECT * FROM transition_imports')) == [('migration', 'interrupted-video')]
+ assert list(migrated.execute('SELECT * FROM asset_imports')) == [('deleted', 'interrupted')]
+ assert migrated.execute('SELECT COUNT(*) FROM asset_cleanup').fetchone()[0] == 4
+ assert not list(migrated.execute('PRAGMA foreign_key_check'))
+ print('PASS v%d-to-v3 preserved rows/journals, exact duration limits, transition source FK, atomic replacement rollback and video cascade' % previous_version)

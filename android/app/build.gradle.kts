@@ -24,8 +24,8 @@ android {
         applicationId = "com.tapscene"
         minSdk = 26
         targetSdk = 36
-        versionCode = 10
-        versionName = "0.7.0-ocr-dev"
+        versionCode = 11
+        versionName = "0.8.0-transitions-dev"
         testInstrumentationRunner = "com.tapscene.media.MediaCompatibilityInstrumentation"
         manifestPlaceholders["appLabel"] = "TapScene"
         ndk { abiFilters += packagedAbis }
@@ -78,4 +78,5 @@ dependencies {
     implementation("androidx.media3:media3-inspector:1.9.4")
     implementation("androidx.media3:media3-effect:1.9.4")
     implementation("androidx.media3:media3-common:1.9.4")
+    implementation("androidx.media3:media3-container:1.9.4")
 }

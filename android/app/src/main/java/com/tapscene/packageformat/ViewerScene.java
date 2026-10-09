@@ -5,8 +5,10 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
-/** Immutable, data-only static viewer profile. No object can contain executable behavior. */
+/** Immutable, data-only versioned viewer profile. No object can contain executable behavior. */
 public final class ViewerScene {
+    public final int schemaVersion;
+    public final String policyVersion, compilerVersion;
     public final String releaseId, title, goal, startStateId;
     public final long createdAt;
     public final List<State> states;
@@ -17,6 +19,14 @@ public final class ViewerScene {
     public ViewerScene(String releaseId, String title, String goal, long createdAt,
             String startStateId, List<State> states, List<Edge> edges,
             List<Hotspot> hotspots, List<Asset> assets) {
+        this(1, ViewerPackageCodec.POLICY_VERSION, ViewerPackageCodec.COMPILER_VERSION,
+                releaseId, title, goal, createdAt, startStateId, states, edges, hotspots, assets);
+    }
+    public ViewerScene(int schemaVersion, String policyVersion, String compilerVersion,
+            String releaseId, String title, String goal, long createdAt,
+            String startStateId, List<State> states, List<Edge> edges,
+            List<Hotspot> hotspots, List<Asset> assets) {
+        this.schemaVersion = schemaVersion; this.policyVersion = policyVersion; this.compilerVersion = compilerVersion;
         this.releaseId = releaseId; this.title = title; this.goal = goal;
         this.createdAt = createdAt; this.startStateId = startStateId;
         this.states = frozen(states); this.edges = frozen(edges);
@@ -37,12 +47,16 @@ public final class ViewerScene {
         }
     }
     public static final class Edge {
-        public final String id, fromStateId, toStateId, endLabel, hotspotId, label, trigger, sourceKind;
+        public final String id, fromStateId, toStateId, endLabel, hotspotId, label, trigger, sourceKind, transitionAssetId;
         public Edge(String id, String fromStateId, String toStateId, String endLabel,
                 String hotspotId, String label, String trigger, String sourceKind) {
+            this(id, fromStateId, toStateId, endLabel, hotspotId, label, trigger, sourceKind, null);
+        }
+        public Edge(String id, String fromStateId, String toStateId, String endLabel,
+                String hotspotId, String label, String trigger, String sourceKind, String transitionAssetId) {
             this.id = id; this.fromStateId = fromStateId; this.toStateId = toStateId;
             this.endLabel = endLabel; this.hotspotId = hotspotId; this.label = label;
-            this.trigger = trigger; this.sourceKind = sourceKind;
+            this.trigger = trigger; this.sourceKind = sourceKind; this.transitionAssetId = transitionAssetId;
         }
     }
     public static final class Hotspot {
@@ -59,11 +73,18 @@ public final class ViewerScene {
         }
     }
     public static final class Asset {
-        public final String id, path, mime, sha256;
+        public static final String ROLE_IMAGE = "state-image", ROLE_TRANSITION = "transition";
+        public final String id, path, mime, sha256, role;
+        public final Long durationMs;
         public final long byteLength;
         public final int width, height;
         public Asset(String id, String path, String mime, long byteLength,
                 String sha256, int width, int height) {
+            this(id, path, mime, byteLength, sha256, width, height, ROLE_IMAGE, null);
+        }
+        public Asset(String id, String path, String mime, long byteLength,
+                String sha256, int width, int height, String role, Long durationMs) {
+            this.role = role; this.durationMs = durationMs;
             this.id = id; this.path = path; this.mime = mime; this.byteLength = byteLength;
             this.sha256 = sha256; this.width = width; this.height = height;
         }

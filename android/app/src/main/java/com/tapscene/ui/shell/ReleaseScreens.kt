@@ -36,6 +36,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -67,6 +69,7 @@ import com.tapscene.data.ReleaseCandidate
 import com.tapscene.data.ReleaseSummary
 import com.tapscene.packageformat.ViewerPackageCodec
 import com.tapscene.packageformat.ViewerScene
+import com.tapscene.ui.LocalVideoPlayback
 import com.tapscene.ui.ReleaseUiState
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -85,17 +88,31 @@ fun ReleaseReviewContent(
     onTryPath: () -> Unit,
     onSeal: () -> Unit,
     onRebuild: () -> Unit,
+    onReviewVideo: (String) -> Unit = {},
+    onVideoCompleted: (Long) -> Unit = {},
+    onVideoInterrupted: (Long) -> Unit = {},
+    onVideoReplay: (Long) -> Unit = {},
+    onConfirmVideo: () -> Unit = {},
+    onCloseVideo: () -> Unit = {},
+    initialSection: Int = 0,
 ) {
     val candidate = state.candidate
-    var section by rememberSaveable(candidate?.id) { mutableStateOf(0) }
+    var section by rememberSaveable(candidate?.id) { mutableStateOf(initialSection.coerceIn(0, 4)) }
     var showSealConfirmation by rememberSaveable(candidate?.id) { mutableStateOf(false) }
     var showImage by rememberSaveable(candidate?.id, state.reviewStateId) { mutableStateOf(false) }
     var showHotspots by rememberSaveable(candidate?.id) { mutableStateOf(false) }
-    BackHandler(enabled = !state.busy) { onBack() }
+    val closeVideo by rememberUpdatedState(onCloseVideo)
+    DisposableEffect(candidate?.id) { onDispose { closeVideo() } }
+    LaunchedEffect(section, candidate?.id) {
+        if (section == 1 && state.reviewVideo == null) candidate?.scene?.assets
+            ?.firstOrNull { it.role == ViewerScene.Asset.ROLE_TRANSITION && it.id !in candidate.reviewedTransitionAssetIds }
+            ?.let { onReviewVideo(it.id) }
+    }
+    BackHandler(enabled = !state.busy) { onCloseVideo(); onBack() }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val detailMaxHeight = (maxHeight * .24f).coerceIn(96.dp, 190.dp)
         Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
-            ShellTopBar(candidate?.let { "复核修订 ${it.projectRevision}" } ?: "成品逐项复核", { if (!state.busy) onBack() }, actions = {
+            ShellTopBar(candidate?.let { "复核修订 ${it.projectRevision}" } ?: "成品逐项复核", { if (!state.busy) { onCloseVideo(); onBack() } }, actions = {
                 if (candidate != null) Text(
                     when {
                         currentDraftRevision == null -> "来源项目已移除"
@@ -115,9 +132,9 @@ fun ReleaseReviewContent(
             val reviewedCount = scene.states.count { it.id in candidate.reviewedStateIds }
             if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp)) {
-                listOf("画面逐项", "项目文字", "包清单", "试走与封存").forEachIndexed { index, label ->
+                listOf("画面逐项", "整段视频", "项目文字", "包清单", "试走与封存").forEachIndexed { index, label ->
                     TextButton(
-                        onClick = { section = index }, shape = RoundedCornerShape(8.dp),
+                        onClick = { if (index != section) { onCloseVideo(); section = index } }, enabled = !state.busy, shape = RoundedCornerShape(8.dp),
                         modifier = Modifier.heightIn(min = 48.dp).then(if (section == index) Modifier.background(ShellColors.AccentSoft, RoundedCornerShape(8.dp)) else Modifier),
                     ) { Text(label, color = if (section == index) ShellColors.Accent else ShellColors.Muted) }
                 }
@@ -176,7 +193,47 @@ fun ReleaseReviewContent(
                     }
                     if (showImage && bitmap.isUsable()) ReviewImageDialog(bitmap!!, step?.title.orEmpty()) { showImage = false }
                 }
-                1 -> ReleaseScrollPanel {
+                1 -> {
+                    val videos = scene.assets.filter { it.role == ViewerScene.Asset.ROLE_TRANSITION }
+                    val review = state.reviewVideo?.takeIf { it.candidateId == candidate.id && it.contentDigest == candidate.contentDigest }
+                    LazyRow(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+                        itemsIndexed(videos, key = { _, item -> item.id }) { index, item ->
+                            TextButton(onClick = { onReviewVideo(item.id) }, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) {
+                                Text("${index + 1} ${if (item.id in candidate.reviewedTransitionAssetIds) "已确认" else "待复核"}",
+                                    color = if (review?.assetId == item.id) ShellColors.Accent else ShellColors.Muted)
+                            }
+                        }
+                    }
+                    val video = review?.video
+                    val file = video?.file
+                    if (video != null && file != null && !video.failed) {
+                        LocalVideoPlayback(file, video.width, video.height, video.runId,
+                            Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
+                            onCompleted = onVideoCompleted, onError = onVideoInterrupted,
+                            onInterrupted = onVideoInterrupted, onReplay = onVideoReplay)
+                    } else Box(Modifier.weight(1f).fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                        Text(when {
+                            videos.isEmpty() -> "这份成品没有视频过渡"
+                            video?.failed == true -> "播放中断，请从头复核"
+                            video == null -> "选择一段视频开始复核"
+                            else -> "正在检查实际视频"
+                        }, color = ShellColors.Muted)
+                    }
+                    if (review != null) {
+                        val edges = scene.edges.filter { it.transitionAssetId == review.assetId }
+                        Text(edges.joinToString(" · ") { it.label }, Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleSmall)
+                        Text(if (review.watchedCompletely) "已完整播放，请确认可见内容" else "完整播放后，才能确认本段视频",
+                            Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                        if (video?.failed == true) OutlinedButton(onClick = { onVideoReplay(video.runId) }, enabled = !state.busy,
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).heightIn(min = 48.dp)) { Text("从头重播") }
+                        Button(onClick = onConfirmVideo,
+                            enabled = !state.busy && review.watchedCompletely && review.assetId !in candidate.reviewedTransitionAssetIds,
+                            shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().padding(16.dp).heightIn(min = 48.dp)) {
+                            Text(if (review.assetId in candidate.reviewedTransitionAssetIds) "本段已确认" else "确认整段视频")
+                        }
+                    }
+                }
+                2 -> ReleaseScrollPanel {
                     SectionHeader("随包交付的项目文字", "检查接收者会看到的标题和开场说明。")
                     ShellLabelValue("标题", scene.title)
                     ShellDivider()
@@ -191,12 +248,14 @@ fun ReleaseReviewContent(
                     }
                     ReleaseStatus(state, showProgress = false)
                 }
-                2 -> ReleaseScrollPanel { CandidateFileList(candidate, state.busy, onFileList) }
+                3 -> ReleaseScrollPanel { CandidateFileList(candidate, state.busy, onFileList) }
                 else -> ReleaseScrollPanel {
                     val visitedCount = scene.edges.count { it.id in candidate.visitedEdgeIds }
                     val allReviewed = scene.states.isNotEmpty() && scene.states.all { it.id in candidate.reviewedStateIds }
                     val allWalked = scene.edges.all { it.id in candidate.visitedEdgeIds }
-                    val canSeal = allReviewed && candidate.summaryReviewed && candidate.fileListReviewed && candidate.completedPath && allWalked
+                    val videos = scene.assets.filter { it.role == ViewerScene.Asset.ROLE_TRANSITION }
+                    val videosReviewed = videos.all { it.id in candidate.reviewedTransitionAssetIds }
+                    val canSeal = allReviewed && videosReviewed && candidate.summaryReviewed && candidate.fileListReviewed && candidate.completedPath && allWalked
                     SectionHeader("实际试走", "只记录这份固定候选中实际选过的动作。")
                     ShellLabelValue("动作覆盖", "$visitedCount / ${scene.edges.size}")
                     ShellLabelValue("从起点到结束", if (candidate.completedPath) "已完成" else "待完成")
@@ -212,6 +271,7 @@ fun ReleaseReviewContent(
                     ShellDivider()
                     SectionHeader("封存检查")
                     ShellLabelValue("步骤画面与文字", "$reviewedCount / ${scene.states.size} 已确认")
+                    if (videos.isNotEmpty()) ShellLabelValue("整段视频", "${videos.count { it.id in candidate.reviewedTransitionAssetIds }} / ${videos.size} 已确认")
                     ShellLabelValue("项目文字", if (candidate.summaryReviewed) "已确认" else "待确认")
                     ShellLabelValue("实际包清单", if (candidate.fileListReviewed) "已确认" else "待确认")
                     if (currentDraftRevision != candidate.projectRevision) StatusNote(
@@ -254,7 +314,7 @@ private fun ColumnScope.ReleaseScrollPanel(content: @Composable ColumnScope.() -
 private fun CandidateFileList(candidate: ReleaseCandidate, busy: Boolean, onConfirm: () -> Unit) {
     val files = remember(candidate.contentDigest) { runCatching { ViewerPackageCodec.fileList(candidate.scene) }.getOrNull() }
     val manifestLength = remember(candidate.contentDigest) { runCatching { ViewerPackageCodec.manifestBytes(candidate.scene).size.toLong() }.getOrNull() }
-    SectionHeader("实际包清单", "纯数据与固定 PNG。逐项检查文件范围，再确认。")
+    SectionHeader("实际包清单", "纯数据、固定图片与无声过渡。逐项检查文件范围，再确认。")
     if (files == null || manifestLength == null) {
         StatusNote("包清单暂时无法读取。返回后重试，当前不能确认文件范围。")
         return
@@ -272,7 +332,7 @@ private fun CandidateFileList(candidate: ReleaseCandidate, busy: Boolean, onConf
             Text("SHA-256 · ${file.sha256}", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
         }
     }
-    StatusNote("包内不包含原片、原片路径和编辑历史。实际图片与可见文字仍需你逐项复核。")
+    StatusNote("包内不包含原片、原片路径和编辑历史。实际图片、视频与可见文字仍需逐项复核。")
     Button(onClick = onConfirm, enabled = !busy && !candidate.fileListReviewed, shape = RoundedCornerShape(8.dp),
         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (candidate.fileListReviewed) "包清单已确认" else "确认包清单") }
 }
@@ -379,7 +439,7 @@ fun OfflineImportContent(state: ReleaseUiState, onBack: () -> Unit, onChoose: ()
                     Text(state.message, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
                     Text("现有演示仍保留。可重新选择文件后再试。", style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
                 }
-                else -> ScreenEmpty("选择 TapScene 观看包", "只导入静态图片、文字与点击路径。完整导入后无需联网即可观看。")
+                else -> ScreenEmpty("选择 TapScene 观看包", "导入图片、无声视频过渡和点击路径。完整导入后可离线观看。")
             }
             if (!state.busy) OutlinedButton(onClick = onChoose, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                 Text(if (imported != null) "再导入一个包" else if (state.message != null) "重新选择观看包" else "选择观看包")
@@ -387,8 +447,8 @@ fun OfflineImportContent(state: ReleaseUiState, onBack: () -> Unit, onChoose: ()
             ShellDivider()
             SectionHeader("导入前会检查")
             ShellLabelValue("文件", "大小、摘要与安全路径")
-            ShellLabelValue("内容", "图片、步骤与动作目标")
-            Text("不执行脚本，不读取外部媒体地址。当前不支持复制为可编辑项目、视频过渡或 AI 回流。",
+            ShellLabelValue("内容", "图片、无声视频、步骤与动作目标")
+            Text("不执行脚本，不读取外部媒体地址。导入后作为固定演示观看。",
                 style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
         }
     }
@@ -404,12 +464,16 @@ fun ReleasePlayerContent(
     onPrevious: () -> Unit,
     onRestart: () -> Unit,
     onDismissMatches: () -> Unit,
+    onVideoCompleted: (Long) -> Unit = {},
+    onVideoFailed: (Long) -> Unit = {},
+    onVideoRetry: (Long) -> Unit = {},
+    onVideoSkip: () -> Unit = {},
 ) {
     val player = state.player
     var showExplanation by rememberSaveable(player?.scene?.releaseId, player?.currentStateId) { mutableStateOf(false) }
     var showIntroduction by rememberSaveable(player?.scene?.releaseId) { mutableStateOf(false) }
-    BackHandler(enabled = !state.busy) {
-        if (!state.busy) {
+    BackHandler(enabled = !state.busy || player?.video != null) {
+        if (!state.busy || player?.video != null) {
             if (player?.matchingHotspotIds?.isNotEmpty() == true) onDismissMatches() else onBack()
         }
     }
@@ -427,7 +491,7 @@ fun ReleasePlayerContent(
     val current = player.currentState
     val hotspots = scene.hotspots.filter { it.stateId == player.currentStateId }
     val outgoing = scene.edges.filter { it.fromStateId == player.currentStateId }
-    val actionsEnabled = !state.busy && !player.ended && current != null && state.playerBitmap.isUsable()
+    val actionsEnabled = !state.busy && player.video == null && !player.ended && current != null && state.playerBitmap.isUsable()
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val panelMaxHeight = (maxHeight * .30f).coerceIn(72.dp, 240.dp)
         val explanationMaxHeight = (maxHeight * .16f).coerceIn(56.dp, 128.dp)
@@ -438,8 +502,8 @@ fun ReleasePlayerContent(
                     Text(if (player.candidateId != null) "待封存 · 记录实际动作覆盖" else "固定版本 ${scene.releaseId.take(8)} · 离线",
                         style = MaterialTheme.typography.labelSmall, color = ShellColors.Muted)
                 }
-                TextButton(onClick = { showIntroduction = true }, modifier = Modifier.heightIn(min = 48.dp)) { Text("说明") }
-                TextButton(onClick = onBack, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("退出") }
+                TextButton(onClick = { showIntroduction = true }, enabled = player.video == null, modifier = Modifier.heightIn(min = 48.dp)) { Text("说明") }
+                TextButton(onClick = onBack, enabled = !state.busy || player.video != null, modifier = Modifier.heightIn(min = 48.dp)) { Text("退出") }
             }
             ShellDivider()
             if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -454,12 +518,27 @@ fun ReleasePlayerContent(
                 if (player.candidateId != null) Text("已试走 ${scene.edges.count { it.id in player.visitedEdgeIds }} / ${scene.edges.size} 个动作",
                     style = MaterialTheme.typography.labelSmall, color = ShellColors.Muted)
             }
-            ReleaseImageCanvas(state.playerBitmap, if (player.ended) emptyList() else hotspots,
+            val video = player.video
+            val videoFile = video?.file
+            if (video != null && videoFile != null && !video.failed) {
+                LocalVideoPlayback(videoFile, video.width, video.height, video.runId,
+                    Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
+                    onCompleted = onVideoCompleted, onError = onVideoFailed, onInterrupted = onVideoFailed, onReplay = onVideoRetry)
+            } else ReleaseImageCanvas(state.playerBitmap, if (player.ended || video != null) emptyList() else hotspots,
                 Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp), enabled = actionsEnabled, busy = state.busy,
                 imageDescription = current?.title ?: "离线演示画面", onTap = onTap)
             Column(Modifier.fillMaxWidth().heightIn(max = panelMaxHeight).verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 when {
+                    video != null -> {
+                        Text(if (video.failed) "过渡播放失败" else "正在播放过渡", style = MaterialTheme.typography.titleSmall)
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            if (video.failed) OutlinedButton(onClick = { onVideoRetry(video.runId) }, enabled = !state.busy,
+                                modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("重试") }
+                            OutlinedButton(onClick = onVideoSkip, enabled = !state.busy,
+                                modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text(if (video.failed) "静态前进" else "跳过过渡") }
+                        }
+                    }
                     current == null -> Text("当前步骤不可用。返回演示库后重新打开。", color = MaterialTheme.colorScheme.error)
                     player.ended -> {
                         Text("演示结束", style = MaterialTheme.typography.titleMedium)
@@ -490,8 +569,8 @@ fun ReleasePlayerContent(
             }
             ShellDivider()
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                TextButton(onClick = onPrevious, enabled = !state.busy && player.canGoBack, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("上一步") }
-                TextButton(onClick = onRestart, enabled = !state.busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("重来") }
+                TextButton(onClick = onPrevious, enabled = (!state.busy || player.video != null) && player.canGoBack, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("上一步") }
+                TextButton(onClick = onRestart, enabled = !state.busy || player.video != null, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("重来") }
             }
         }
     }

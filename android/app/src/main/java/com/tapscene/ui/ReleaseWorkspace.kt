@@ -40,10 +40,21 @@ data class ReleasePlayback(
     val matchingHotspotIds: List<String> = emptyList(),
     val visitedEdgeIds: Set<String> = emptySet(),
     val completedFromStart: Boolean = false,
+    val traversalState: ViewerTraversal? = null,
+    val video: LocalVideoRun? = null,
 ) {
-    val canGoBack: Boolean get() = history.size > 1 || endEdgeId != null
+    val canGoBack: Boolean get() = traversalState?.pendingEdgeId != null || history.size > 1 || endEdgeId != null
     val currentState: ViewerScene.State? get() = scene.states.firstOrNull { it.id == currentStateId }
 }
+
+data class ReleaseVideoReview(
+    val candidateId: String,
+    val contentDigest: String,
+    val assetId: String,
+    val assetHash: String,
+    val video: LocalVideoRun,
+    val watchedCompletely: Boolean = false,
+)
 
 data class ReleaseUiState(
     val releases: List<ReleaseSummary> = emptyList(),
@@ -51,6 +62,7 @@ data class ReleaseUiState(
     val candidate: ReleaseCandidate? = null,
     val reviewStateId: String? = null,
     val reviewBitmap: Bitmap? = null,
+    val reviewVideo: ReleaseVideoReview? = null,
     val player: ReleasePlayback? = null,
     val playerBitmap: Bitmap? = null,
     val busy: Boolean = false,
@@ -62,8 +74,8 @@ data class ReleaseUiState(
 )
 
 /**
- * Fixed candidate/release IO is independent from mutable draft state. Only exact validated PNG
- * bytes reach the canvas. A failed decode never records an edge or changes the actual history.
+ * Fixed candidate/release IO is independent from mutable draft state. Only validated derived
+ * PNG/MP4 bytes reach the canvas. Failed media never implicitly advances the actual history.
  * No package text is interpreted as HTML, a URL, an expression or executable code.
  */
 class ReleaseWorkspace(application: Application) : AndroidViewModel(application) {
@@ -72,6 +84,10 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     private val mutableState = MutableStateFlow(ReleaseUiState())
     val state = mutableState.asStateFlow()
     private var task: Job? = null
+    private var playerTask: Job? = null
+    private var playerGeneration = 0L
+    private var reviewVideoTask: Job? = null
+    private var reviewRunSequence = 0L
     private var exportDigest: String? = null
     private var exportLength: Long? = null
     private var pendingExportFile: File? = null
@@ -87,20 +103,23 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     fun openReview(projectId: String) = execute("读取待复核成品") {
+        closeReviewVideo()
         mutableState.update { it.copy(candidate = null, reviewStateId = null, reviewBitmap = null) }
         val candidate = withContext(Dispatchers.IO) { store.readCandidate(projectId) }
         showCandidate(candidate)
     }
 
     fun openReviewById(candidateId: String) = execute("恢复固定成品复核") {
+        closeReviewVideo()
         mutableState.update { it.copy(candidate = null, reviewStateId = null, reviewBitmap = null) }
         showCandidate(withContext(Dispatchers.IO) { store.readCandidateById(candidateId) })
     }
 
     fun discardCandidate(candidateId: String) = execute("删除未封存副本") {
         withContext(Dispatchers.IO) { store.discardCandidate(candidateId) }
-        if (state.value.candidate?.id == candidateId) mutableState.update {
-            it.copy(candidate = null, reviewStateId = null, reviewBitmap = null, player = null, playerBitmap = null)
+        if (state.value.candidate?.id == candidateId) {
+            closeReviewVideo()
+            mutableState.update { it.copy(candidate = null, reviewStateId = null, reviewBitmap = null, player = null, playerBitmap = null) }
         }
     }
 
@@ -111,6 +130,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     private suspend fun showCandidate(candidate: ReleaseCandidate?) {
+        closeReviewVideo()
         mutableState.update { it.copy(candidate = candidate, reviewStateId = null, reviewBitmap = null) }
         val first = candidate?.scene?.states?.firstOrNull { it.id !in candidate.reviewedStateIds }
             ?: candidate?.scene?.states?.firstOrNull()
@@ -121,6 +141,8 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     fun selectReviewState(id: String) {
+        if (state.value.busy) return
+        closeReviewVideo()
         val candidate = state.value.candidate ?: return
         if (candidate.scene.states.none { it.id == id }) return
         execute("读取待复核画面") {
@@ -147,6 +169,65 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         }
     }
 
+    fun selectReviewTransition(assetId: String) {
+        if (state.value.busy) return
+        val candidate = state.value.candidate ?: return
+        val asset = candidate.scene.assets.firstOrNull { it.id == assetId && it.role == ViewerScene.Asset.ROLE_TRANSITION } ?: return
+        closeReviewVideo()
+        val review = ReleaseVideoReview(candidate.id, candidate.contentDigest, asset.id, asset.sha256,
+            LocalVideoRun(null, asset.width, asset.height, ++reviewRunSequence))
+        mutableState.update { it.copy(reviewVideo = review) }
+        reviewVideoTask = viewModelScope.launch {
+            try {
+                val file = withContext(Dispatchers.IO) { store.candidateTransitionFile(candidate.id, asset.id) }
+                if (state.value.reviewVideo?.video?.runId == review.video.runId) mutableState.update {
+                    it.copy(reviewVideo = review.copy(video = review.video.copy(file = file)))
+                }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { interruptReviewTransition(review.video.runId) }
+        }
+    }
+
+    fun completeReviewTransition(runId: Long) {
+        val review = state.value.reviewVideo ?: return
+        val candidate = state.value.candidate ?: return
+        if (review.video.runId != runId || review.video.failed || review.video.file == null ||
+            candidate.id != review.candidateId || candidate.contentDigest != review.contentDigest) return
+        mutableState.update { it.copy(reviewVideo = review.copy(watchedCompletely = true)) }
+    }
+
+    fun interruptReviewTransition(runId: Long) {
+        val review = state.value.reviewVideo ?: return
+        if (review.video.runId != runId) return
+        mutableState.update { it.copy(reviewVideo = review.copy(watchedCompletely = false,
+            video = review.video.copy(file = null, failed = true))) }
+    }
+
+    fun replayReviewTransition(runId: Long) {
+        val review = state.value.reviewVideo ?: return
+        if (review.video.runId == runId) selectReviewTransition(review.assetId)
+    }
+
+    fun closeReviewVideo() {
+        reviewVideoTask?.cancel()
+        reviewVideoTask = null
+        mutableState.update { it.copy(reviewVideo = null) }
+    }
+
+    fun confirmReviewTransition() {
+        val review = state.value.reviewVideo ?: return
+        val candidate = state.value.candidate ?: return
+        if (!review.watchedCompletely || review.video.failed || review.video.file == null ||
+            candidate.id != review.candidateId || candidate.contentDigest != review.contentDigest) return
+        execute("保存整段视频复核") {
+            val updated = withContext(Dispatchers.IO) {
+                store.reviewTransition(candidate.id, review.contentDigest, review.assetId, review.assetHash)
+            }
+            mutableState.update { it.copy(candidate = updated) }
+            message("本段视频已确认")
+        }
+    }
+
     fun confirmSummary() {
         val candidate = state.value.candidate ?: return
         execute("保存项目文字复核") {
@@ -164,6 +245,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     fun seal() {
+        closeReviewVideo()
         val candidate = state.value.candidate ?: return
         execute("重检并封存固定版本") {
             val sealed = withContext(Dispatchers.IO) { store.seal(candidate.id, candidate.contentDigest) }
@@ -175,6 +257,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     fun startCandidatePreview() {
+        closeReviewVideo()
         val candidate = state.value.candidate ?: return
         execute("读取固定成品起点") {
             mutableState.update { it.copy(player = null, playerBitmap = null) }
@@ -196,7 +279,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     fun tapPlayer(x: Float, y: Float) {
         val current = state.value
         val player = current.player ?: return
-        if (current.busy || current.playerBitmap == null || player.ended ||
+        if (current.busy || current.playerBitmap == null || player.ended || player.traversal().pendingEdgeId != null ||
             !x.isFinite() || !y.isFinite() || x !in 0f..1f || y !in 0f..1f) return
         val matches = player.scene.hotspots.filter { spot ->
             spot.stateId == player.currentStateId && x >= spot.rect.x && y >= spot.rect.y &&
@@ -214,56 +297,162 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     fun chooseEdge(id: String) {
         val current = state.value
         val player = current.player ?: return
-        if (current.busy || current.playerBitmap == null || player.ended) return
+        if (current.busy || current.playerBitmap == null || player.ended || player.traversal().pendingEdgeId != null) return
         val edge = player.scene.edges.firstOrNull { it.id == id && it.fromStateId == player.currentStateId } ?: return
         if (player.history.size >= MAX_VISITS && edge.toStateId != null) {
             message("已观看 256 次，请点重来开始新一轮")
             return
         }
-        execute("读取动作目标") {
-            val next = player.traversal().advance(player.scene, id)
-            val bitmap = if (edge.toStateId != null) decode(player.scene, next.currentStateId, player.candidateId) else current.playerBitmap
-            val candidate = player.candidateId?.let { candidateId ->
-                withContext(Dispatchers.IO) { store.recordTraversal(candidateId, ViewerPackageCodec.contentDigest(player.scene), id, false) }
+        val next = player.traversal().advance(player.scene, id)
+        if (next.pendingEdgeId != null) {
+            val asset = player.scene.assets.first { it.id == next.pendingTransitionAssetId }
+            val pending = player.applyTraversal(next).copy(video = LocalVideoRun(null, asset.width, asset.height, next.mediaRunId))
+            mutableState.update { it.copy(player = pending) }
+            loadPlayerTransition(pending)
+        } else commitPlayerAction(player, next, id)
+    }
+
+    private fun loadPlayerTransition(player: ReleasePlayback) = launchPlayerWork {
+        val next = player.traversal()
+        try {
+            val file = withContext(Dispatchers.IO) {
+                if (player.candidateId != null) store.candidateTransitionFile(player.candidateId, next.pendingTransitionAssetId)
+                else store.releaseTransitionFile(player.scene.releaseId, next.pendingTransitionAssetId)
             }
-            mutableState.update { it.copy(candidate = candidate ?: it.candidate, playerBitmap = bitmap,
-                player = player.applyTraversal(next).copy(visitedEdgeIds = candidate?.visitedEdgeIds ?: next.visitedEdgeIds,
+            if (state.value.player?.traversal()?.mediaRunId == next.mediaRunId && state.value.player?.traversal()?.pendingEdgeId != null) {
+                mutableState.update { it.copy(player = it.player?.copy(video = player.video?.copy(file = file))) }
+            }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { failPlayerTransition(next.mediaRunId) }
+    }
+
+    fun completePlayerTransition(runId: Long) {
+        if (state.value.busy) return
+        val player = state.value.player ?: return
+        val old = player.traversal()
+        if (old.pendingEdgeId == null || old.mediaRunId != runId || player.video?.file == null) return
+        val next = old.completeTransition(player.scene, runId)
+        if (next === old) return
+        commitPlayerAction(player, next, old.pendingEdgeId)
+    }
+
+    fun failPlayerTransition(runId: Long) {
+        val player = state.value.player ?: return
+        val old = player.traversal()
+        val next = old.failTransition(player.scene, runId)
+        if (next === old) return
+        mutableState.update { it.copy(player = player.applyTraversal(next).copy(video = player.video?.copy(file = null, failed = true))) }
+    }
+
+    fun retryPlayerTransition(runId: Long) {
+        if (state.value.busy) return
+        val player = state.value.player ?: return
+        val old = player.traversal()
+        if (old.pendingEdgeId == null || old.mediaRunId != runId) return
+        val next = old.failTransition(player.scene, runId).retryTransition(player.scene)
+        val pending = player.applyTraversal(next).copy(video = player.video?.copy(file = null, runId = next.mediaRunId, failed = false))
+        mutableState.update { it.copy(player = pending) }
+        loadPlayerTransition(pending)
+    }
+
+    fun skipPlayerTransition() {
+        if (state.value.busy) return
+        val player = state.value.player ?: return
+        val old = player.traversal()
+        val edgeId = old.pendingEdgeId ?: return
+        commitPlayerAction(player, old.skipTransition(player.scene, old.mediaRunId), edgeId)
+    }
+
+    private fun commitPlayerAction(player: ReleasePlayback, next: ViewerTraversal, edgeId: String) = launchPlayerWork {
+        var displayed = false
+        try {
+            val bitmap = if (next.currentStateId != player.currentStateId) decode(player.scene, next.currentStateId, player.candidateId)
+                else state.value.playerBitmap
+            currentCoroutineContext().ensureActive()
+            check(bitmap != null) { "目标画面不可用" }
+            // Publish the real visit before writing coverage. A close during disk IO must not
+            // record an unseen destination or restore this player from an old completion.
+            mutableState.update { it.copy(playerBitmap = bitmap, player = player.applyTraversal(next).copy(video = null)) }
+            displayed = true
+            val candidate = player.candidateId?.let { candidateId -> withContext(Dispatchers.IO) {
+                store.recordTraversal(candidateId, ViewerPackageCodec.contentDigest(player.scene), edgeId, false)
+            } }
+            currentCoroutineContext().ensureActive()
+            mutableState.update { it.copy(candidate = candidate ?: it.candidate,
+                player = it.player?.copy(visitedEdgeIds = candidate?.visitedEdgeIds ?: next.visitedEdgeIds,
                     completedFromStart = candidate?.completedPath ?: next.completedFromStart)) }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) {
+            if (player.traversal().pendingEdgeId != null) failPlayerTransition(player.traversal().mediaRunId)
+            message(if (displayed) "试走记录未能保存，请点重来" else "目标画面未能读取，可重试或返回")
         }
     }
 
     fun previous() {
-        val current = state.value
-        val player = current.player ?: return
-        if (current.busy || !player.canGoBack) return
-        execute("返回实际访问的上一步") {
+        val player = state.value.player ?: return
+        if (player.traversal().pendingEdgeId != null) {
+            cancelPlayerWork()
+            mutableState.update { it.copy(player = player.applyTraversal(player.traversal().cancelTransition(player.scene)).copy(video = null)) }
+            return
+        }
+        if (state.value.busy || !player.canGoBack) return
+        launchPlayerWork {
             val previous = player.traversal().previous(player.scene)
             val bitmap = decode(player.scene, previous.currentStateId, player.candidateId)
             val candidate = player.candidateId?.let { id -> withContext(Dispatchers.IO) {
                 store.rewindTraversal(id, ViewerPackageCodec.contentDigest(player.scene))
             } }
+            currentCoroutineContext().ensureActive()
             mutableState.update { it.copy(candidate = candidate ?: it.candidate, playerBitmap = bitmap,
-                player = player.applyTraversal(previous)) }
+                player = player.applyTraversal(previous).copy(video = null)) }
         }
     }
 
     fun restart() {
         val player = state.value.player ?: return
-        execute("从起点重来") {
+        if (player.traversal().pendingEdgeId != null) {
+            cancelPlayerWork()
+            mutableState.update { it.copy(player = player.applyTraversal(player.traversal().cancelTransition(player.scene)).copy(video = null)) }
+        }
+        if (state.value.busy) return
+        launchPlayerWork {
             val restarted = player.traversal().restart(player.scene)
             val bitmap = decode(player.scene, restarted.currentStateId, player.candidateId)
             val candidate = player.candidateId?.let { id -> withContext(Dispatchers.IO) {
                 store.recordTraversal(id, ViewerPackageCodec.contentDigest(player.scene), null, false)
             } }
+            currentCoroutineContext().ensureActive()
             mutableState.update { it.copy(candidate = candidate ?: it.candidate, playerBitmap = bitmap,
-                player = player.applyTraversal(restarted).copy(visitedEdgeIds = candidate?.visitedEdgeIds ?: restarted.visitedEdgeIds,
+                player = player.applyTraversal(restarted).copy(video = null,
+                    visitedEdgeIds = candidate?.visitedEdgeIds ?: restarted.visitedEdgeIds,
                     completedFromStart = candidate?.completedPath ?: restarted.completedFromStart)) }
         }
     }
 
     fun closePlayer() {
-        if (state.value.busy) { cancel(); return }
+        cancelPlayerWork()
+        if (state.value.busy) cancel()
         mutableState.update { it.copy(player = null, playerBitmap = null) }
+    }
+
+    private fun launchPlayerWork(block: suspend () -> Unit) {
+        playerTask?.cancel()
+        val generation = ++playerGeneration
+        mutableState.update { it.copy(busy = true, stage = "读取安全画面") }
+        playerTask = viewModelScope.launch {
+            try { block() }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { message("播放未完成，请重试") }
+            finally { if (generation == playerGeneration) mutableState.update { it.copy(busy = false, stage = null) } }
+        }
+    }
+
+    private fun cancelPlayerWork() {
+        playerGeneration++
+        val active = playerTask?.isActive == true
+        playerTask?.cancel()
+        playerTask = null
+        if (active) mutableState.update { it.copy(busy = false, stage = null) }
     }
 
     fun importPackage(uri: Uri) = execute("隔离验证离线观看包") {
@@ -394,10 +583,10 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
             completedFromStart = completed || start.completedFromStart)
     }
 
-    private fun ReleasePlayback.traversal() = ViewerTraversal(currentStateId, history, ended, endLabel,
+    private fun ReleasePlayback.traversal() = traversalState ?: ViewerTraversal(currentStateId, history, ended, endLabel,
         endEdgeId, visitedEdgeIds, completedFromStart)
 
-    private fun ReleasePlayback.applyTraversal(next: ViewerTraversal) = copy(currentStateId = next.currentStateId,
+    private fun ReleasePlayback.applyTraversal(next: ViewerTraversal) = copy(traversalState = next, currentStateId = next.currentStateId,
         history = next.history, ended = next.ended, endLabel = next.endLabel, endEdgeId = next.endEdgeId,
         matchingHotspotIds = emptyList(), visitedEdgeIds = next.visitedEdgeIds, completedFromStart = next.completedFromStart)
 

@@ -4,6 +4,8 @@ import com.tapscene.data.ReleaseCandidate
 import com.tapscene.data.ReleaseSummary
 import com.tapscene.packageformat.ViewerPackageCodec
 import com.tapscene.packageformat.ViewerScene
+import com.tapscene.ui.LocalVideoRun
+import com.tapscene.ui.ReleaseVideoReview
 import com.tapscene.ui.ReleasePlayback
 import com.tapscene.ui.ReleaseUiState
 import java.util.UUID
@@ -39,4 +41,20 @@ internal object ReleasePreviewFixture {
     val libraryState = ReleaseUiState(releases = listOf(summary), pendingCandidates = listOf(candidate))
     val playerState get() = ReleaseUiState(player = ReleasePlayback(scene, null, stateIds.first(), listOf(stateIds.first())),
         playerBitmap = ShellPreviewFixture.bitmap(0))
+
+    // A failed attempt only: no file, EOS, privacy review, or decoder success is fabricated.
+    private val videoAsset = ViewerScene.Asset(id("video-asset"), "assets/${id("video-asset")}.mp4",
+        "video/mp4", 400_000L, "1".repeat(64), 480, 840, ViewerScene.Asset.ROLE_TRANSITION, 2_000L)
+    private val videoScene = ViewerScene(2, ViewerPackageCodec.VIDEO_POLICY_VERSION, ViewerPackageCodec.COMPILER_VERSION,
+        id("video-release"), "短片复核 · 布局样例", scene.goal, scene.createdAt, scene.startStateId,
+        scene.states, scene.edges.mapIndexed { index, edge ->
+            ViewerScene.Edge(edge.id, edge.fromStateId, edge.toStateId, edge.endLabel, edge.hotspotId,
+                edge.label, edge.trigger, edge.sourceKind, videoAsset.id.takeIf { index == 0 })
+        }, scene.hotspots, scene.assets + videoAsset)
+    private val videoCandidate = ReleaseCandidate(videoScene.releaseId, id("project"), 4L, videoScene,
+        ViewerPackageCodec.contentDigest(videoScene))
+    val videoReviewFailureState get() = ReleaseUiState(candidate = videoCandidate,
+        reviewVideo = ReleaseVideoReview(videoCandidate.id, videoCandidate.contentDigest,
+            videoAsset.id, videoAsset.sha256, LocalVideoRun(null, 480, 840, 1L, failed = true)))
+
 }

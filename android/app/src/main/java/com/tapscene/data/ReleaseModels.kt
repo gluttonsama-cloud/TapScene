@@ -19,6 +19,7 @@ data class ReleaseCandidate(
     val traversalEnded: Boolean = false,
     val traversalHistory: List<String> = emptyList(),
     val traversalEndEdgeId: String? = null,
+    val reviewedTransitionAssetIds: Set<String> = emptySet(),
 )
 
 data class ReleaseSummary(
