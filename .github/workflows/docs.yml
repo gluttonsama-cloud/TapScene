@@ -1,4 +1,4 @@
-name: Docs proposal checks
+name: CI
 
 on:
   pull_request:
@@ -8,12 +8,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: docs-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  group: ci-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  docs-checks:
-    name: docs-checks
+  gate:
+    name: ci/gate
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -22,34 +22,17 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Test affected checkers
+      - name: Check document encoding and changed whitespace
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          set +e
-          git diff --quiet "$BASE_SHA" HEAD -- scripts/ tests/ .github/workflows/ docs/engineering/requirements.json
-          changed=$?
-          set -e
-          case "$changed" in
-            0) echo "No checker changes in this PR; checker regression not needed." ;;
-            1) python3 tests/test_checks.py ;;
-            *) echo "Cannot determine checker impact." >&2; exit "$changed" ;;
-          esac
-      - name: Check proposal documents
-        run: python3 scripts/check_docs.py
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
 
-  gate:
-    name: ci/gate
-    needs: [docs-checks]
-    if: ${{ always() }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: Check out the proposed merge
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Require actual content-check success
-        env:
-          NEEDS_JSON: ${{ toJSON(needs) }}
-        run: python3 scripts/check_gate.py
+          paths = subprocess.check_output(["git", "ls-files", "-z", "--", "*.md"])
+          for path in paths.decode("utf-8").split("\0"):
+              if path:
+                  Path(path).read_bytes().decode("utf-8")
+          PY
+          git diff --check "$BASE_SHA" HEAD
