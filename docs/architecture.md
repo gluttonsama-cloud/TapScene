@@ -677,7 +677,7 @@ HTTP 映射：400 输入错误；401 会话失效；404 不存在或无权；409
 |---|---|---|
 | Kotlin、Compose、Navigation、ViewModel、Coroutines / Flow | 原生 UI、导航、并发和状态观察 | `android/` 页面及本地用例 |
 | [Room](https://developer.android.com/training/data-storage/room/defining-data)、kotlinx.serialization | Entity / DAO / 事务 / 迁移；DTO 编解码，后续独立做语义校验 | `android/` 数据访问与包读取 |
-| MediaExtractor / MediaCodec、Bitmap / Canvas、[Media3 ExoPlayer / Transformer](https://developer.android.com/media/media3/transformer/transformations) | 真 PTS 解码、图片重编码、视频烧录遮挡与去音轨、播放 | Android 媒体管线；Transformer 须禁用 transmux 和裁剪原样本保留优化，无法保证时使用显式 codec 管线 |
+| MediaExtractor / MediaCodec、Bitmap / Canvas、[Media3 ExoPlayer / Transformer](https://developer.android.com/media/media3/transformer/transformations) | 实际画面取帧（当前 FrameExtractor 返回毫秒精度）、图片重编码、视频烧录遮挡与去音轨、播放 | Android 媒体管线；Transformer 须禁用 transmux 和裁剪原样本保留优化，无法保证时使用显式 codec 管线 |
 | [ML Kit Text Recognition bundled Latin / 中文模型](https://developers.google.com/ml-kit/vision/text-recognition/v2/android)（候选） | 首次使用即可端侧 OCR；[官方隐私说明](https://developers.google.com/ml-kit/terms)包含性能 / 使用指标发送 | 本机素材分析；只有能受支持地禁用非必要外传并实测通过才接入，否则采用可控端侧 OCR |
 | [WorkManager](https://developer.android.com/develop/background-work/background-tasks/persistent/how-to/long-running) | 按系统约束调度恢复任务；恢复事实来自 local_jobs | Android 任务调度；force-stop 后由应用恢复流程重新检查 |
 | OkHttp（拟用）、浏览器 fetch | 管理 API 上传与观看请求 | Android 托管用例；`web-player/` |

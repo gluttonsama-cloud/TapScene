@@ -1,0 +1,265 @@
+{
+  "avc-sdr.mp4": {
+    "sha256": "14fe3e4182883152356698dbd6945fda3834f51270845c186895caedba800e07",
+    "bytes": 32793,
+    "streams": [
+      {
+        "codec_name": "h264",
+        "profile": "Constrained Baseline",
+        "width": 160,
+        "height": 288,
+        "sample_aspect_ratio": "1:1",
+        "pix_fmt": "yuv420p",
+        "color_range": "tv",
+        "color_space": "bt709",
+        "color_transfer": "bt709",
+        "color_primaries": "bt709",
+        "duration": "1.000000",
+        "nb_frames": "10"
+      }
+    ],
+    "pts_us": [
+      0,
+      100000,
+      200000,
+      300000,
+      400000,
+      500000,
+      600000,
+      700000,
+      800000,
+      900000
+    ],
+    "duration_us": 1000000,
+    "android_rotation_degrees": 0,
+    "surface_size": [
+      160,
+      288
+    ],
+    "expectation": "supported-sdr"
+  },
+  "hevc-10bit-sdr.mp4": {
+    "sha256": "f7dfd4c9dd38d0ecb2729d2d760b26560e832034949fdf475f30c66555ceb454",
+    "bytes": 26684,
+    "streams": [
+      {
+        "codec_name": "hevc",
+        "profile": "Main 10",
+        "width": 160,
+        "height": 288,
+        "sample_aspect_ratio": "1:1",
+        "pix_fmt": "yuv420p10le",
+        "color_range": "tv",
+        "color_space": "bt709",
+        "color_transfer": "bt709",
+        "color_primaries": "bt709",
+        "duration": "1.000000",
+        "nb_frames": "10"
+      }
+    ],
+    "pts_us": [
+      0,
+      100000,
+      200000,
+      300000,
+      400000,
+      500000,
+      600000,
+      700000,
+      800000,
+      900000
+    ],
+    "duration_us": 1000000,
+    "android_rotation_degrees": 0,
+    "surface_size": [
+      160,
+      288
+    ],
+    "expectation": "advertised-main10"
+  },
+  "hevc-hdr.mp4": {
+    "sha256": "d9a256ffe6ec4721fa44b30aa8a541e161a00b75aef916b522d1c863ce076dc7",
+    "bytes": 27267,
+    "streams": [
+      {
+        "codec_name": "hevc",
+        "profile": "Main",
+        "width": 160,
+        "height": 288,
+        "sample_aspect_ratio": "1:1",
+        "pix_fmt": "yuv420p",
+        "color_range": "tv",
+        "color_space": "bt2020nc",
+        "color_transfer": "smpte2084",
+        "color_primaries": "bt2020",
+        "duration": "1.000000",
+        "nb_frames": "10"
+      }
+    ],
+    "pts_us": [
+      0,
+      100000,
+      200000,
+      300000,
+      400000,
+      500000,
+      600000,
+      700000,
+      800000,
+      900000
+    ],
+    "duration_us": 1000000,
+    "android_rotation_degrees": 0,
+    "surface_size": [
+      160,
+      288
+    ],
+    "expectation": "device-tone-map"
+  },
+  "hevc-sdr.mp4": {
+    "sha256": "69cde5f331962190bad8e2d0e0f2b9d9675e3a683b968d41b442ae8765f1cb37",
+    "bytes": 37451,
+    "streams": [
+      {
+        "codec_name": "hevc",
+        "profile": "Main",
+        "width": 160,
+        "height": 288,
+        "sample_aspect_ratio": "1:1",
+        "pix_fmt": "yuv420p",
+        "color_range": "tv",
+        "color_space": "bt709",
+        "color_transfer": "bt709",
+        "color_primaries": "bt709",
+        "duration": "1.000000",
+        "nb_frames": "10"
+      },
+      {
+        "codec_name": "aac",
+        "profile": "LC",
+        "duration": "1.000000",
+        "nb_frames": "45"
+      }
+    ],
+    "pts_us": [
+      0,
+      100000,
+      200000,
+      300000,
+      400000,
+      500000,
+      600000,
+      700000,
+      800000,
+      900000
+    ],
+    "duration_us": 1000000,
+    "android_rotation_degrees": 0,
+    "surface_size": [
+      160,
+      288
+    ],
+    "expectation": "supported-sdr"
+  },
+  "hevc-unknown-colour.mp4": {
+    "sha256": "92ab03a608b51824b2e40d82db86e1f1efa64484bd82906cace774f07d9e00a5",
+    "bytes": 25992,
+    "streams": [
+      {
+        "codec_name": "hevc",
+        "profile": "Main",
+        "width": 160,
+        "height": 288,
+        "sample_aspect_ratio": "1:1",
+        "pix_fmt": "yuv420p",
+        "color_range": "tv",
+        "duration": "1.000000",
+        "nb_frames": "10"
+      }
+    ],
+    "pts_us": [
+      0,
+      100000,
+      200000,
+      300000,
+      400000,
+      500000,
+      600000,
+      700000,
+      800000,
+      900000
+    ],
+    "duration_us": 1000000,
+    "android_rotation_degrees": 0,
+    "surface_size": [
+      160,
+      288
+    ],
+    "expectation": "supported-sdr"
+  },
+  "avc-long-screen-unknown-colour.mp4": {
+    "sha256": "852b4319f5167a9e868cbb1110ba7390ae58552264860524a30978bf7f0d4889",
+    "bytes": 15350,
+    "streams": [
+      {
+        "codec_name": "h264",
+        "profile": "Constrained Baseline",
+        "width": 1440,
+        "height": 3200,
+        "sample_aspect_ratio": "1:1",
+        "pix_fmt": "yuv420p",
+        "duration": "1.000000",
+        "nb_frames": "4"
+      }
+    ],
+    "pts_us": [
+      0,
+      250000,
+      500000,
+      750000
+    ],
+    "duration_us": 1000000,
+    "android_rotation_degrees": 0,
+    "surface_size": [
+      1080,
+      2400
+    ],
+    "expectation": "supported-sdr"
+  },
+  "avc-rotated-sar-vfr.mp4": {
+    "sha256": "4887e331e49c8b70d04439c4f2492b08cd6cfc6462cd5113fcbe81cfa0f05250",
+    "bytes": 13927,
+    "streams": [
+      {
+        "codec_name": "h264",
+        "profile": "Constrained Baseline",
+        "width": 180,
+        "height": 320,
+        "sample_aspect_ratio": "3:2",
+        "pix_fmt": "yuv420p",
+        "duration": "0.933333",
+        "nb_frames": "6",
+        "side_data_list": [
+          {
+            "rotation": 90
+          }
+        ]
+      }
+    ],
+    "pts_us": [
+      0,
+      66667,
+      233333,
+      466667,
+      500000,
+      900000
+    ],
+    "duration_us": 933333,
+    "android_rotation_degrees": 270,
+    "surface_size": [
+      320,
+      270
+    ],
+    "expectation": "supported-sdr"
+  }
+}
