@@ -56,6 +56,7 @@ class MediaCompatibilityInstrumentation : Instrumentation() {
         AvcOutputPolicyChecks.run(::status)
         com.tapscene.data.ProjectEditingChecks.run(targetContext, ::status)
         com.tapscene.data.EditorDraftStoreChecks.run(targetContext, ::status)
+        com.tapscene.data.SafeImageStoreChecks.run(targetContext, ::status)
         com.tapscene.ui.EditorDraftWorkspaceChecks.run(targetContext, ::status)
         com.tapscene.data.AuthoredPathChecks.run(targetContext, ::status)
         com.tapscene.ui.AuthoredPreviewChecks.run(targetContext, ::status)

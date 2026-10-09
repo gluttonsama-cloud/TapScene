@@ -27,8 +27,8 @@ object EditorDraftStoreChecks {
         var failure: Throwable? = null
         try {
             checkStore(isolated(context, File(root, "store")), status)
-            for (version in 1..4) checkMigration(isolated(context, File(root, "v$version")), version)
-            status("PASS editor SQLite v1/v2/v3/v4-to-v5 upgrades: additive tables, unchanged official project IDs/content/revision and empty recovery")
+            for (version in 1..5) checkMigration(isolated(context, File(root, "v$version")), version)
+            status("PASS editor SQLite v1–v5-to-v6 genuine historical DDL, complete graph/assets/drafts/journals preserved before recovery, enabled foreign keys and missing-source video snapshot")
             status("NOT_COVERED editor recovery: actual process kill, IME typing and Compose lifecycle gestures require separate device/UI checks")
         } catch (error: Throwable) { failure = error; throw error }
         finally {
@@ -177,27 +177,93 @@ object EditorDraftStoreChecks {
     }
 
     private suspend fun checkMigration(context: Context, previous: Int) {
-        val store = ProjectStore(context)
-        val project = store.createProject("Migration $previous").project.id
-        val before = store.addReviewedStep(project, png(context, source(context)), "Kept", "Preserve text")
-        // Prepare the exact old table set from an empty additive v5 baseline, then reopen through
-        // production SQLiteOpenHelper. Host tests independently exercise the extracted old DDL.
-        database(context) { db ->
-            db.execSQL("DROP TABLE editor_drafts"); db.execSQL("DROP TABLE editor_draft_sessions")
-            if (previous < 4) db.execSQL("DROP TABLE regions")
-            if (previous < 3) { db.execSQL("DROP TABLE edge_transitions"); db.execSQL("DROP TABLE transition_imports") }
-            if (previous < 2) db.execSQL("DROP TABLE next_actions")
-            db.version = previous
+        val project = id(); val other = id(); val step = id(); val second = id(); val asset = id(); val source = source(context)
+        val input = png(context, source)
+        val path = "project-assets/$project/$asset.png"
+        val file = File(context.noBackupFilesDir, path)
+        check(file.parentFile!!.mkdirs()); input.file.copyTo(file)
+        val fields = EditorDraftFields("Kept","Preserve text",false,emptyList())
+        val retainedDraft = StoredEditorDraft(9,fields,fields.copy(title="Unsaved"),
+            EditorPendingForm(EditorFormKind.NAME,title="  unfinished  "))
+        val expectedRows = linkedMapOf<String, Pair<String, List<String>>>()
+        SQLiteDatabase.openOrCreateDatabase(File(context.noBackupFilesDir, "projects.sqlite"), null).use { db ->
+            db.setForeignKeyConstraintsEnabled(true)
+            db.beginTransaction()
+            try {
+                LegacyProjectSchema.statements(previous).forEach(db::execSQL)
+                val json = JSONObject().apply {
+                    put("id",source.sourceId);put("path",source.privateRelativePath);put("name",source.displayName)
+                    put("mime",source.metadata.mime);put("bytes",source.metadata.byteLength);put("sha256",source.metadata.sha256)
+                    put("width",source.metadata.width);put("height",source.metadata.height);put("rotation",source.metadata.rotationDeg)
+                    put("durationUs",source.metadata.durationUs);put("pixelRatio",source.metadata.pixelWidthHeightRatio)
+                }
+                for (p in listOf(project,other)) {
+                    // Same two state IDs in separate projects exercise every composite FK.
+                    val a = if (p == project) asset else id(); val b = id(); val clip = id(); val crop = id()
+                    db.execSQL("INSERT INTO projects VALUES(?,?,?,?,?,?,?)", arrayOf(p,"Migration $previous","Goal",11,12,9,step))
+                    db.execSQL("INSERT INTO sources VALUES(?,?,?)",arrayOf(p,source.sourceId,json.toString()))
+                    for (media in listOf(a,b,clip,crop)) db.execSQL("INSERT INTO local_assets VALUES(?,?,?,?,?,?,?)",
+                        arrayOf(media,p,"project-assets/$p/$media.png",input.sha256,file.length(),32,48))
+                    for ((state,image) in listOf(step to a,second to b)) db.execSQL("INSERT INTO states VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                        arrayOf(p,state,state,0,"Kept","Preserve text",0,source.sourceId,image,0,1000,"[]"))
+                    val hotspot=id();val edge=id()
+                    db.execSQL("INSERT INTO hotspots VALUES(?,?,?,?,?,?,?,?)",arrayOf(p,hotspot,step,"Manual",.1,.2,.6,.8))
+                    db.execSQL("INSERT INTO edges VALUES(?,?,?,?,?,NULL)",arrayOf(p,edge,hotspot,step,second))
+                    if (previous >= 2) db.execSQL("INSERT INTO next_actions VALUES(?,?,?,?,?)",arrayOf(p,id(),second,"Back",step))
+                    if (previous >= 3) {
+                        db.execSQL("INSERT INTO edge_transitions VALUES(?,?,?,?,?,?,?,?,?)",arrayOf(p,edge,clip,source.sourceId,0,1000,1000,"[]",id()))
+                        db.execSQL("INSERT INTO transition_imports VALUES(?,?)",arrayOf(p,id()))
+                    }
+                    if (previous >= 4) db.execSQL("INSERT INTO regions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        arrayOf(p,id(),step,a,input.sha256,"Crop",null,1,2,3,4,32,48,0,.5,.5,crop,123))
+                    if (previous >= 5) {
+                        db.execSQL("INSERT INTO editor_drafts VALUES(?,?,?)",arrayOf(p,step,EditorDraftCodec.encode(retainedDraft)))
+                        db.execSQL("INSERT INTO editor_draft_sessions VALUES(?,7)",arrayOf(p))
+                    }
+                }
+                db.execSQL("INSERT INTO asset_cleanup VALUES(?,?)",arrayOf(project,"project-assets/$project/${id()}.png"))
+                db.execSQL("INSERT INTO asset_imports VALUES(?,?)",arrayOf(project,id()))
+                db.version = previous
+                db.setTransactionSuccessful()
+            } finally { db.endTransaction() }
+            db.rawQuery("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",null).use { names ->
+                while(names.moveToNext()) {
+                    val table=names.getString(0)
+                    val columns=db.rawQuery("SELECT * FROM \"$table\" LIMIT 0",null).use { it.columnNames.joinToString(",") }
+                    expectedRows[table]=columns to migrationRows(db,table,columns)
+                }
+            }
+        }
+        // Missing source bytes must not hide migrated video steps. Inspect the helper directly
+        // before ProjectStore.access performs normal recovery/cleanup of the preserved journals.
+        check(File(context.noBackupFilesDir, source.privateRelativePath).delete())
+        ProjectStore.Database(context,File(context.noBackupFilesDir,"projects.sqlite").path).use { helper ->
+            val db=helper.writableDatabase
+            check(db.version==6)
+            for ((table,expected) in expectedRows) check(migrationRows(db,table,expected.first)==expected.second) {
+                "Migration altered $table contents"
+            }
+            db.rawQuery("PRAGMA foreign_keys",null).use { check(it.moveToFirst() && it.getInt(0)==1) }
+            db.rawQuery("PRAGMA foreign_key_check",null).use { check(!it.moveToFirst()) }
         }
         val reopened = ProjectStore(context)
-        check(reopened.readProject(project) == before)
-        check(reopened.readEditorDrafts(project).isEmpty())
-        check(reopened.beginEditorDraftSession(project) == 1L)
-        database(context) { db ->
-            check(db.version == 5)
-            db.rawQuery("PRAGMA foreign_key_check", null).use { check(!it.moveToFirst()) }
-        }
+        val saved = checkNotNull(reopened.readProject(project))
+        check(saved.project.revision == 9L && saved.project.startStepId == step && saved.steps.size==2)
+        check(saved.steps.single { it.id==step }.let { it.title == "Kept" && it.description == "Preserve text" &&
+            it.videoOrigin == StepOrigin.VideoFrame(source,0,1000) && it.asset.sha256 == input.sha256 })
+        check(reopened.readEditorDrafts(project)==if(previous>=5) mapOf(step to retainedDraft) else emptyMap())
+        check(reopened.beginEditorDraftSession(project)==if(previous>=5) 8L else 1L)
     }
+
+    private fun migrationRows(db: SQLiteDatabase, table: String, columns: String): List<String> =
+        db.rawQuery("SELECT $columns FROM \"$table\"",null).use { rows ->
+            buildList {
+                while(rows.moveToNext()) add((0 until rows.columnCount).joinToString("|") { index ->
+                    val text=if(rows.isNull(index)) "" else rows.getString(index)
+                    "${rows.getType(index)}:${text.length}:$text"
+                })
+            }.sorted()
+        }
 
     private fun save(store: ProjectStore, projectId: String, stepId: String, draft: StoredEditorDraft, session: Long): ProjectSnapshot =
         store.saveStepDraft(projectId, stepId, draft.edit.title, draft.edit.description, draft.edit.isTerminal,

@@ -72,6 +72,40 @@ internal object SafeMediaWriterValidation {
         }
     }
 
+    /** A safe-image edit can only add opaque pixels. Every unmasked pixel must be unchanged.
+     * The caller verifies the base SHA and the latest project/step/revision again at commit. */
+    suspend fun verifyPngRedaction(candidateFile: File, baseFile: File, width: Int, height: Int,
+        masks: List<OpaqueMask>) {
+        require(width > 0 && height > 0 && width.toLong() * height <= 12_000_000L && masks.size in 1..20)
+        verifyPng(baseFile, width, height, emptyList())
+        verifyPng(candidateFile, width, height, masks)
+        val options = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888; inScaled = false }
+        val base = BitmapFactory.decodeFile(baseFile.path, options) ?: error("安全底图无法重新解码。")
+        try {
+            val output = BitmapFactory.decodeFile(candidateFile.path, options) ?: error("追加遮挡输出无法重新解码。")
+            try {
+                check(base.width == width && base.height == height && output.width == width && output.height == height) {
+                    "追加遮挡不能改变安全底图尺寸。"
+                }
+                val bounds = masks.map { it.toPixelRect(width, height) }
+                val originalRow = IntArray(width)
+                val outputRow = IntArray(width)
+                for (y in 0 until height) {
+                    currentCoroutineContext().ensureActive()
+                    base.getPixels(originalRow, 0, width, 0, y, width, 1)
+                    output.getPixels(outputRow, 0, width, 0, y, width, 1)
+                    val rowMasks = bounds.filter { y >= it.top && y < it.bottom }
+                    for (x in 0 until width) {
+                        val masked = rowMasks.any { x >= it.left && x < it.right }
+                        check(outputRow[x] == if (masked) Color.BLACK else originalRow[x]) {
+                            "追加遮挡改变了范围外的安全像素，原步骤未替换。"
+                        }
+                    }
+                }
+            } finally { output.recycle() }
+        } finally { base.recycle() }
+    }
+
     /** Reject ancillary payloads rather than relying only on a .png filename or decoder success. */
     private suspend fun verifyPngChunks(file: File) {
         RandomAccessFile(file, "r").use { input ->

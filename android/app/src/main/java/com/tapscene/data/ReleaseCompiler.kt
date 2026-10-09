@@ -17,6 +17,8 @@ import kotlin.coroutines.CoroutineContext
 /** Explicit whitelist projection: no source paths, capture tokens, masks, OCR or edit history. */
 internal object ReleaseCompiler {
     fun scene(snapshot: ProjectSnapshot, releaseId: String, createdAt: Long): ViewerScene {
+        // This increment only redacts existing recorded steps. Internal image/videoFrame origin
+        // does not change recorded/authored/imported evidence or enter the public package schema.
         val states = snapshot.steps.map { step ->
             ViewerScene.State(step.id, step.asset.id, step.asset.width, step.asset.height,
                 step.title, step.description, "recorded", step.isTerminal)

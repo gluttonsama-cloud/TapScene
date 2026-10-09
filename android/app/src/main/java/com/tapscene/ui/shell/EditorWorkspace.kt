@@ -280,12 +280,13 @@ fun EditorWorkspaceContent(
                     }
                     EditorMode.REDACTIONS -> {
                         Text("固定遮挡", style = MaterialTheme.typography.titleSmall)
-                        Text("当前安全画面包含 ${step?.masks?.size ?: 0} 处已生成遮挡。", style = MaterialTheme.typography.bodySmall,
+                        Text(if (step?.imageOrigin != null) "当前安全画面已有的遮挡已烧入，不能移除。"
+                            else "当前安全画面包含 ${step?.masks?.size ?: 0} 处已生成遮挡。", style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                         OutlinedButton(onClick = { callbacks.onCorrectImage(true) }, enabled = !busy && correctionEnabled) {
                             Text("重新遮挡")
                         }
-                        Text("从本步原片校正，检查新图片后替换。", style = MaterialTheme.typography.bodySmall,
+                        Text("可从本机录屏校正，或在安全画面上追加遮挡；检查新图片后替换。", style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     EditorMode.REGIONS -> {
@@ -451,7 +452,7 @@ private fun HotspotEditorSheet(form: EditorPendingForm, original: ProjectHotspot
             if (form.endsDemo) OutlinedTextField(form.endLabel, { onChange(form.copy(endLabel = it)) }, label = { Text("结束说明") },
                 enabled = enabled, modifier = Modifier.fillMaxWidth())
             steps.forEachIndexed { index, step ->
-                EditorTargetRow("${index + 1}  ${step.title}", step.source.displayName,
+                EditorTargetRow("${index + 1}  ${step.title}", step.originLabel,
                     !form.endsDemo && form.targetStepId == step.id, enabled) {
                     onChange(form.copy(targetStepId = step.id, endsDemo = false))
                 }
@@ -511,7 +512,7 @@ private fun NextActionEditorSheet(form: EditorPendingForm, original: ProjectNext
             if (!validTarget) Text(if (form.targetStepId == null) "请选择目标步骤。" else "原目标已失效，请重新选择。",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             steps.forEachIndexed { index, step ->
-                EditorTargetRow("${index + 1}  ${step.title}", step.source.displayName, form.targetStepId == step.id, enabled) {
+                EditorTargetRow("${index + 1}  ${step.title}", step.originLabel, form.targetStepId == step.id, enabled) {
                     onChange(form.copy(targetStepId = step.id))
                 }
             }

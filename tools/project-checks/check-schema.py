@@ -3,6 +3,11 @@ from pathlib import Path
 import re
 import sqlite3
 s=(Path(__file__).resolve().parents[2] / 'android/app/src/main/java/com/tapscene/data/ProjectStore.kt').read_text()
+# The original schema is an explicit fixture; current v6 rebuild is checked separately.
+legacy_states = (Path(__file__).with_name('legacy-states-v5.sql')).read_text().strip().rstrip(';')
+s += '\ndb.execSQL(\"\"\"' + legacy_states + '\"\"\")'
+# State indexes appear in create and migration; run the same definitions once.
+s = s.replace('db.execSQL(\"CREATE INDEX states_order ON states(project_id,sort_order)\")', '', 1).replace('db.execSQL(\"CREATE INDEX states_source ON states(source_id)\")', '', 1)
 c=sqlite3.connect(':memory:'); c.execute('PRAGMA foreign_keys=ON')
 for sql in re.findall(r'db.execSQL\("""(CREATE TABLE.*?)"""\)',s,re.S): c.execute(sql)
 for sql in re.findall(r'db.execSQL\("(CREATE (?:INDEX|TABLE).*?)"\)',s): c.execute(sql)

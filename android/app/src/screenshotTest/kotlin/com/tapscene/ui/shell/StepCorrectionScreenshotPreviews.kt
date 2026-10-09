@@ -15,10 +15,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.android.tools.screenshot.PreviewTest
+import com.tapscene.data.SafeImageBinding
 import com.tapscene.data.SourceDraft
 import com.tapscene.media.DecodedFrame
 import com.tapscene.media.OpaqueMask
 import com.tapscene.media.SafeMediaWriter
+import com.tapscene.ui.SafeImageCorrectionDraft
 import com.tapscene.ui.StepImageCorrection
 import com.tapscene.ui.WorkspaceUiState
 import java.io.File
@@ -28,15 +30,19 @@ private object StepCorrectionPreviewFixture {
     val callbacks = CorrectionUiCallbacks({}, {}, {}, {}, {}, {}, {}, {}, {})
     private val step = ShellPreviewFixture.selectedStep
     private val masks = listOf(OpaqueMask(.11f, .31f, .77f, .37f), OpaqueMask(.11f, .47f, .89f, .53f))
-    private val draft = SourceDraft(step.source, frameTimeUs = 6_233_000L, masks = masks)
+    private val draft = SourceDraft(requireNotNull(step.videoOrigin).source, frameTimeUs = 6_233_000L, masks = masks)
+    private val binding = SafeImageBinding("00000000-0000-0000-0000-000000000001",
+        "00000000-0000-0000-0000-000000000002", 1L,
+        "00000000-0000-0000-0000-000000000003", "a".repeat(64), step.asset.width, step.asset.height)
     private val correction = StepImageCorrection(
-        projectId = ShellPreviewFixture.project.project.id,
-        stepId = step.id,
+        projectId = binding.projectId,
+        stepId = binding.stepId,
         expectedRevision = 1L,
         sessionId = "layout-correction-session",
         title = "填写报名信息",
         regionCount = 2,
         transitionCount = 1,
+        safeImageBase = binding,
     )
 
     fun output(raw: Bitmap): Bitmap = requireNotNull(raw.copy(Bitmap.Config.ARGB_8888, true)).also { bitmap ->
@@ -47,6 +53,21 @@ private object StepCorrectionPreviewFixture {
                 mask.right * bitmap.width, mask.bottom * bitmap.height, paint)
         }
     }
+
+    private val newMask = OpaqueMask(.11f, .63f, .89f, .69f)
+
+    fun augmentedOutput(base: Bitmap): Bitmap = requireNotNull(base.copy(Bitmap.Config.ARGB_8888, true)).also {
+        Canvas(it).drawRect(newMask.left * it.width, newMask.top * it.height,
+            newMask.right * it.width, newMask.bottom * it.height, Paint().apply { color = Color.BLACK })
+    }
+
+    fun safeState(base: Bitmap, output: Bitmap? = null) = WorkspaceUiState(
+        drafts = emptyList(), correction = correction,
+        safeImageDraft = SafeImageCorrectionDraft(binding, base, listOf(newMask)),
+        candidate = output?.let { SafeMediaWriter.CandidateMedia(File("screenshot-only/safe-correction.png"),
+            "d".repeat(64), it.width, it.height, "image/png", null) },
+        candidateImage = output,
+    )
 
     fun state(raw: Bitmap, output: Bitmap? = null, dense: Boolean = false, missing: Boolean = false, busy: Boolean = false): WorkspaceUiState {
         return WorkspaceUiState(
@@ -64,7 +85,7 @@ private object StepCorrectionPreviewFixture {
             loadFailed = false,
             busy = busy,
             stage = if (busy) "解码实际帧" else null,
-            message = if (missing) "本机原片不可用，无法重新取帧或修改遮挡。" else null,
+            message = if (missing) "本机原片不可用，可在当前安全画面上追加遮挡。" else null,
         )
     }
 }
@@ -163,5 +184,31 @@ fun StepCorrectionNarrowPreview() {
     StepCorrectionSurface {
         StepImageCorrectionContent(StepCorrectionPreviewFixture.state(raw, dense = true), safe,
             StepImageCorrectionMode.MASK, StepCorrectionPreviewFixture.callbacks)
+    }
+}
+
+
+@PreviewTest
+@Preview(name = "32_safe_image_append_masks", widthDp = 412, heightDp = 915, locale = "zh-rCN", showBackground = true)
+@Composable
+fun SafeImageAppendMasksPreview() {
+    val raw = remember { ShellPreviewFixture.bitmap(1) }
+    val base = remember(raw) { StepCorrectionPreviewFixture.output(raw) }
+    StepCorrectionSurface {
+        StepImageCorrectionContent(StepCorrectionPreviewFixture.safeState(base), base,
+            StepImageCorrectionMode.MASK, StepCorrectionPreviewFixture.callbacks)
+    }
+}
+
+@PreviewTest
+@Preview(name = "33_safe_image_actual_review", widthDp = 412, heightDp = 915, locale = "zh-rCN", showBackground = true)
+@Composable
+fun SafeImageActualReviewPreview() {
+    val raw = remember { ShellPreviewFixture.bitmap(1) }
+    val base = remember(raw) { StepCorrectionPreviewFixture.output(raw) }
+    val output = remember(base) { StepCorrectionPreviewFixture.augmentedOutput(base) }
+    StepCorrectionSurface {
+        StepImageCorrectionContent(StepCorrectionPreviewFixture.safeState(base, output), base,
+            StepImageCorrectionMode.REVIEW, StepCorrectionPreviewFixture.callbacks)
     }
 }

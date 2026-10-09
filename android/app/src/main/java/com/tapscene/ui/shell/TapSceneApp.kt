@@ -378,13 +378,13 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                             media::addMask, media::undoMask, media::makeImage,
                                             onConfirm = { digest ->
                                                 val current = media.state.value
-                                                if (!current.busy && !projects.state.value.busy && !projects.state.value.loadFailed &&
-                                                    current.correction == correction && current.frameReviewId == correction.sessionId &&
-                                                    current.candidate?.sha256 == digest && current.candidateImage != null) {
+                                                if (!projects.state.value.busy && !projects.state.value.loadFailed &&
+                                                    current.canReviewCorrection(correction, digest)) {
                                                     media.review(true)
                                                     media.saveReviewedImage { input -> projects.replaceReviewedStep(correction, input) }
                                                 }
-                                            }, onRetry = media::retryStepCorrection, onSelectSource = media::selectCorrectionSource))
+                                            }, onRetry = media::retryStepCorrection, onSelectSource = media::selectCorrectionSource,
+                                            onUseSafeImage = media::useSafeImageBase))
                                 } else ScreenEmpty("已返回保存的画面", "未确认的新画面没有替换原步骤。", "返回步骤", closeStepCorrection)
                             }
                             "record" -> RecordingCaptureRoute(projects, pop, requestImport, openRecordedCandidates)
@@ -449,7 +449,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                             },
                                             onReviewedImage = { input ->
                                                 check(reviewQueue.getOrNull(reviewIndex) == item.id && preparedCandidate == item.id &&
-                                                    media.state.value.frameReviewId == item.id && input.source.sourceId == item.sourceId &&
+                                                    media.state.value.frameReviewId == item.id && input.source?.sourceId == item.sourceId &&
                                                     input.frameTimeUs == media.state.value.frame?.presentationTimeUs) {
                                                     "候选画面已变化，请返回重新选择。"
                                                 }

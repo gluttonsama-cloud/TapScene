@@ -167,7 +167,7 @@ object ReleaseStoreChecks {
         check(ViewerPackageCodec.writeScene(store.loadRelease(sealed.id)).contentEquals(originalScene))
         store.discardCandidate(survivor.id)
         check(store.listCandidates().isEmpty() && store.listReleases() == listOf(sealed))
-        check(File(context.noBackupFilesDir, input.source.privateRelativePath).isFile && input.file.isFile)
+        check(File(context.noBackupFilesDir, checkNotNull(input.source).privateRelativePath).isFile && input.file.isFile)
         store.deleteRelease(sealed.id)
         check(store.listReleases().isEmpty())
         val imported = store.importPackage(ByteArrayInputStream(packageBytes))

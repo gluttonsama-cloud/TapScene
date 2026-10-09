@@ -231,7 +231,7 @@ object AuthoredPathChecks {
             try {
                 legacyDdl.forEach(db::execSQL)
                 db.execSQL("INSERT INTO projects VALUES(?,?,?,?,?,?,?)", arrayOf(p, "Legacy", "Original goal", 11L, 12L, 9L, stepIds[0]))
-                val source = input.source
+                val source = checkNotNull(input.source)
                 val json = JSONObject().apply {
                     put("id", source.sourceId); put("path", source.privateRelativePath); put("name", source.displayName)
                     put("mime", source.metadata.mime); put("bytes", source.metadata.byteLength); put("sha256", source.metadata.sha256)
@@ -254,7 +254,7 @@ object AuthoredPathChecks {
         }
         return ProjectSnapshot(ProjectSummary(p, "Legacy", "Original goal", 9L, 12L, 2, stepIds[0]),
             stepIds.mapIndexed { index, stepId -> ProjectStep(stepId, "Legacy $index", "Original description", index, false,
-                assets[index], input.source, 100_000L, 1_000L, emptyList(), if (index == 0) listOf(hotspot) else emptyList(), "legacy-$index") })
+                assets[index], checkNotNull(input.source), 100_000L, 1_000L, emptyList(), if (index == 0) listOf(hotspot) else emptyList(), "legacy-$index") })
     }
 
     private suspend fun fixture(context: Context): ReviewedStepInput {
