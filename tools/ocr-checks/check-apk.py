@@ -20,10 +20,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("apk", type=Path)
     parser.add_argument("--readelf", required=True)
+    parser.add_argument("--abis", nargs="+", choices=sorted(ABIS), default=sorted(ABIS))
     args = parser.parse_args()
+    packaged_abis = set(args.abis)
     lock = json.loads((ROOT / "tools/ocr-native/dependencies.lock.json").read_text())
     apk_size = args.apk.stat().st_size
-    assert apk_size <= 200 * 1024 * 1024, "Universal preview APK exceeds the 200 MiB universal build budget"
+    budget_mib = 80 if len(packaged_abis) == 1 else 200
+    assert apk_size <= budget_mib * 1024 * 1024, f"Preview APK exceeds the {budget_mib} MiB packaging budget"
     with zipfile.ZipFile(args.apk) as archive, args.apk.open("rb") as apk, tempfile.TemporaryDirectory() as directory:
         names = archive.namelist()
         assert len(names) == len(set(names)), "Duplicate APK entries"
@@ -36,11 +39,14 @@ def main():
         for license_file in (ROOT / "tools/ocr-native/licenses").iterdir():
             if license_file.is_file():
                 assert archive.read("assets/ocr/licenses/" + license_file.name) == license_file.read_bytes()
+        assert {name.split("/")[1] for name in names if name.startswith("lib/") and name.endswith(".so")} == packaged_abis
         libraries = [name for name in names if name.endswith(("/libtapscene_ocr.so", "/libonnxruntime.so"))]
         for library in ("libtapscene_ocr.so", "libonnxruntime.so"):
-            assert {name.split("/")[1] for name in libraries if name.endswith("/" + library)} == ABIS
-        assert len(libraries) == 2 * len(ABIS)
+            assert {name.split("/")[1] for name in libraries if name.endswith("/" + library)} == packaged_abis
+        assert len(libraries) == 2 * len(packaged_abis)
         for item in lock["ort"]["native"]:
+            if item["path"].split("/")[1] not in packaged_abis:
+                continue
             data = archive.read("lib/" + item["path"].removeprefix("jni/"))
             assert len(data) == item["bytes"] and hashlib.sha256(data).hexdigest() == item["sha256"]
         total_native = 0
@@ -67,7 +73,7 @@ def main():
             assert alignments and all(value >= 16384 for value in alignments), "ELF LOAD alignment below 16 KiB"
             print(f"{name}: {info.file_size} bytes; allowed system dependencies; aligned ELF and ZIP entry")
     model_size = sum(item["bytes"] for item in lock["models"]["files"])
-    print(f"OCR_APK_INSPECTION_OK apk_bytes={apk_size} models_bytes={model_size} native_bytes={total_native}")
+    print(f"OCR_APK_INSPECTION_OK abis={','.join(sorted(packaged_abis))} apk_bytes={apk_size} models_bytes={model_size} native_bytes={total_native}")
     print("Build inspection only. Native loading, memory and recognition speed still require Android devices.")
 
 

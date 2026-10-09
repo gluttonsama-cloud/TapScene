@@ -5,6 +5,15 @@ plugins {
     id("com.android.compose.screenshot")
 }
 
+// Phone delivery stays small; emulator/universal packages are explicit build targets.
+val supportedAbis = listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+val requestedAbi = providers.gradleProperty("tapsceneAbi").orElse("arm64-v8a").get()
+val packagedAbis = when (requestedAbi) {
+    "universal" -> supportedAbis
+    in supportedAbis -> listOf(requestedAbi)
+    else -> throw GradleException("tapsceneAbi must be one supported ABI or universal")
+}
+
 android {
     namespace = "com.tapscene"
     compileSdk = 36
@@ -15,11 +24,11 @@ android {
         applicationId = "com.tapscene"
         minSdk = 26
         targetSdk = 36
-        versionCode = 9
+        versionCode = 10
         versionName = "0.7.0-ocr-dev"
         testInstrumentationRunner = "com.tapscene.media.MediaCompatibilityInstrumentation"
         manifestPlaceholders["appLabel"] = "TapScene"
-        ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64") }
+        ndk { abiFilters += packagedAbis }
         externalNativeBuild {
             cmake {
                 arguments += listOf("-DANDROID_STL=c++_static", "-DCMAKE_BUILD_TYPE=Release",

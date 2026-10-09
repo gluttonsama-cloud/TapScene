@@ -153,13 +153,13 @@ jobs:
             ${{ runner.temp }}/package-fixtures/synthetic.tapscene
           retention-days: 7
           if-no-files-found: error
-      - name: Build the side-by-side preview and run lint
+      - name: Build the arm64 phone preview and run lint
         if: steps.scope.outputs.android == 'true'
-        run: gradle -p android --no-daemon --max-workers=2 -PcompatibilityPreview=true :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+        run: gradle -p android --no-daemon --max-workers=2 -PcompatibilityPreview=true -PtapsceneAbi=arm64-v8a :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
       - name: Inspect packaged OCR models, native dependencies, alignment and size
         if: steps.scope.outputs.android == 'true'
         run: |
-          python3 tools/ocr-checks/check-apk.py android/app/build/outputs/apk/debug/app-debug.apk \
+          python3 tools/ocr-checks/check-apk.py android/app/build/outputs/apk/debug/app-debug.apk --abis arm64-v8a \
             --readelf "$ANDROID_HOME/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
       - name: Check merged privacy settings
         if: steps.scope.outputs.android == 'true'
@@ -202,7 +202,7 @@ jobs:
         if: success() && steps.scope.outputs.android == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: tapscene-debug
+          name: tapscene-phone-arm64-v8a
           path: |
             android/app/build/outputs/apk/debug/app-debug.apk
             android/app/build/reports/lint-results-debug.html
@@ -263,6 +263,10 @@ jobs:
             echo "::warning::Android media runtime checks NOT RUN: no usable KVM. Build/lint are separate checks."
             exit 0
           fi
+          # Build x86 only for a runner that can actually execute this emulator.
+          # The arm64 phone artifact was already inspected and uploaded above.
+          gradle -p android --no-daemon --max-workers=2 -PcompatibilityPreview=true \
+            -PtapsceneAbi=x86_64 :app:assembleDebug :app:assembleDebugAndroidTest
           # adb and emulator must use the same standard key/preferences directory.
           export ANDROID_USER_HOME="$HOME/.android"
           export ANDROID_AVD_HOME="$RUNNER_TEMP/android-avd"

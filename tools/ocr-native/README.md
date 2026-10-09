@@ -73,6 +73,12 @@ OpenCV into `libtapscene_ocr.so`. Gradle packages the imported runtime; no Gradl
 ORT/OpenCV Java dependency is needed. The wrapper requests 16 KiB ELF alignment.
 Each final packaged library and APK ZIP alignment must still be measured.
 
+The default phone APK contains `arm64-v8a` only. Use
+`-PtapsceneAbi=universal` for all four ABIs or `-PtapsceneAbi=x86_64` for an
+emulator build. These are Gradle/NDK packaging targets from the same sources;
+no library is removed from an already-built APK. The package ID and signing
+identity are shared, and architecture must match the receiving device.
+
 ```
 cmake -S android/app/src/main/cpp -B android/app/build/ocr-host \
   -DCMAKE_BUILD_TYPE=Release -DTAPSCENE_HOST_TEST=ON
