@@ -117,16 +117,25 @@ class ProjectStore(context: Context) {
         validateInput(frozen)
         val assetId = newId()
         val relativePath = assetPath(projectId, assetId)
-        // Each invocation has its own exclusive directory. No cancellation sweep can touch
-        // another running save, a prior saved image, or the caller's candidate file.
-        val stagingRoot = privateDirectory(File(root, "project-staging"), root)
+        // Register before creating any owned file. A killed process therefore leaves an exact
+        // recovery record, not an untracked partial image. Active IDs protect concurrent stores
+        // in this process; a fresh process starts with no active IDs and can recover the journal.
+        access { db ->
+            transaction(db) {
+                db.insertOrThrow("asset_imports", null, ContentValues().apply {
+                    put("project_id", projectId); put("asset_id", assetId)
+                })
+            }
+            activeImports.add(importKey(assetId))
+        }
+        val stagingRoot = File(root, "project-staging")
         val operationDirectory = File(stagingRoot, assetId)
-        check(operationDirectory.mkdir()) { "无法建立步骤暂存目录，请重试。" }
         val temporary = File(operationDirectory, "candidate.part")
-        var finalFile: File? = null
         var committed = false
         var failure: Throwable? = null
         try {
+            privateDirectory(stagingRoot, root)
+            check(operationDirectory.mkdir()) { "无法建立步骤暂存目录，请重试。" }
             val owner = currentCoroutineContext()
             val digest = MessageDigest.getInstance("SHA-256")
             var byteLength = 0L
@@ -175,7 +184,6 @@ class ProjectStore(context: Context) {
                         val destination = File(directory, "$assetId.png")
                         check(!destination.exists()) { "步骤文件名称冲突，请重试。" }
                         Files.move(temporary.toPath(), destination.toPath(), StandardCopyOption.ATOMIC_MOVE)
-                        finalFile = destination
                         syncDirectory(directory)
                         db.insertOrThrow("local_assets", null, ContentValues().apply {
                             put("asset_id", assetId); put("project_id", projectId)
@@ -207,19 +215,12 @@ class ProjectStore(context: Context) {
             failure = error
             throw error
         } finally {
-            val cleanup = runCatching {
-                if (!committed && finalFile != null) {
-                    val unreferenced = synchronized(lock) {
-                        runCatching { count(helper.writableDatabase, "local_assets", "relative_path=?", relativePath) == 0 }
-                            .getOrDefault(false)
-                    }
-                    if (unreferenced) finalFile?.let {
-                        check(it.delete() || !it.exists()) { "未提交步骤文件清理失败。" }
-                    }
-                }
-                check(temporary.delete() || !temporary.exists()) { "步骤暂存文件清理失败。" }
-                check(operationDirectory.delete() || !operationDirectory.exists()) { "步骤暂存目录清理失败。" }
-            }.exceptionOrNull()
+            val cleanup = synchronized(lock) {
+                activeImports.remove(importKey(assetId))
+                // Consult the durable reference, including when endTransaction's result was
+                // uncertain. Cleanup errors retain the journal for the next store operation.
+                runCatching { cleanupImport(helper.writableDatabase, projectId, assetId) }.exceptionOrNull()
+            }
             // Never falsely report that the graph save failed after its commit point.
             if (cleanup != null && !committed) {
                 if (failure != null) failure.addSuppressed(cleanup) else throw cleanup
@@ -448,6 +449,7 @@ class ProjectStore(context: Context) {
 
     private fun <T> access(block: (SQLiteDatabase) -> T): T = synchronized(lock) {
         val db = helper.writableDatabase
+        recoverImports(db)
         cleanupPending(db)
         block(db)
     }
@@ -564,6 +566,52 @@ class ProjectStore(context: Context) {
         db.insertOrThrow("asset_cleanup", null, ContentValues().apply {
             put("project_id", projectId); put("relative_path", path)
         })
+    }
+
+    private fun importKey(assetId: String): String = "${root.path}/$assetId"
+
+    /** Called only under the process-shared lock. Recovery is journal-driven, never a sweep. */
+    private fun recoverImports(db: SQLiteDatabase) {
+        runCatching {
+            val imports = db.rawQuery("SELECT project_id,asset_id FROM asset_imports", null).use { cursor ->
+                buildList { while (cursor.moveToNext()) add(cursor.getString(0) to cursor.getString(1)) }
+            }
+            imports.forEach { (projectId, assetId) ->
+                if (importKey(assetId) !in activeImports) runCatching { cleanupImport(db, projectId, assetId) }
+            }
+        }
+    }
+
+    /** A failed deletion keeps its journal row. Committed final assets are always retained. */
+    private fun cleanupImport(db: SQLiteDatabase, projectId: String, assetId: String) {
+        validId(projectId)
+        validId(assetId)
+        check(importKey(assetId) !in activeImports) { "步骤保存仍在进行，不能清理。" }
+        val stagingRoot = File(root, "project-staging")
+        val directory = File(stagingRoot, assetId)
+        val temporary = File(directory, "candidate.part")
+        check(stagingRoot.canonicalFile == stagingRoot.absoluteFile &&
+            directory.canonicalFile == directory.absoluteFile &&
+            temporary.canonicalFile == temporary.absoluteFile) { "步骤暂存路径不受支持。" }
+        deleteImportFile(temporary)
+        if (directory.exists()) {
+            check(directory.isDirectory && directory.delete()) { "步骤暂存目录清理失败。" }
+            syncDirectory(stagingRoot)
+        }
+        val path = assetPath(projectId, assetId)
+        if (count(db, "local_assets", "relative_path=?", path) == 0) {
+            deleteImportFile(checkedAssetFile(projectId, path))
+        }
+        // Do not tie this row to a project FK: deleting a project during an active copy must
+        // leave the recovery record until that copy's private files have actually been removed.
+        db.delete("asset_imports", "project_id=? AND asset_id=?", arrayOf(projectId, assetId))
+    }
+
+    private fun deleteImportFile(file: File) {
+        if (file.exists()) {
+            check(file.isFile && file.delete()) { "步骤文件清理失败，将在下次打开时重试。" }
+            file.parentFile?.let(::syncDirectory)
+        }
     }
 
     private fun cleanupPending(db: SQLiteDatabase) {
@@ -729,6 +777,7 @@ class ProjectStore(context: Context) {
                 FOREIGN KEY(project_id,to_state_id) REFERENCES states(project_id,state_id) DEFERRABLE INITIALLY DEFERRED
             )""")
             db.execSQL("CREATE TABLE asset_cleanup(project_id TEXT NOT NULL, relative_path TEXT PRIMARY KEY NOT NULL)")
+            db.execSQL("CREATE TABLE asset_imports(project_id TEXT NOT NULL, asset_id TEXT PRIMARY KEY NOT NULL)")
             db.execSQL("CREATE INDEX projects_updated ON projects(updated_at)")
             db.execSQL("CREATE INDEX states_order ON states(project_id,sort_order)")
             db.execSQL("CREATE INDEX states_source ON states(source_id)")
@@ -742,14 +791,19 @@ class ProjectStore(context: Context) {
 
     companion object {
         private val lock = Any()
+        /** Guarded by lock; shared across every store using the same app-private root. */
+        private val activeImports = mutableSetOf<String>()
         private val PNG_SIGNATURE = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10)
         private val SHA = Regex("[0-9a-fA-F]{64}")
         private const val MAX_PNG_BYTES = 50L * 1024 * 1024
         private const val MAX_IMAGE_PIXELS = 12_000_000L
         private const val SUMMARY_SQL = "SELECT p.*, (SELECT COUNT(*) FROM states s WHERE s.project_id=p.project_id) AS step_count FROM projects p"
         private fun syncDirectory(directory: File) {
-            val descriptor = Os.open(directory.path, OsConstants.O_RDONLY or OsConstants.O_DIRECTORY, 0)
-            try { Os.fsync(descriptor) } finally { Os.close(descriptor) }
+            val descriptor = Os.open(directory.path, OsConstants.O_RDONLY, 0)
+            try {
+                check(OsConstants.S_ISDIR(Os.fstat(descriptor).st_mode)) { "步骤资产目录无效。" }
+                Os.fsync(descriptor)
+            } finally { Os.close(descriptor) }
         }
         private fun newId() = UUID.randomUUID().toString()
         private fun validId(id: String) { require(runCatching { UUID.fromString(id).toString() == id }.getOrDefault(false)) { "项目对象标识无效。" } }

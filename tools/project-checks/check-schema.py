@@ -21,12 +21,14 @@ hotspot('p','a-to-b','a','b');hotspot('p','b-to-a','b','a');hotspot('p','a-self'
 c.commit(); assert not list(c.execute('PRAGMA foreign_key_check'))
 # The actual project cascade leaves other projects and the queued paths alone.
 c.execute("INSERT INTO asset_cleanup SELECT project_id,relative_path FROM local_assets WHERE project_id='p'")
+c.execute("INSERT INTO asset_imports VALUES('p','pending-import')")
 c.execute("UPDATE projects SET start_state_id=NULL WHERE project_id='p'")
 c.execute("DELETE FROM projects WHERE project_id='p'");c.commit()
 assert c.execute('SELECT COUNT(*) FROM states').fetchone()[0]==1
 assert c.execute('SELECT COUNT(*) FROM hotspots').fetchone()[0]==0
 assert c.execute('SELECT COUNT(*) FROM edges').fetchone()[0]==0
 assert c.execute('SELECT COUNT(*) FROM asset_cleanup').fetchone()[0]==2
+assert list(c.execute('SELECT project_id,asset_id FROM asset_imports'))==[('p','pending-import')]
 assert not list(c.execute('PRAGMA foreign_key_check'))
 print('PASS project cascade: own graph/assets only; cleanup journal survives; other project intact')
 project('p');step('p','a');step('p','b');c.commit()

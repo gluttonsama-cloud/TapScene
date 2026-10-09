@@ -75,6 +75,11 @@ object ProjectEditingChecks {
         val source = syntheticSource(root)
         val sourceFile = File(root, source.privateRelativePath)
         val originalDigest = sha256(sourceFile)
+        val retainedDraft = SourceDraft(source, frameTimeUs = 100_000L)
+        WorkspaceStore(context, id).write(listOf(retainedDraft))
+        val beforeDeletionWorkspaces = WorkspaceStore.retainedWorkspaces(context, setOf(id, otherId))
+        check(beforeDeletionWorkspaces.none { it.projectId == id })
+        check(beforeDeletionWorkspaces.single { it.projectId == null }.sourceCount == 0)
         val plain = generatedInput(context, source, emptyList())
         val masks = listOf(OpaqueMask(0.25f, 0.25f, 0.75f, 0.75f))
         val masked = generatedInput(context, source, masks)
@@ -103,6 +108,9 @@ object ProjectEditingChecks {
         }
         checkUnchangedInputs(sourceFile, originalDigest, plain, masked, anotherPlain)
         status("PASS project PNGs: real SafeMediaWriter output, empty/burned masks, copied assets and retained source/candidates")
+        checkSeededImportRecovery(context, store, id, a, plain)
+        checkUnchangedInputs(sourceFile, originalDigest, plain, masked, anotherPlain)
+        status("PASS project recovery: seeded orphan journal removes only owned staging/uncommitted PNG; committed PNG and graph remain intact")
 
         val rect = OpaqueMask(0.10f, 0.20f, 0.60f, 0.70f)
         var snapshot = store.saveHotspot(id, a.id, label = "前往 B", rect = rect, targetStepId = b.id)
@@ -170,7 +178,7 @@ object ProjectEditingChecks {
         checkCancellationBoundaries(store, id, cancellationInput, root)
         checkUnchangedInputs(sourceFile, originalDigest, plain, masked, anotherPlain, cancellationInput)
         status("PASS project save boundaries: wrong SHA leaves no DB/staging/asset residue; pre-cancel rejects, post-return cancel retains commit, same-capture retry is idempotent")
-        status("NOT_COVERED project save: dispatcher-return cancellation race and process-death recovery require separate fault injection/device checks")
+        status("NOT_COVERED project save: dispatcher-return cancellation race and actual process-kill timing require separate fault injection/device checks")
 
         // A corrupted derived file must fail closed, never substitute the original source.
         val derived = store.resolveAsset(otherId, d.id)
@@ -199,13 +207,54 @@ object ProjectEditingChecks {
         check(emptied.steps.isEmpty() && emptied.project.startStepId == null && emptied.project.stepCount == 0)
         check(store.isSourceReferenced(source.sourceId)) { "Other project's source reference was removed" }
         check(store.deleteProject(id).stepCount == 0 && store.readProject(id) == null)
+        val retained = WorkspaceStore.retainedWorkspaces(context, setOf(otherId)).single { it.projectId == id }
+        check(retained.sourceCount == 1 && retained.label == source.displayName)
+        check(WorkspaceStore(context, retained.projectId).read() == listOf(retainedDraft)) {
+            "Deleted project's retained media is no longer reachable"
+        }
+        check(WorkspaceStore(context).read().isEmpty()) { "Retained media changed the legacy workspace" }
         val otherDeletion = store.deleteProject(otherId)
         check(otherDeletion.stepCount == 1 && otherDeletion.pendingAssetCleanupCount == 0)
         check(store.readProject(otherId) == null && store.listProjects().isEmpty())
         check(!store.isSourceReferenced(source.sourceId) && assetFiles(root).isEmpty())
         checkUnchangedInputs(sourceFile, originalDigest, plain, masked, anotherPlain, cancellationInput)
         checkDatabaseEmptyAndConsistent(root)
-        status("PASS project deletion: incoming/outgoing/self-loop cleanup, start repair, derived-only failure and source retention")
+        status("PASS project deletion: incoming/outgoing/self-loop cleanup, start repair, derived-only failure and reachable retained media")
+    }
+
+    /** Seed durable crash leftovers; this is recovery-path coverage, not a process-kill test. */
+    private fun checkSeededImportRecovery(context: Context, store: ProjectStore, projectId: String,
+        committed: ProjectStep, input: ReviewedStepInput) {
+        val root = context.noBackupFilesDir
+        val before = checkNotNull(store.readProject(projectId))
+        val beforeFiles = assetFiles(root)
+        val committedFile = store.resolveAsset(projectId, committed.id)
+        val orphanId = UUID.randomUUID().toString()
+        val ids = listOf(orphanId, committed.asset.id)
+        val database = File(root, "projects.sqlite")
+        SQLiteDatabase.openDatabase(database.path, null, SQLiteDatabase.OPEN_READWRITE).use { db ->
+            ids.forEach { assetId ->
+                db.execSQL("INSERT INTO asset_imports(project_id,asset_id) VALUES(?,?)", arrayOf(projectId, assetId))
+            }
+        }
+        val staging = ids.map { assetId ->
+            File(root, "project-staging/$assetId").also { directory ->
+                check(directory.mkdir())
+                input.file.copyTo(File(directory, "candidate.part"))
+            }
+        }
+        val orphan = File(root, "project-assets/$projectId/$orphanId.png")
+        input.file.copyTo(orphan)
+        check(ProjectStore(context).readProject(projectId) == before)
+        check(staging.none { it.exists() } && !orphan.exists()) { "Recovery left owned import files behind" }
+        check(committedFile.isFile && sha256(committedFile) == committed.asset.sha256) {
+            "Recovery removed or changed a committed asset"
+        }
+        check(assetFiles(root) == beforeFiles)
+        checkNoStaging(root)
+        SQLiteDatabase.openDatabase(database.path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+            db.rawQuery("SELECT COUNT(*) FROM asset_imports", null).use { check(it.moveToFirst() && it.getInt(0) == 0) }
+        }
     }
 
     private suspend fun checkCancellationBoundaries(store: ProjectStore, id: String, input: ReviewedStepInput, root: File) = coroutineScope {
@@ -300,7 +349,7 @@ object ProjectEditingChecks {
         SQLiteDatabase.openDatabase(File(root, "projects.sqlite").path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
             db.rawQuery("PRAGMA foreign_key_check", null).use { check(!it.moveToFirst()) }
             db.rawQuery("PRAGMA integrity_check", null).use { check(it.moveToFirst() && it.getString(0) == "ok") }
-            for (table in listOf("projects", "states", "sources", "local_assets", "hotspots", "edges", "asset_cleanup")) {
+            for (table in listOf("projects", "states", "sources", "local_assets", "hotspots", "edges", "asset_cleanup", "asset_imports")) {
                 db.rawQuery("SELECT COUNT(*) FROM $table", null).use { check(it.moveToFirst() && it.getInt(0) == 0) }
             }
         }

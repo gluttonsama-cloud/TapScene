@@ -12,6 +12,8 @@ import com.tapscene.data.ProjectStep
 import com.tapscene.data.ProjectStore
 import com.tapscene.data.ProjectSummary
 import com.tapscene.data.ReviewedStepInput
+import com.tapscene.data.RetainedMediaWorkspace
+import com.tapscene.data.WorkspaceStore
 import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -57,6 +59,7 @@ data class PreviewState(
 
 data class ProjectUiState(
     val projects: List<ProjectSummary> = emptyList(),
+    val retainedMediaWorkspaces: List<RetainedMediaWorkspace> = emptyList(),
     val project: ProjectSnapshot? = null,
     val route: ProjectRoute = ProjectRoute.PROJECTS,
     val selectedStepId: String? = null,
@@ -95,7 +98,11 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         val baseStep: ProjectStep,
         val baseRevision: Long,
     )
-    private data class LoadedProjects(val summaries: List<ProjectSummary>, val selected: ProjectSnapshot?)
+    private data class LoadedProjects(
+        val summaries: List<ProjectSummary>,
+        val selected: ProjectSnapshot?,
+        val retainedMediaWorkspaces: List<RetainedMediaWorkspace>,
+    )
 
     init { reload() }
 
@@ -546,9 +553,12 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     private suspend fun refresh() {
         val selectedId = state.value.project?.project?.id
         val loaded = withContext(Dispatchers.IO) {
-            LoadedProjects(store.listProjects(), selectedId?.let { store.readProject(it) })
+            val summaries = store.listProjects()
+            LoadedProjects(summaries, selectedId?.let { store.readProject(it) },
+                WorkspaceStore.retainedWorkspaces(getApplication<Application>(), summaries.map { it.id }.toSet()))
         }
-        mutableState.update { it.copy(projects = loaded.summaries, loadFailed = false) }
+        mutableState.update { it.copy(projects = loaded.summaries,
+            retainedMediaWorkspaces = loaded.retainedMediaWorkspaces, loadFailed = false) }
         if (loaded.selected != null) applyProject(loaded.selected)
         else if (selectedId != null) {
             drafts.keys.removeAll { it.first == selectedId }

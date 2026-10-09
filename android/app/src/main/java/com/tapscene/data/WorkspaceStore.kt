@@ -13,6 +13,8 @@ import java.io.FileOutputStream
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 
+data class RetainedMediaWorkspace(val projectId: String?, val label: String, val sourceCount: Int)
+
 data class SourceDraft(
     val source: ImportedSource,
     val frameTimeUs: Long = 0,
@@ -137,5 +139,24 @@ class WorkspaceStore(context: Context, projectId: String? = null) {
         Unit
     }
 
-    companion object { private val lock = Any() }
+    companion object {
+        private val lock = Any()
+
+        /** Reuse existing records after project deletion; no new archive or duplicate media. */
+        fun retainedWorkspaces(context: Context, liveProjectIds: Set<String>): List<RetainedMediaWorkspace> = synchronized(lock) {
+            val root = context.noBackupFilesDir
+            val result = mutableListOf<RetainedMediaWorkspace>()
+            val legacy = runCatching { WorkspaceStore(context).read() }.getOrNull()
+            result += RetainedMediaWorkspace(null, "原素材工作台", legacy?.size ?: 0)
+            val pattern = Regex("project-media-([0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12})\\.json(?:\\.bak|\\.new)?")
+            val ids = root.listFiles().orEmpty().mapNotNull { pattern.matchEntire(it.name)?.groupValues?.get(1) }
+                .distinct().filterNot { it in liveProjectIds }.sorted()
+            ids.forEach { id ->
+                val drafts = runCatching { WorkspaceStore(context, id).read() }.getOrNull()
+                if (drafts == null) result += RetainedMediaWorkspace(id, "保留素材（记录待恢复）", 0)
+                else if (drafts.isNotEmpty()) result += RetainedMediaWorkspace(id, drafts.first().source.displayName, drafts.size)
+            }
+            result
+        }
+    }
 }

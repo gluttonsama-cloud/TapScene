@@ -92,7 +92,8 @@ fun ProjectScreen(projects: ProjectWorkspace, media: MediaWorkspace) {
     var confirmLeave by rememberSaveable { mutableStateOf(false) }
     var hotspotEditor by remember { mutableStateOf<ProjectHotspot?>(null) }
     var mediaError by remember { mutableStateOf<String?>(null) }
-    var showLegacyMedia by rememberSaveable { mutableStateOf(false) }
+    var showLegacyMedia by remember { mutableStateOf(false) }
+    var showRetainedMedia by remember { mutableStateOf(false) }
 
     val goBack: () -> Unit = {
         if (!state.busy) {
@@ -103,7 +104,7 @@ fun ProjectScreen(projects: ProjectWorkspace, media: MediaWorkspace) {
     BackHandler(enabled = state.route != ProjectRoute.PROJECTS && state.route != ProjectRoute.MEDIA) { goBack() }
 
     if (showLegacyMedia) {
-        MediaScreen(workspace = media, onBack = { showLegacyMedia = false })
+        MediaScreen(workspace = media, onBack = { showLegacyMedia = false; projects.reload() })
         return
     }
     val screenScroll = key(state.route, state.selectedStepId) { rememberScrollState() }
@@ -150,10 +151,7 @@ fun ProjectScreen(projects: ProjectWorkspace, media: MediaWorkspace) {
                         ProjectRoute.PROJECTS -> ProjectList(state,
                             onCreate = { newProject = true }, onOpen = projects::openProject,
                             onRename = { renaming = it }, onDelete = { deletingProject = it },
-                            onLegacyMedia = {
-                                if (media.activateProject(null)) { mediaError = null; showLegacyMedia = true }
-                                else mediaError = media.state.value.message ?: "素材仍在处理中，请稍后再试。"
-                            })
+                            onLegacyMedia = { mediaError = null; showRetainedMedia = true; projects.reload() })
                         ProjectRoute.STEPS -> state.project?.let { project ->
                             StepList(project, state, projects,
                                 onRename = { renaming = project.project }, onDelete = { deletingStep = it },
@@ -176,6 +174,32 @@ fun ProjectScreen(projects: ProjectWorkspace, media: MediaWorkspace) {
                 }
             }
         }
+        if (showRetainedMedia) AlertDialog(onDismissRequest = { showRetainedMedia = false },
+            title = { Text("本机保留素材") },
+            text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("这里保留旧素材工作台和已删除项目的原录屏，可打开后逐条管理。", style = MaterialTheme.typography.bodyMedium)
+                if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                mediaError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                if (!state.busy && state.loadFailed) Text("暂时无法读取素材列表，请关闭后重新读取项目。")
+                state.retainedMediaWorkspaces.forEach { entry ->
+                    OutlinedButton(onClick = {
+                        if (media.activateProject(entry.projectId)) {
+                            mediaError = null
+                            showRetainedMedia = false
+                            showLegacyMedia = true
+                        } else mediaError = media.state.value.message ?: "素材仍在处理中，请稍后再试。"
+                    }, enabled = !state.busy && !state.loadFailed,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                        Column(Modifier.fillMaxWidth()) {
+                            Text(entry.label)
+                            Text("${entry.sourceCount} 段原录屏", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+                if (!state.busy && !state.loadFailed && state.retainedMediaWorkspaces.isEmpty()) Text("没有保留素材。")
+            } },
+            confirmButton = { TextButton(onClick = { showRetainedMedia = false },
+                modifier = Modifier.heightIn(min = 48.dp)) { Text("关闭") } })
         if (newProject) ProjectNameDialog(title = "新建项目", showGoal = true,
             initialTitle = "", initialGoal = "", enabled = !state.busy,
             onDismiss = { newProject = false }, onConfirm = { title, goal ->
@@ -190,7 +214,7 @@ fun ProjectScreen(projects: ProjectWorkspace, media: MediaWorkspace) {
         deletingProject?.let { item ->
             AlertDialog(onDismissRequest = { deletingProject = null },
                 title = { Text("删除“${item.title}”？") },
-                text = { Text("本机的项目、${item.stepCount} 个步骤、热点和项目图片将被删除，无法撤销。共享的原录屏和已经导出的文件会保留。") },
+                text = { Text("本机的项目、${item.stepCount} 个步骤、热点和项目图片将被删除，无法撤销。原录屏和已经导出的文件会保留。原录屏仍占用本机空间，可从首页“本机保留素材”单独管理。") },
                 confirmButton = { TextButton(onClick = { deletingProject = null; projects.deleteProject(item.id) },
                     enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("删除项目") } },
                 dismissButton = { TextButton(onClick = { deletingProject = null }, modifier = Modifier.heightIn(min = 48.dp)) { Text("取消") } })
@@ -249,7 +273,7 @@ private fun ProjectList(state: ProjectUiState, onCreate: () -> Unit, onOpen: (St
     Button(onClick = onCreate, enabled = !state.busy && !state.loadFailed,
         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("新建项目") }
     TextButton(onClick = onLegacyMedia, enabled = !state.busy,
-        modifier = Modifier.heightIn(min = 48.dp)) { Text("原素材工作台") }
+        modifier = Modifier.heightIn(min = 48.dp)) { Text("本机保留素材") }
     if (state.projects.isEmpty() && !state.busy && !state.loadFailed) {
         Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
             Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -429,25 +453,26 @@ private fun PreviewContent(state: ProjectUiState, workspace: ProjectWorkspace) {
     val preview = state.preview ?: return
     val project = state.project ?: return
     val step = project.steps.firstOrNull { it.id == preview.currentStepId } ?: return
+    Text(step.title, style = MaterialTheme.typography.headlineSmall)
+    if (step.description.isNotBlank()) Text(step.description, style = MaterialTheme.typography.bodyLarge)
+    state.bitmap?.let { bitmap ->
+        SafeStepCanvas(bitmap, if (preview.ended) emptyList() else step.hotspots,
+            enabled = !state.busy && !preview.ended, onTap = workspace::tapPreview)
+    } ?: run {
+        if (!state.busy) Text("步骤图片无法读取，当前不能点击画面。", color = MaterialTheme.colorScheme.error)
+    }
     if (preview.ended) {
         Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
             Column(Modifier.fillMaxWidth().padding(28.dp), verticalArrangement = Arrangement.spacedBy(12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("演示结束", style = MaterialTheme.typography.headlineMedium)
-                Text(preview.endLabel ?: step.title, style = MaterialTheme.typography.bodyLarge)
+                preview.endLabel?.takeIf { it != step.title }?.let { label ->
+                    Text(label, style = MaterialTheme.typography.bodyLarge)
+                }
             }
         }
-        state.bitmap?.let { bitmap -> SafeStepCanvas(bitmap, emptyList(), enabled = false) }
     } else {
-        Text(step.title, style = MaterialTheme.typography.headlineSmall)
-        if (step.description.isNotBlank()) Text(step.description, style = MaterialTheme.typography.bodyLarge)
-        state.bitmap?.let { bitmap ->
-            SafeStepCanvas(bitmap, step.hotspots, enabled = !state.busy, onTap = workspace::tapPreview)
-        } ?: run {
-            if (!state.busy) Text("步骤图片无法读取，当前不能点击画面。", color = MaterialTheme.colorScheme.error)
-        }
-        if (step.isTerminal) Text("已到达终点", style = MaterialTheme.typography.titleMedium)
-        else if (step.hotspots.isEmpty()) Text("这一步还没有动作，可以回到编辑添加。")
+        if (step.hotspots.isEmpty()) Text("这一步还没有动作，可以回到编辑添加。")
         else {
             Text("选择动作", style = MaterialTheme.typography.titleMedium)
             step.hotspots.forEach { hotspot ->
