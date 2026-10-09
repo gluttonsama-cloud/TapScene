@@ -53,6 +53,7 @@ class MediaCompatibilityInstrumentation : Instrumentation() {
     }
 
     private suspend fun runChecks() {
+        com.tapscene.data.ProjectEditingChecks.run(targetContext, ::status)
         val outputRoot = File(targetContext.noBackupFilesDir, "media-checks-${UUID.randomUUID()}")
         check(outputRoot.mkdir()) { "Could not reserve private smoke-check directory" }
         val sources = mutableListOf<Fixture>()

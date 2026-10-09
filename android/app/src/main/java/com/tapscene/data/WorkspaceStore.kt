@@ -20,9 +20,12 @@ data class SourceDraft(
 )
 
 /** Media workbench state only. This is not the project's future graph database. */
-class WorkspaceStore(context: Context) {
+class WorkspaceStore(context: Context, projectId: String? = null) {
     private val root = context.noBackupFilesDir
-    private val state = AtomicFile(File(root, "media-workspace.json"))
+    private val state = AtomicFile(File(root, if (projectId == null) "media-workspace.json" else {
+        require(projectId.matches(Regex("[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}"))) { "项目标识无效" }
+        "project-media-$projectId.json"
+    }))
 
     fun read(): List<SourceDraft> = synchronized(lock) {
         // openRead restores the backup first on API 26. A missing base file alone can mean

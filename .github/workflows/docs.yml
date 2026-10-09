@@ -48,6 +48,8 @@ jobs:
           cache-disabled: true
       - name: Check and materialize real phone-media fixtures
         run: python3 tools/media-checks/materialize-fixtures.py "$RUNNER_TEMP/media-fixtures" --verify-media | tee "$RUNNER_TEMP/fixture-checks.txt"
+      - name: Check project graph schema invariants
+        run: python3 tools/project-checks/check-schema.py
       - name: Build the side-by-side preview and run lint
         run: gradle -p android --no-daemon -PcompatibilityPreview=true :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
       - name: Check merged privacy settings

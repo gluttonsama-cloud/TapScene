@@ -7,6 +7,8 @@ import android.net.Uri
 import android.provider.DocumentsContract
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.tapscene.data.ProjectStore
+import com.tapscene.data.ReviewedStepInput
 import com.tapscene.data.SourceDraft
 import com.tapscene.data.WorkspaceStore
 import com.tapscene.media.DecodedFrame
@@ -52,7 +54,9 @@ data class WorkspaceUiState(
 
 class MediaWorkspace(application: Application) : AndroidViewModel(application) {
     private val app = application
-    private val store = WorkspaceStore(app)
+    private var store = WorkspaceStore(app)
+    private val projectStore = ProjectStore(app)
+    private var activeProjectId: String? = null
     private val importer = SourceImporter(app)
     private val decoder = VideoFrameDecoder(app)
     private val writer = SafeMediaWriter(app)
@@ -67,6 +71,44 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
     init {
         synchronized(activeSessions) { activeSessions.add(sessionId) }
         reload()
+    }
+
+    /** Separate source budgets/drafts per project; null retains the earlier media-only workspace. */
+    fun activateProject(projectId: String?): Boolean {
+        if (state.value.busy || savePickerPending || !requireSavedEdits()) return false
+        if (activeProjectId == projectId) return true
+        val nextStore = WorkspaceStore(app, projectId)
+        invalidateCandidate()
+        activeProjectId = projectId
+        store = nextStore
+        mutableState.value = WorkspaceUiState()
+        reload()
+        return true
+    }
+
+    /** The callback runs while this workspace's operation lock owns the reviewed candidate. */
+    fun saveReviewedImage(commit: suspend (ReviewedStepInput) -> Unit) {
+        val snapshot = state.value
+        val candidate = snapshot.candidate
+        val source = snapshot.selected
+        val frame = snapshot.frame
+        if (snapshot.busy || savePickerPending || snapshot.unsavedEdits ||
+            candidate == null || candidate.mimeType != "image/png" || source == null || frame == null ||
+            snapshot.reviewedDigest != candidate.sha256
+        ) {
+            message("请先生成并复核实际图片，再保存为步骤")
+            return
+        }
+        execute("保存为项目步骤") {
+            check(state.value.candidate?.sha256 == candidate.sha256 &&
+                state.value.reviewedDigest == candidate.sha256) { "复核已变化" }
+            val input = ReviewedStepInput(candidate.file, candidate.sha256, candidate.width, candidate.height,
+                source.source, frame.presentationTimeUs, frame.timePrecisionUs, source.masks.toList())
+            commit(input)
+            // The store owns a separately verified persistent copy, not this temporary file.
+            invalidateCandidate()
+            message("已保存为项目步骤")
+        }
     }
 
     fun reload() = execute("读取已保存素材") {
@@ -298,6 +340,10 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
         if (!requireSavedEdits()) return
         val selected = state.value.selected ?: return
         execute("删除选定素材") {
+            if (withContext(Dispatchers.IO) { projectStore.isSourceReferenced(selected.source.sourceId) }) {
+                message("项目步骤仍引用这段录屏，请先删除相关步骤或项目；原片已保留")
+                return@execute
+            }
             invalidateCandidate()
             mutableState.update { it.copy(frame = null) }
             val drafts = state.value.drafts.filterNot { it.source.sourceId == selected.source.sourceId }
