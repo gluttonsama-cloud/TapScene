@@ -52,7 +52,7 @@
 ### R10 PR 批准与发布证据不真实
 - 风险：单人项目写“一人独立批准”却由作者本人、同一身份的 AI 或机器人绕过；文档/编译通过被包装成 P0 已验收。GitHub 明确 PR 作者不能批准自己的 PR。[GitHub 审批规则](https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/approving-a-pull-request-with-required-reviews)
 - 约束：先声明多人或单维护者治理。多人要求非作者有效审批；单维护者明确记录自审、自动检查和针对该提交的风险接受，不能声称独立 review。AI 辅助评审不计真人独立审批。是否允许单维护者例外必须明确决定，不静默绕过 branch protection；安全/隐私高风险发布的独立审查要求另列为 release gate。
-- 门禁 G10：proposals PR 只标“方案待批准”；实现 PR 附 F/A 追踪、最终 commit SHA 与实际检查结果，分别列通过/失败/未运行。核实实际 ruleset、审批者与最新 SHA，提交变化后重新验证；产品 release 需 G01–G09、A01–A16、真机及兼容报告，不能以 draft PR 已创建替代验收完成。
+- 门禁 G10：proposals 保持真实待批准状态；实现 PR 保留 F/A 追踪，最终 commit SHA 与实际检查结果由 CI 日志或必要测试文档承载，区分通过/失败/未运行，不要求写入 PR 正文。核实实际 ruleset、审批者与最新 SHA，提交变化后重新验证；产品 release 需 G01–G09、A01–A16、真机及兼容报告，不能以 draft PR 已创建替代验收完成。
 
 ## 交叉审查结论
 

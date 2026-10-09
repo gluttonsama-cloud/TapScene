@@ -9,8 +9,8 @@
 - LICENSE 的 Git blob 为 261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64，本次逐字保留，未替用户选择或修改许可。
 - 分支读取返回 protected=false、保护摘要 enabled=false、required checks 为空；仓库 rulesets 读取返回空数组。详细 branch protection 读取返回 403，集成不具有该读取能力，所以完整保护细节仍未知。没有修改规则集、权限、可见性或安全设置。
 - 连接器身份经核查为 gluttonsama-cloud，仓库返回 push/admin 权限；写入仍受连接器实际权限限制。新提交由 GitHub 连接器产生，以返回的真实作者/提交者为准，不人工伪造身份或签名。
-- 核查时 Actions runs 为零，无法由此判断完整 Actions 权限/预算；workflows 设置列表不在连接器受支持读取端点内。实际可执行性由本 Draft PR 的运行结果验证，结果记录在 PR。
-- 原生 Draft 创建接口可用；只有创建后回读 draft=true 才算已建立。真实 PR 地址、head/base 和检查结果放在 PR 及交付记录，本文不预填未知编号。
+- 核查时 Actions runs 为零，无法由此判断完整 Actions 权限/预算；workflows 设置列表不在连接器受支持读取端点内。实际可执行性由本 Draft PR 的运行结果验证，结果保留在对应 Actions 日志。
+- 原生 Draft 创建接口可用；只有创建后回读 draft=true 才算已建立。真实 PR 地址与 head/base 使用 GitHub 元数据，检查结果保留在对应 Actions 日志，本文不预填未知编号。
 - 真实独立人类审查与维护者接受均尚未进行。AI 协助独立检查必须标为 AI 辅助，不制造 GitHub Approve。
 
 ## 来源与完整性
@@ -37,6 +37,6 @@
 
 - 本 PR 必须保持 Draft，直到维护者接受 Proposal 并明确授权下一步。没有本次合并或部署授权。
 - 即使文档检查通过，仍须在获明确授权后配置并实际验证 main 的 PR/ci/gate 强制保护；当前不能宣称服务器强制门禁已经存在。
-- Draft 的 ci/gate 应失败，防止把“可检查”当成“可合并”。准备转为 ready 时须重新核对当前 head/base、风险、ID、审查和全部适用检查。
+- Draft 的内容检查和 ci/gate 可以成功；GitHub 原生 Draft 状态仍阻止合并。准备转为 ready 时须核对当前 head/base、需求关联、审查与适用检查，不能把内容通过等同于已获合并授权。
 - A01–A16、G01–G09、V01–V07以及构建、真机、媒体、渲染、网络和恢复均未运行；G10 仅完成本次适用的文档与仓库核查部分。
 - Proposal 接受、合同冻结、真机媒体小样、工程骨架和功能实现仍为后续阶段。本 PR 合并也不自动批准架构中每个未知项。

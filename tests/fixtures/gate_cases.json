@@ -1,13 +1,6 @@
 [
   {
-    "name": "ready_success",
-    "event": {
-      "pull_request": {
-        "draft": false,
-        "title": "docs: F01 baseline",
-        "body": "Covers A01 and F01."
-      }
-    },
+    "name": "checks_success",
     "needs": {
       "docs-checks": {
         "result": "success"
@@ -17,13 +10,6 @@
   },
   {
     "name": "dependency_failure",
-    "event": {
-      "pull_request": {
-        "draft": false,
-        "title": "F01 docs",
-        "body": "A01 scope"
-      }
-    },
     "needs": {
       "docs-checks": {
         "result": "failure"
@@ -33,13 +19,6 @@
   },
   {
     "name": "dependency_cancelled",
-    "event": {
-      "pull_request": {
-        "draft": false,
-        "title": "F01 docs",
-        "body": "A01 scope"
-      }
-    },
     "needs": {
       "docs-checks": {
         "result": "cancelled"
@@ -49,13 +28,6 @@
   },
   {
     "name": "dependency_skipped",
-    "event": {
-      "pull_request": {
-        "draft": false,
-        "title": "F01 docs",
-        "body": "A01 scope"
-      }
-    },
     "needs": {
       "docs-checks": {
         "result": "skipped"
@@ -65,25 +37,11 @@
   },
   {
     "name": "dependency_missing",
-    "event": {
-      "pull_request": {
-        "draft": false,
-        "title": "F01 docs",
-        "body": "A01 scope"
-      }
-    },
     "needs": {},
     "pass": false
   },
   {
     "name": "dependency_neutral",
-    "event": {
-      "pull_request": {
-        "draft": false,
-        "title": "F01 docs",
-        "body": "A01 scope"
-      }
-    },
     "needs": {
       "docs-checks": {
         "result": "neutral"
@@ -93,13 +51,6 @@
   },
   {
     "name": "dependency_missing_result",
-    "event": {
-      "pull_request": {
-        "draft": false,
-        "title": "F01 docs",
-        "body": "A01 scope"
-      }
-    },
     "needs": {
       "docs-checks": {}
     },
@@ -107,13 +58,6 @@
   },
   {
     "name": "unexpected_dependency",
-    "event": {
-      "pull_request": {
-        "draft": false,
-        "title": "F01 docs",
-        "body": "A01 scope"
-      }
-    },
     "needs": {
       "docs-checks": {
         "result": "success"
@@ -125,200 +69,8 @@
     "pass": false
   },
   {
-    "name": "draft_pr",
-    "event": {
-      "pull_request": {
-        "draft": true,
-        "title": "F01 docs",
-        "body": "A01 scope"
-      }
-    },
-    "needs": {
-      "docs-checks": {
-        "result": "success"
-      }
-    },
-    "pass": false
-  },
-  {
-    "name": "missing_draft_flag",
-    "event": {
-      "pull_request": {
-        "title": "F01 docs",
-        "body": "A01 scope"
-      }
-    },
-    "needs": {
-      "docs-checks": {
-        "result": "success"
-      }
-    },
-    "pass": false
-  },
-  {
-    "name": "missing_requirement_ids",
-    "event": {
-      "pull_request": {
-        "draft": false,
-        "title": "docs baseline",
-        "body": "Proposal only"
-      }
-    },
-    "needs": {
-      "docs-checks": {
-        "result": "success"
-      }
-    },
-    "pass": false
-  },
-  {
-    "name": "missing_title_id",
-    "event": {
-      "pull_request": {
-        "draft": false,
-        "title": "docs baseline",
-        "body": "A01 scope"
-      }
-    },
-    "needs": {
-      "docs-checks": {
-        "result": "success"
-      }
-    },
-    "pass": false
-  },
-  {
-    "name": "missing_body_id",
-    "event": {
-      "pull_request": {
-        "draft": false,
-        "title": "F01 docs",
-        "body": null
-      }
-    },
-    "needs": {
-      "docs-checks": {
-        "result": "success"
-      }
-    },
-    "pass": false
-  },
-  {
-    "name": "invalid_id",
-    "event": {
-      "pull_request": {
-        "draft": false,
-        "title": "F30 docs",
-        "body": "A17 scope"
-      }
-    },
-    "needs": {
-      "docs-checks": {
-        "result": "success"
-      }
-    },
-    "pass": false
-  },
-  {
-    "name": "missing_event",
-    "event": {},
-    "needs": {
-      "docs-checks": {
-        "result": "success"
-      }
-    },
-    "pass": false
-  },
-  {
     "name": "malformed_needs",
-    "event": {
-      "pull_request": {
-        "draft": false,
-        "title": "F01 docs",
-        "body": "A01 scope"
-      }
-    },
     "needs": null,
-    "pass": false
-  },
-  {
-    "name": "registered_engineering",
-    "event": {
-      "pull_request": {
-        "draft": false,
-        "title": "ENG-001 docs",
-        "body": "ENG-001 scope"
-      }
-    },
-    "needs": {
-      "docs-checks": {
-        "result": "success"
-      }
-    },
-    "pass": true
-  },
-  {
-    "name": "unregistered_engineering",
-    "event": {
-      "pull_request": {
-        "draft": false,
-        "title": "ENG-999 docs",
-        "body": "ENG-999 scope"
-      }
-    },
-    "needs": {
-      "docs-checks": {
-        "result": "success"
-      }
-    },
-    "pass": false
-  },
-  {
-    "name": "unregistered_bug",
-    "event": {
-      "pull_request": {
-        "draft": false,
-        "title": "BUG-001 docs",
-        "body": "BUG-001 scope"
-      }
-    },
-    "needs": {
-      "docs-checks": {
-        "result": "success"
-      }
-    },
-    "pass": false
-  },
-  {
-    "name": "malformed_engineering",
-    "event": {
-      "pull_request": {
-        "draft": false,
-        "title": "ENG-1 docs",
-        "body": "ENG-1 scope"
-      }
-    },
-    "needs": {
-      "docs-checks": {
-        "result": "success"
-      }
-    },
-    "pass": false
-  },
-  {
-    "name": "unknown_with_valid_id",
-    "event": {
-      "pull_request": {
-        "draft": false,
-        "title": "F01 ENG-999 docs",
-        "body": "F01 ENG-999 scope"
-      }
-    },
-    "needs": {
-      "docs-checks": {
-        "result": "success"
-      }
-    },
     "pass": false
   }
 ]

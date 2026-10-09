@@ -18,10 +18,10 @@
 
 ```sh
 python3 scripts/check_docs.py
-python3 tests/test_checks.py
+python3 tests/test_checks.py  # 仅检查器、测试或 workflow 变更时
 ```
 
-Draft PR 可运行文档检查；汇总 ci/gate 会明确阻断 Draft 和缺失需求 ID 等情况。转为 ready、合并、变更保护、发布和部署均需各自授权。main 当前保护不足，详见入库记录，不能把 workflow 当成服务器强制保护。
+纯文档变更只运行文档检查；检查器、测试或 workflow 变化才运行检查器回归。ci/gate 汇总实际内容检查，原生 Draft 状态由 GitHub 阻止合并；仅修改标题、正文或 Draft 状态不重跑内容检查。转为 ready、合并、变更保护、发布和部署均需各自授权。main 当前保护不足，详见入库记录，不能把 workflow 当成服务器强制保护。
 
 ## 许可
 

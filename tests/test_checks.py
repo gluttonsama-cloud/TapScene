@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -243,75 +245,73 @@ class DocsChecksTest(unittest.TestCase):
 class GateChecksTest(unittest.TestCase):
     def test_negative_and_positive_fixtures(self):
         cases = json.loads((ROOT / "tests/fixtures/gate_cases.json").read_text())
-        self.assertGreaterEqual(len(cases), 16)
+        self.assertTrue(cases)
         self.assertEqual(len({case["name"] for case in cases}), len(cases))
         for case in cases:
             with self.subTest(case=case["name"]):
-                self.assertEqual(not gate.failures(case["event"], case["needs"], {"ENG-001"}), case["pass"])
+                self.assertEqual(not gate.failures(case["needs"]), case["pass"])
 
     def test_cli_fixture_exit_codes(self):
         cases = json.loads((ROOT / "tests/fixtures/gate_cases.json").read_text())
-        with tempfile.TemporaryDirectory() as root:
-            path = Path(root) / "event.json"
-            registry = Path(root) / "registry.json"
-            registry.write_text(json.dumps({"requirements": [{"id": "ENG-001", "title": "Synthetic fixture", "source": "scripts/check_gate.py", "status": "Proposed"}]}))
-            for case in cases:
-                with self.subTest(case=case["name"]):
-                    path.write_text(json.dumps(case["event"]))
-                    result = subprocess.run([sys.executable, str(ROOT / "scripts/check_gate.py"), "--event", str(path), "--registry", str(registry), "--needs-json", json.dumps(case["needs"])], capture_output=True, text=True)
-                    self.assertEqual(result.returncode, 0 if case["pass"] else 1, result.stdout + result.stderr)
-                    self.assertIn("PASS:" if case["pass"] else "FAIL:", result.stdout + result.stderr)
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                result = subprocess.run([sys.executable, str(ROOT / "scripts/check_gate.py"), "--needs-json", json.dumps(case["needs"])], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0 if case["pass"] else 1, result.stdout + result.stderr)
+                self.assertIn("PASS:" if case["pass"] else "FAIL:", result.stdout + result.stderr)
 
-    def test_malformed_event_and_needs(self):
-        with tempfile.TemporaryDirectory() as root:
-            path = Path(root) / "event.json"
-            registry = Path(root) / "registry.json"
-            registry.write_text(json.dumps({"requirements": [{"id": "ENG-001", "title": "Synthetic fixture", "source": "scripts/check_gate.py", "status": "Proposed"}]}))
-            for text, needs in (("{bad", "{}"), ("{}", "{bad")):
-                path.write_text(text)
-                result = subprocess.run([sys.executable, str(ROOT / "scripts/check_gate.py"), "--event", str(path), "--registry", str(registry), "--needs-json", needs], capture_output=True, text=True)
+    def test_malformed_and_missing_needs(self):
+        env = dict(os.environ)
+        env.pop("NEEDS_JSON", None)
+        for args in (["--needs-json", "{bad"], []):
+            with self.subTest(args=args):
+                result = subprocess.run([sys.executable, str(ROOT / "scripts/check_gate.py"), *args], env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 1)
-                self.assertIn("Cannot load event/results", result.stderr)
-
-    def test_cli_missing_duplicate_registry_fail_closed(self):
-        with tempfile.TemporaryDirectory() as root:
-            event = Path(root) / "event.json"
-            event.write_text(json.dumps({"pull_request": {"draft": False, "title": "ENG-001", "body": "ENG-001"}}))
-            registry = Path(root) / "registry.json"
-            command = [sys.executable, str(ROOT / "scripts/check_gate.py"), "--event", str(event), "--registry", str(registry), "--needs-json", '{"docs-checks":{"result":"success"}}']
-            missing = subprocess.run(command, capture_output=True, text=True)
-            self.assertEqual(missing.returncode, 1)
-            self.assertIn("invalid requirement registry", missing.stderr)
-            entry = {"id": "ENG-001", "title": "Fixture", "source": "scripts/check_gate.py", "status": "Proposed"}
-            registry.write_text(json.dumps({"requirements": [entry, entry]}))
-            duplicate = subprocess.run(command, capture_output=True, text=True)
-            self.assertEqual(duplicate.returncode, 1)
-            self.assertIn("duplicate registry ID", duplicate.stderr)
-
-    def test_false_like_draft_is_rejected(self):
-        for draft in (0, "false", None, True):
-            event = {"pull_request": {"draft": draft, "title": "F01", "body": "A01"}}
-            self.assertTrue(gate.failures(event, {"docs-checks": {"result": "success"}}, {"ENG-001"}))
-
-    def test_ids_need_real_boundaries_and_padding(self):
-        for invalid in ("F1", "F001", "A00", "XF01", "F01suffix", "A17"):
-            event = {"pull_request": {"draft": False, "title": invalid, "body": "A01"}}
-            self.assertTrue(gate.failures(event, {"docs-checks": {"result": "success"}}, {"ENG-001"}))
+                self.assertIn("Cannot load results", result.stderr)
 
 
 class WorkflowChecksTest(unittest.TestCase):
     def test_security_and_gate_wiring_contract(self):
         # This narrow structural contract checks our own simple YAML, not arbitrary YAML.
         text = (ROOT / ".github/workflows/docs.yml").read_text()
-        for required in ("  pull_request:\n", "permissions:\n  contents: read\n", "  cancel-in-progress: true\n", "    needs: [docs-checks]\n    if: ${{ always() }}\n", "    name: ci/gate\n", 'run: python3 scripts/check_gate.py --event "$GITHUB_EVENT_PATH"', "NEEDS_JSON: ${{ toJSON(needs) }}", "run: python3 tests/test_checks.py", "run: python3 scripts/check_docs.py"):
+        for required in ("  pull_request:\n", "permissions:\n  contents: read\n", "  cancel-in-progress: true\n", "    needs: [docs-checks]\n    if: ${{ always() }}\n", "    name: ci/gate\n", "run: python3 scripts/check_gate.py", "NEEDS_JSON: ${{ toJSON(needs) }}", "types: [opened, synchronize, reopened]", "fetch-depth: 0", "1) python3 tests/test_checks.py ;;", "run: python3 scripts/check_docs.py"):
             self.assertIn(required, text)
-        for forbidden in ("pull_request_target", "continue-on-error", "secrets.", "paths:", "paths-ignore:", "contents: write", "workflow_dispatch", "push:", "allow-unsafe-pr-checkout: true"):
+        for forbidden in ("pull_request_target", "continue-on-error", "secrets.", "paths:", "paths-ignore:", "contents: write", "workflow_dispatch", "push:", "allow-unsafe-pr-checkout: true", "edited", "ready_for_review", "converted_to_draft"):
             self.assertNotIn(forbidden, text)
         self.assertEqual(text.count("uses:"), 2)
         self.assertEqual(text.count("uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"), 2)
         self.assertEqual(text.count("persist-credentials: false"), 2)
         self.assertEqual(text.count("timeout-minutes: 5"), 2)
         self.assertEqual(text.count("runs-on: ubuntu-24.04"), 2)
+
+    def test_checker_scope_execution(self):
+        workflow = (ROOT / ".github/workflows/docs.yml").read_text()
+        step = workflow.split("      - name: Test affected checkers\n", 1)[1].split("      - name:", 1)[0]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            def git(*args):
+                return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
+            git("init", "-q")
+            git("config", "user.name", "Synthetic Test Fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            (root / "tests").mkdir()
+            (root / "tests/test_checks.py").write_text("print('checker regression executed')\n")
+            git("add", ".")
+            git("commit", "-qm", "Synthetic baseline")
+            for path, expected in (("README.md", False), ("scripts/checker.py", True), (".github/workflows/docs.yml", True)):
+                with self.subTest(path=path):
+                    base = git("rev-parse", "HEAD")
+                    target = root / path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text("Synthetic changed file\n")
+                    git("add", ".")
+                    git("commit", "-qm", "Synthetic scope change")
+                    result = subprocess.run(["bash", "-e", "-c", script], cwd=root, env={**os.environ, "BASE_SHA": base}, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual("checker regression executed" in result.stdout, expected)
+            result = subprocess.run(["bash", "-e", "-c", script], cwd=root, env={**os.environ, "BASE_SHA": "missing-base"}, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Cannot determine checker impact", result.stderr)
 
 
 if __name__ == "__main__":
