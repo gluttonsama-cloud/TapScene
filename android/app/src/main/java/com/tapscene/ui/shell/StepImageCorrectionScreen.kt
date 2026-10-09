@@ -30,6 +30,7 @@ import com.tapscene.media.OpaqueMask
 import com.tapscene.ui.FrameEditor
 import com.tapscene.ui.MaskDialog
 import com.tapscene.ui.WorkspaceUiState
+import com.tapscene.ui.ScreenshotEditorDraft
 import java.util.Locale
 
 enum class StepImageCorrectionMode(val label: String) {
@@ -57,33 +58,35 @@ fun StepImageCorrectionContent(
     initialMode: StepImageCorrectionMode,
     callbacks: CorrectionUiCallbacks,
     modifier: Modifier = Modifier,
+    screenshot: ScreenshotEditorDraft? = null,
 ) {
     val correction = state.correction
     val source = state.selected
     val frame = state.frame?.takeUnless { it.bitmap.isRecycled }
     val safeImage = state.safeImageDraft
-    val editableBitmap = if (safeImage != null) safeImage.bitmap?.takeUnless { it.isRecycled } else frame?.bitmap
+    val editableBitmap = screenshot?.bitmap?.takeUnless { it.isRecycled } ?: if (safeImage != null) safeImage.bitmap?.takeUnless { it.isRecycled } else frame?.bitmap
     val candidate = state.candidate?.takeIf { it.mimeType == "image/png" }
     val output = state.candidateImage?.takeUnless { it.isRecycled }
     val hasOutput = candidate != null && output != null
-    var mode by rememberSaveable(correction?.sessionId) { mutableStateOf(initialMode) }
-    var sourceMenu by remember(correction?.sessionId) { mutableStateOf(false) }
-    var maskDialog by remember(correction?.sessionId) { mutableStateOf(false) }
-    var timeDialog by remember(correction?.sessionId) { mutableStateOf(false) }
-    var displayedDigest by remember(correction?.sessionId, candidate?.sha256, output) { mutableStateOf<String?>(null) }
+    val sessionId = screenshot?.sessionId ?: correction?.sessionId
+    var mode by rememberSaveable(sessionId) { mutableStateOf(initialMode) }
+    var sourceMenu by remember(sessionId) { mutableStateOf(false) }
+    var maskDialog by remember(sessionId) { mutableStateOf(false) }
+    var timeDialog by remember(sessionId) { mutableStateOf(false) }
+    var displayedDigest by remember(sessionId, candidate?.sha256, output) { mutableStateOf<String?>(null) }
     val idle = !state.busy
     // Shared source-list metadata can fail while this step's own stored source is still usable.
-    val canEdit = idle && correction != null && !state.unsavedEdits
+    val canEdit = idle && (correction != null || screenshot != null) && !state.unsavedEdits
     val canSelectSource = canEdit && !state.loadFailed && state.drafts.isNotEmpty()
     val canEditFrame = canEdit && source != null && frame != null && safeImage == null
-    val canEditImage = canEdit && editableBitmap != null
+    val canEditImage = canEdit && editableBitmap != null && screenshot?.reviewLocked != true
     val canGenerate = canEditImage && (safeImage == null || safeImage.masks.isNotEmpty())
-    val canConfirm = canGenerate && mode == StepImageCorrectionMode.REVIEW && hasOutput &&
+    val canConfirm = (canGenerate || screenshot?.reviewLocked == true && idle) && mode == StepImageCorrectionMode.REVIEW && hasOutput &&
         displayedDigest == candidate?.sha256
-    val masks = safeImage?.masks ?: source?.masks.orEmpty()
+    val masks = screenshot?.masks ?: safeImage?.masks ?: source?.masks.orEmpty()
     val durationUs = source?.source?.metadata?.durationUs ?: 0L
     val lastTimeUs = (durationUs - 1L).coerceAtLeast(0L)
-    var requestedTime by remember(correction?.sessionId, source?.source?.sourceId, frame?.presentationTimeUs) {
+    var requestedTime by remember(sessionId, source?.source?.sourceId, frame?.presentationTimeUs) {
         mutableFloatStateOf((frame?.presentationTimeUs ?: source?.frameTimeUs ?: 0L).coerceIn(0L, lastTimeUs).toFloat())
     }
     val panelScroll = rememberScrollState()
@@ -97,7 +100,7 @@ fun StepImageCorrectionContent(
     LaunchedEffect(candidate?.sha256, output) {
         if (hasOutput) mode = StepImageCorrectionMode.REVIEW
     }
-    LaunchedEffect(correction?.sessionId, mode, candidate?.sha256, output) {
+    LaunchedEffect(sessionId, mode, candidate?.sha256, output) {
         displayedDigest = null
         panelScroll.scrollTo(0)
         if (mode == StepImageCorrectionMode.REVIEW && hasOutput) {
@@ -108,7 +111,7 @@ fun StepImageCorrectionContent(
     }
     LaunchedEffect(candidate, state.busy) {
         if (candidate == null && !state.busy && mode == StepImageCorrectionMode.REVIEW) {
-            mode = if (initialMode == StepImageCorrectionMode.MASK) initialMode else StepImageCorrectionMode.FRAME
+            mode = if (screenshot != null || initialMode == StepImageCorrectionMode.MASK) StepImageCorrectionMode.MASK else StepImageCorrectionMode.FRAME
         }
     }
     LaunchedEffect(state.busy) {
@@ -132,7 +135,7 @@ fun StepImageCorrectionContent(
     }
     val modeTabs: @Composable () -> Unit = {
         Row(Modifier.fillMaxWidth()) {
-            StepImageCorrectionMode.entries.forEach { item ->
+            StepImageCorrectionMode.entries.filter { screenshot == null || it != StepImageCorrectionMode.FRAME }.forEach { item ->
                 Column(Modifier.weight(1f)) {
                     Tab(selected = mode == item, onClick = { mode = item },
                         enabled = idle && when (item) {
@@ -177,28 +180,34 @@ fun StepImageCorrectionContent(
                 mode == StepImageCorrectionMode.REVIEW && hasOutput -> {
                     Text("${candidate!!.width} × ${candidate.height} 像素 · 实际生成图片",
                         style = MaterialTheme.typography.labelMedium)
-                    Text("热点与连线保留，请检查热点是否仍对齐。",
+                    if (screenshot == null) Text("热点与连线保留，请检查热点是否仍对齐。",
                         style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-                    Text(correctionImpactNote(correction?.regionCount ?: 0, correction?.transitionCount ?: 0),
+                    if (screenshot == null) Text(correctionImpactNote(correction?.regionCount ?: 0, correction?.transitionCount ?: 0),
                         style = MaterialTheme.typography.bodySmall, color = ShellColors.Accent)
-                    Text("检查完整画面的文字、边缘与遮挡；可双指放大。确认后替换当前步骤的安全图。",
+                    Text(if (screenshot != null) "检查完整画面的文字、边缘与遮挡；可双指放大。确认后${if (screenshot.creatingProject) "新建项目并" else ""}加入步骤。"
+                        else "检查完整画面的文字、边缘与遮挡；可双指放大。确认后替换当前步骤的安全图。",
                         style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                     TextButton(onClick = { mode = StepImageCorrectionMode.MASK }, enabled = canEditImage,
                         modifier = Modifier.heightIn(min = 48.dp)) { Text("继续调整遮挡") }
                 }
                 editableBitmap == null -> {
                     Text(when {
+                        screenshot != null && state.busy -> "正在读取并校验所选截图。"
+                        screenshot != null -> "截图未就绪，请重新选择 PNG 或 JPEG。"
                         safeImage != null && state.busy -> "正在核对当前正式图片的来源、摘要和尺寸。"
                         safeImage != null -> "安全底图未就绪，无法生成或保存。请重试读取，或返回步骤。"
                         source == null -> "这是安全图片步骤。可在当前安全画面上追加遮挡，也可选择本机录屏重新取帧。"
                         state.busy -> "本机原片正在读取，当前只展示已保存的安全图。"
                         else -> "原片未就绪，已保存安全图仍保留。可追加遮挡、重选本机录屏，或重试读取。"
                     }, style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-                    if (safeImage == null) Text("追加遮挡不会恢复原像素，旧遮挡不能移除。",
+                    if (safeImage == null && screenshot == null) Text("追加遮挡不会恢复原像素，旧遮挡不能移除。",
                         style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                 }
                 else -> {
-                    if (safeImage != null) {
+                    if (screenshot != null) {
+                        Text("可按需遮挡；无敏感内容也需生成并复核。透明区域已铺黑。",
+                            style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    } else if (safeImage != null) {
                         Text("${editableBitmap.width} × ${editableBitmap.height} 像素 · 已核对安全底图",
                             style = MaterialTheme.typography.labelMedium)
                     } else if (frame != null) {
@@ -243,14 +252,15 @@ fun StepImageCorrectionContent(
             when {
                 state.busy -> OutlinedButton(onClick = callbacks.onCancelTask,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("取消处理") }
-                editableBitmap == null && source == null && safeImage == null -> Button(onClick = callbacks.onUseSafeImage,
+                editableBitmap == null && source == null && safeImage == null && screenshot == null -> Button(onClick = callbacks.onUseSafeImage,
                     enabled = canEdit && correction?.safeImageBase != null,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("在安全画面上追加遮挡") }
                 editableBitmap == null || state.unsavedEdits -> OutlinedButton(onClick = callbacks.onRetry,
-                    enabled = correction != null, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("重试读取") }
+                    enabled = correction != null || screenshot != null, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (screenshot != null) "重新选择截图" else "重试读取") }
                 mode == StepImageCorrectionMode.REVIEW -> Button(onClick = {
                     if (canConfirm) candidate?.sha256?.let(callbacks.onConfirm)
-                }, enabled = canConfirm, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("确认并替换") }
+                }, enabled = canConfirm, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (screenshot?.reviewLocked == true) "原样重试确认" else if (screenshot != null)
+                    if (screenshot.creatingProject) "确认并创建项目" else "确认并加入" else "确认并替换") }
                 else -> Button(onClick = callbacks.onMakeImage, enabled = canGenerate,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("生成并复核") }
             }
@@ -267,13 +277,14 @@ fun StepImageCorrectionContent(
                 verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = back, enabled = idle, modifier = Modifier.heightIn(min = 48.dp)) { Text("返回") }
                 Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
-                    Text(if (mode == StepImageCorrectionMode.REVIEW) "复核替换画面" else "校正步骤画面",
+                    Text(if (screenshot != null) if (mode == StepImageCorrectionMode.REVIEW) "复核截图" else "导入截图"
+                        else if (mode == StepImageCorrectionMode.REVIEW) "复核替换画面" else "校正步骤画面",
                         style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(correction?.title?.ifBlank { "未命名步骤" } ?: "正在读取步骤",
+                    if (screenshot == null) Text(correction?.title?.ifBlank { "未命名步骤" } ?: "正在读取步骤",
                         style = MaterialTheme.typography.labelSmall, color = ShellColors.Muted,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                Text(if (mode == StepImageCorrectionMode.REVIEW) "实际 PNG" else if (safeImage != null) "安全底图" else if (frame != null) "本机私有" else "已保存安全图",
+                Text(if (mode == StepImageCorrectionMode.REVIEW) "实际 PNG" else if (safeImage != null) "安全底图" else if (frame != null || screenshot != null) "本机私有" else "已保存安全图",
                     Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.labelSmall, color = ShellColors.Muted)
             }
             HorizontalDivider(color = ShellColors.Divider)

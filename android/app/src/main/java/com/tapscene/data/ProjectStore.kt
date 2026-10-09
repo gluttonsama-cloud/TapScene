@@ -11,6 +11,9 @@ import android.system.Os
 import android.system.OsConstants
 import com.tapscene.media.MediaInputPolicy
 import com.tapscene.media.ImportedSource
+import com.tapscene.media.ImportedImageSource
+import com.tapscene.media.ImageSourceMetadata
+import com.tapscene.media.ScreenshotImporter
 import com.tapscene.media.OpaqueMask
 import com.tapscene.media.SafeMediaWriterValidation
 import com.tapscene.media.SourceMetadata
@@ -45,6 +48,19 @@ class ProjectStore(context: Context) {
     }
 
     fun readProject(projectId: String): ProjectSnapshot? = access { db -> snapshot(db, projectId) }
+
+    fun screenshotCount(projectId: String): Int = access { db ->
+        validId(projectId)
+        count(db, "image_sources", "project_id=?", projectId)
+    }
+
+    /** The new project and first reviewed screenshot become visible in the same transaction. */
+    suspend fun addReviewedScreenshot(projectId: String, input: ReviewedStepInput,
+        newProjectTitle: String? = null): ProjectSnapshot {
+        require(input.origin is StepOrigin.ImportedImage) { "请选择实际 PNG 或 JPEG 截图。" }
+        val title = newProjectTitle?.let { text(it, "项目名称", 120) }
+        return importReviewedStep(projectId, input, "截图", "", newId(), newProjectTitle = title)
+    }
 
     /** Start before reading/resuming drafts. Persisted generations reject writers from old editors,
      * even when they use another ProjectStore instance. This never changes the formal revision. */
@@ -129,7 +145,7 @@ class ProjectStore(context: Context) {
         }
     }
 
-    /** Source files are workspace-owned and are NEVER deleted by this store. */
+    /** Video sources remain workspace-owned. Unreferenced private screenshot sources are journal-cleaned. */
     fun deleteProject(projectId: String): ProjectDeletionResult = access { db ->
         // OCR is derived private source data, not a saved step or a sealed release. Revoke
         // live writers first so a cancelled analysis cannot recreate it after deletion.
@@ -138,11 +154,13 @@ class ProjectStore(context: Context) {
         val result = transaction(db) {
             val current = requireSnapshot(db, projectId)
             val hotspots = current.steps.sumOf { it.hotspots.size }
+            val imageSourceCount = count(db, "image_sources", "project_id=?", projectId)
             queueProjectAssets(db, projectId)
+            db.execSQL("INSERT OR IGNORE INTO image_source_cleanup(project_id,source_id,mime) SELECT project_id,source_id,mime FROM image_sources WHERE project_id=?", arrayOf(projectId))
             db.update("projects", ContentValues().apply { putNull("start_state_id") },
                 "project_id=?", arrayOf(projectId))
             db.delete("projects", "project_id=?", arrayOf(projectId))
-            ProjectDeletionResult(current.steps.size, hotspots, edgeCount(current), current.steps.size + transitions(current).size + current.steps.sumOf { step -> step.regions.count { it.asset != null } })
+            ProjectDeletionResult(current.steps.size, hotspots, edgeCount(current), current.steps.size + transitions(current).size + current.steps.sumOf { step -> step.regions.count { it.asset != null } } + imageSourceCount)
         }
         // Cleanup cannot turn a committed deletion into a reported failure. A journal row stays
         // until its exact, no-longer-referenced asset is gone, including across process restart.
@@ -173,16 +191,29 @@ class ProjectStore(context: Context) {
     }
 
     private suspend fun importReviewedStep(projectId: String, input: ReviewedStepInput, title: String,
-        description: String, stepId: String, replacing: Boolean = false, expectedRevision: Long? = null): ProjectSnapshot {
+        description: String, stepId: String, replacing: Boolean = false, expectedRevision: Long? = null,
+        newProjectTitle: String? = null): ProjectSnapshot {
         validId(projectId)
         validId(stepId)
         val cleanTitle = text(title, "步骤标题", 120)
         val cleanDescription = text(description, "步骤说明", 4_000, allowEmpty = true)
-        val frozen = input.copy(masks = input.masks.toList())
+        val originalImage = (input.origin as? StepOrigin.ImportedImage)?.source
+        val imageSource = originalImage?.let { it.copy(privateRelativePath = imageSourcePath(it.sourceId, it.metadata.mime)) }
+        val frozen = input.copy(masks = input.masks.toList(),
+            origin = imageSource?.let { StepOrigin.ImportedImage(it) } ?: input.origin)
+        require(newProjectTitle == null || imageSource != null && !replacing) { "新项目须包含已复核截图。" }
+        require(imageSource == null || !replacing) { "截图导入只会添加新的步骤。" }
         require(frozen.captureId.isNotBlank() && frozen.captureId.length <= 160 &&
             frozen.captureId.none { it.isISOControl() }) { "步骤保存令牌无效。" }
         val alreadySaved = access { db ->
-            val project = requireSnapshot(db, projectId)
+            val project = snapshot(db, projectId)
+            if (project == null) {
+                require(newProjectTitle != null) { "项目已不存在。" }
+                return@access null
+            }
+            if (newProjectTitle != null) require(project.steps.any { it.captureId == frozen.captureId }) { "项目身份已被占用。" }
+            if (imageSource != null) require(count(db, "image_sources", "project_id=?", projectId) < ProjectLimits.MAX_SCREENSHOTS ||
+                project.steps.any { it.captureId == frozen.captureId }) { "每个项目最多 20 张原截图，请先删除不再需要的截图步骤。" }
             if (replacing) {
                 require(project.steps.any { it.id == stepId }) { "待替换步骤已不存在。" }
                 require(project.steps.none { it.captureId == frozen.captureId && it.id != stepId }) { "复核令牌属于另一个步骤。" }
@@ -194,7 +225,7 @@ class ProjectStore(context: Context) {
             }
         }
         if (alreadySaved != null) return alreadySaved
-        validateInput(frozen)
+        validateInput(input.copy(masks = frozen.masks))
         val imageBase = (frozen.origin as? StepOrigin.Image)?.base
         require(imageBase == null || replacing && imageBase.projectId == projectId && imageBase.stepId == stepId &&
             imageBase.revision == expectedRevision) { "安全画面只可追加遮挡并替换所绑定的当前步骤。" }
@@ -207,6 +238,9 @@ class ProjectStore(context: Context) {
             transaction(db) {
                 db.insertOrThrow("asset_imports", null, ContentValues().apply {
                     put("project_id", projectId); put("asset_id", assetId)
+                })
+                if (imageSource != null) db.insertOrThrow("image_source_imports", null, ContentValues().apply {
+                    put("asset_id", assetId); put("source_id", imageSource.sourceId); put("mime", imageSource.metadata.mime)
                 })
             }
             activeImports.add(importKey(assetId))
@@ -252,6 +286,17 @@ class ProjectStore(context: Context) {
                 SafeMediaWriterValidation.verifyPngRedaction(temporary, baseCopy, frozen.width, frozen.height, frozen.masks)
                 check(baseCopy.delete()) { "安全底图暂存清理失败，请重试。" }
             }
+            if (imageSource != null && originalImage != null) {
+                val importer = ScreenshotImporter(app)
+                val sourceFile = importer.checkedSourceFile(originalImage)
+                val imageDirectory = privateImageDirectory(imageSource.sourceId)
+                val sourceCopy = File(imageDirectory, if (imageSource.metadata.mime == "image/png") "original.png" else "original.jpg")
+                check(!sourceCopy.exists()) { "截图来源身份冲突，请重新选择。" }
+                copyImageSource(sourceFile, sourceCopy, imageSource)
+                val normalized = importer.read(imageSource)
+                try { verifyScreenshotPixels(temporary, normalized, frozen.masks) }
+                finally { normalized.recycle() }
+            }
             // Verify the actual stored bytes again, rather than trusting candidate metadata.
             check(sha256(temporary) == frozen.sha256.lowercase()) { "步骤画面校验失败，请重新复核。" }
             owner.ensureActive()
@@ -259,6 +304,13 @@ class ProjectStore(context: Context) {
                 synchronized(lock) {
                     val db = helper.writableDatabase
                     val saved = transaction(db) {
+                        if (newProjectTitle != null && snapshot(db, projectId) == null) {
+                            val now = System.currentTimeMillis()
+                            db.insertOrThrow("projects", null, ContentValues().apply {
+                                put("project_id", projectId); put("title", newProjectTitle); put("goal", "")
+                                put("created_at", now); put("updated_at", now); put("draft_revision", 1L); putNull("start_state_id")
+                            })
+                        }
                         val current = requireSnapshot(db, projectId)
                         require(!replacing || current.steps.none { it.captureId == frozen.captureId && it.id != stepId }) {
                             "复核令牌属于另一个步骤。"
@@ -269,6 +321,18 @@ class ProjectStore(context: Context) {
                         require(replacing || current.steps.none { it.id == stepId }) { "这个步骤已经保存，请刷新后继续。" }
                         require(replacing || current.steps.size < ProjectLimits.MAX_STEPS) { "每个项目最多 40 个步骤。" }
                         if (imageBase != null) requireCurrentImageBase(db, imageBase)
+                        if (imageSource != null) {
+                            require(count(db, "image_sources", "project_id=?", projectId) < ProjectLimits.MAX_SCREENSHOTS) {
+                                "每个项目最多 20 张原截图，请先删除不再需要的截图步骤。"
+                            }
+                            check(sha256(ScreenshotImporter(app).checkedSourceFile(imageSource)) == imageSource.metadata.sha256) {
+                                "截图原图已改变，请重新选择。"
+                            }
+                            db.insertOrThrow("image_sources", null, ContentValues().apply {
+                                put("project_id", projectId); put("source_id", imageSource.sourceId)
+                                put("mime", imageSource.metadata.mime); put("source_json", imageSourceJson(imageSource).toString())
+                            })
+                        }
                         frozen.videoOrigin?.source?.let { source ->
                             val existingSource = readSource(db, projectId, source.sourceId)
                             check(existingSource == null || existingSource == source) {
@@ -295,6 +359,11 @@ class ProjectStore(context: Context) {
                             put("description", cleanDescription); put("is_terminal", if (previous?.isTerminal == true) 1 else 0)
                             put("input_asset_id", assetId)
                             putOrigin(frozen.origin)
+                            put("evidence_kind", when (frozen.origin) {
+                                is StepOrigin.ImportedImage -> "authored"
+                                is StepOrigin.Image -> requireNotNull(previous).evidenceKind
+                                is StepOrigin.VideoFrame -> "recorded"
+                            })
                             put("masks_json", masksJson(frozen.masks).toString())
                         }
                         if (previous == null) db.insertOrThrow("states", null, stateValues)
@@ -723,10 +792,10 @@ class ProjectStore(context: Context) {
                     "project_id=? AND state_id=?", arrayOf(projectId, item.id))
             }
             bump(db, projectId)
-            StepDeletionResult(requireSnapshot(db, projectId), impact, 1)
+            StepDeletionResult(requireSnapshot(db, projectId), impact, if (step.origin is StepOrigin.ImportedImage) 2 else 1)
         }
         cleanupPending(db)
-        result.copy(pendingAssetCleanupCount = pendingCleanupCount(db, projectId, 1))
+        result.copy(pendingAssetCleanupCount = pendingCleanupCount(db, projectId, result.pendingAssetCleanupCount))
     }
 
     fun saveHotspot(
@@ -1082,9 +1151,10 @@ class ProjectStore(context: Context) {
             if (it.moveToFirst()) summary(it) else null
         } ?: return null
         val steps = db.rawQuery("""
-            SELECT s.*, a.relative_path, a.sha256, a.byte_length, a.width, a.height, src.source_json
+            SELECT s.*, a.relative_path, a.sha256, a.byte_length, a.width, a.height, src.source_json, img.source_json AS image_source_json
             FROM states s JOIN local_assets a ON a.project_id=s.project_id AND a.asset_id=s.input_asset_id
             LEFT JOIN sources src ON src.project_id=s.project_id AND src.source_id=s.source_id
+            LEFT JOIN image_sources img ON img.project_id=s.project_id AND img.source_id=s.image_source_id
             WHERE s.project_id=? ORDER BY s.sort_order, s.state_id
         """.trimIndent(), arrayOf(projectId)).use { cursor ->
             buildList {
@@ -1095,7 +1165,7 @@ class ProjectStore(context: Context) {
                         sortOrder = cursor.int("sort_order"), isTerminal = cursor.int("is_terminal") == 1,
                         asset = StepAsset(cursor.string("input_asset_id"), cursor.string("relative_path"),
                             cursor.string("sha256"), cursor.long("byte_length"), cursor.int("width"), cursor.int("height")),
-                        origin = readOrigin(cursor),
+                        origin = readOrigin(cursor), evidenceKind = cursor.string("evidence_kind"),
                         masks = parseMasks(JSONArray(cursor.string("masks_json"))), hotspots = readHotspots(db, projectId, id),
                         captureId = cursor.string("capture_id"), nextAction = readNextAction(db, projectId, id),
                         regions = readRegions(db, projectId, id),
@@ -1209,6 +1279,13 @@ class ProjectStore(context: Context) {
     }
 
     private fun pruneSources(db: SQLiteDatabase, projectId: String) {
+        db.execSQL("""INSERT OR IGNORE INTO image_source_cleanup(project_id,source_id,mime)
+            SELECT project_id,source_id,mime FROM image_sources WHERE project_id=?
+            AND NOT EXISTS(SELECT 1 FROM states s WHERE s.project_id=image_sources.project_id AND s.image_source_id=image_sources.source_id)
+        """.trimIndent(), arrayOf(projectId))
+        db.execSQL("""DELETE FROM image_sources WHERE project_id=?
+            AND NOT EXISTS(SELECT 1 FROM states s WHERE s.project_id=image_sources.project_id AND s.image_source_id=image_sources.source_id)
+        """.trimIndent(), arrayOf(projectId))
         db.execSQL("""DELETE FROM sources WHERE project_id=?
             AND NOT EXISTS(SELECT 1 FROM states s WHERE s.project_id=sources.project_id AND s.source_id=sources.source_id)
             AND NOT EXISTS(SELECT 1 FROM edge_transitions t WHERE t.project_id=sources.project_id AND t.source_id=sources.source_id)
@@ -1327,6 +1404,15 @@ class ProjectStore(context: Context) {
         if (count(db, "local_assets", "relative_path=?", path) == 0) {
             deleteImportFile(checkedAssetFile(projectId, path))
         }
+        if (extension == "png") {
+            val image = db.rawQuery("SELECT source_id,mime FROM image_source_imports WHERE asset_id=?", arrayOf(assetId)).use {
+                if (it.moveToFirst()) it.getString(0) to it.getString(1) else null
+            }
+            if (image != null) {
+                if (count(db, "image_sources", "source_id=?", image.first) == 0) deletePrivateImage(image.first, image.second)
+                db.delete("image_source_imports", "asset_id=?", arrayOf(assetId))
+            }
+        }
         // Do not tie this row to a project FK: deleting a project during an active copy must
         // leave the recovery record until that copy's private files have actually been removed.
         db.delete(if (extension == "mp4") "transition_imports" else "asset_imports",
@@ -1341,6 +1427,18 @@ class ProjectStore(context: Context) {
     }
 
     private fun cleanupPending(db: SQLiteDatabase) {
+        runCatching {
+            val images = db.rawQuery("SELECT project_id,source_id,mime FROM image_source_cleanup", null).use {
+                buildList { while (it.moveToNext()) add(Triple(it.getString(0), it.getString(1), it.getString(2))) }
+            }
+            images.forEach { (projectId, sourceId, mime) -> runCatching {
+                if (count(db, "image_sources", "source_id=?", sourceId) == 0 &&
+                    count(db, "image_source_imports", "source_id=?", sourceId) == 0) {
+                    deletePrivateImage(sourceId, mime)
+                    db.delete("image_source_cleanup", "project_id=? AND source_id=?", arrayOf(projectId, sourceId))
+                }
+            } }
+        }
         // Best effort after commit. Never delete any directory recursively or the shared sources.
         runCatching {
             val pending = db.rawQuery("SELECT project_id,relative_path FROM asset_cleanup", null).use { cursor ->
@@ -1361,7 +1459,8 @@ class ProjectStore(context: Context) {
     }
 
     private fun pendingCleanupCount(db: SQLiteDatabase, projectId: String, fallback: Int): Int =
-        runCatching { count(db, "asset_cleanup", "project_id=?", projectId) }.getOrDefault(fallback)
+        runCatching { count(db, "asset_cleanup", "project_id=?", projectId) +
+            count(db, "image_source_cleanup", "project_id=?", projectId) }.getOrDefault(fallback)
 
     private fun projectAssetDirectory(projectId: String): File {
         validId(projectId)
@@ -1430,6 +1529,12 @@ class ProjectStore(context: Context) {
                     metadata.pixelWidthHeightRatio.isFinite() && metadata.pixelWidthHeightRatio > 0f) { "原素材记录无效。" }
                 file
             }
+            is StepOrigin.ImportedImage -> {
+                val image = origin.source
+                require(input.width == image.metadata.outputWidth && input.height == image.metadata.outputHeight &&
+                    minOf(input.width, input.height) <= 1080 && maxOf(input.width, input.height) <= 2400) { "截图输出尺寸无效。" }
+                ScreenshotImporter(app).checkedSourceFile(image)
+            }
             is StepOrigin.Image -> {
                 require(input.width == origin.base.width && input.height == origin.base.height && input.masks.isNotEmpty()) {
                     "安全画面追加遮挡须保持底图尺寸并至少添加一块遮挡。"
@@ -1472,11 +1577,14 @@ class ProjectStore(context: Context) {
 
     private fun ContentValues.putOrigin(origin: StepOrigin) {
         listOf("source_id", "frame_pts_us", "time_precision_us", "base_asset_id", "base_sha256",
-            "base_revision", "base_width", "base_height").forEach { putNull(it) }
+            "base_revision", "base_width", "base_height", "image_source_id").forEach { putNull(it) }
         when (origin) {
             is StepOrigin.VideoFrame -> {
                 put("origin_kind", "videoFrame"); put("source_id", origin.source.sourceId)
                 put("frame_pts_us", origin.frameTimeUs); put("time_precision_us", origin.timePrecisionUs)
+            }
+            is StepOrigin.ImportedImage -> {
+                put("origin_kind", "image"); put("image_source_id", origin.source.sourceId)
             }
             is StepOrigin.Image -> {
                 val base = origin.base
@@ -1489,10 +1597,90 @@ class ProjectStore(context: Context) {
     private fun readOrigin(cursor: Cursor): StepOrigin = when (cursor.string("origin_kind")) {
         "videoFrame" -> StepOrigin.VideoFrame(parseSource(JSONObject(cursor.string("source_json"))),
             cursor.long("frame_pts_us"), cursor.long("time_precision_us"))
-        "image" -> StepOrigin.Image(SafeImageBinding(cursor.string("project_id"), cursor.string("state_id"),
+        "image" -> if (!cursor.isNull(cursor.getColumnIndexOrThrow("image_source_id")))
+            StepOrigin.ImportedImage(parseImageSource(JSONObject(cursor.string("image_source_json"))))
+        else StepOrigin.Image(SafeImageBinding(cursor.string("project_id"), cursor.string("state_id"),
             cursor.long("base_revision"), cursor.string("base_asset_id"), cursor.string("base_sha256"),
             cursor.int("base_width"), cursor.int("base_height")))
         else -> error("步骤来源种类无效，请保留本机数据。")
+    }
+
+    private fun imageSourceJson(source: ImportedImageSource) = JSONObject().apply {
+        put("id", source.sourceId); put("path", source.privateRelativePath); put("name", source.displayName)
+        put("mime", source.metadata.mime); put("bytes", source.metadata.byteLength); put("sha256", source.metadata.sha256)
+        put("width", source.metadata.width); put("height", source.metadata.height); put("orientation", source.metadata.orientation)
+        put("outputWidth", source.metadata.outputWidth); put("outputHeight", source.metadata.outputHeight)
+    }
+
+    private fun parseImageSource(json: JSONObject) = ImportedImageSource(json.getString("id"), json.getString("path"),
+        json.getString("name"), ImageSourceMetadata(json.getString("mime"), json.getLong("bytes"), json.getString("sha256"),
+            json.getInt("width"), json.getInt("height"), json.getInt("orientation"),
+            json.getInt("outputWidth"), json.getInt("outputHeight")))
+
+    private fun imageSourcePath(sourceId: String, mime: String): String {
+        validId(sourceId)
+        require(mime == "image/png" || mime == "image/jpeg") { "截图格式无效。" }
+        return "image-sources/$sourceId/original.${if (mime == "image/png") "png" else "jpg"}"
+    }
+
+    private fun privateImageDirectory(sourceId: String): File {
+        validId(sourceId)
+        val images = privateDirectory(File(root, "image-sources"), root)
+        return privateDirectory(File(images, sourceId), images)
+    }
+
+    private fun deletePrivateImage(sourceId: String, mime: String) {
+        val file = File(root, imageSourcePath(sourceId, mime))
+        val directory = requireNotNull(file.parentFile)
+        check(file.canonicalFile == file.absoluteFile && directory.canonicalFile == directory.absoluteFile &&
+            directory.parentFile?.canonicalFile == File(root, "image-sources").absoluteFile) { "原截图清理路径无效。" }
+        deleteImportFile(file)
+        deleteImportFile(File(directory, "original.part"))
+        if (directory.exists()) check(directory.isDirectory && directory.delete()) { "原截图暂存清理失败，将重试。" }
+    }
+
+    private suspend fun copyImageSource(input: File, output: File, source: ImportedImageSource) {
+        val part = File(output.parentFile, "original.part")
+        check(part.canonicalFile == part.absoluteFile && !part.exists()) { "原截图暂存冲突。" }
+        val owner = currentCoroutineContext()
+        var bytes = 0L
+        input.inputStream().use { from -> FileOutputStream(part).use { to ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                owner.ensureActive()
+                val size = from.read(buffer, 0, minOf(buffer.size.toLong(), 10L * 1024 * 1024 - bytes + 1).toInt())
+                if (size < 0) break
+                check(size > 0) { "截图复制中断。" }; bytes += size
+                require(bytes <= 10L * 1024 * 1024) { "截图超过 10 MiB。" }
+                to.write(buffer, 0, size)
+            }
+            to.fd.sync()
+        } }
+        check(bytes == source.metadata.byteLength && sha256(part) == source.metadata.sha256) { "原截图已改变，请重新选择。" }
+        owner.ensureActive()
+        Files.move(part.toPath(), output.toPath(), StandardCopyOption.ATOMIC_MOVE)
+        syncDirectory(requireNotNull(output.parentFile))
+    }
+
+    /** Bind the reviewed PNG to normalized source pixels, never to compressed input bytes. */
+    private suspend fun verifyScreenshotPixels(file: File, source: Bitmap, masks: List<OpaqueMask>) {
+        val output = BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply {
+            inPreferredConfig = Bitmap.Config.ARGB_8888; inScaled = false
+        }) ?: error("截图输出无法读取。")
+        try {
+            check(output.width == source.width && output.height == source.height) { "截图输出尺寸改变。" }
+            val original = IntArray(source.width); val actual = IntArray(source.width)
+            val rectangles = masks.map { it.toPixelRect(source.width, source.height) }
+            for (y in 0 until source.height) {
+                currentCoroutineContext().ensureActive()
+                source.getPixels(original, 0, source.width, 0, y, source.width, 1)
+                output.getPixels(actual, 0, source.width, 0, y, source.width, 1)
+                val rowMasks = rectangles.filter { y in it.top until it.bottom }
+                for (x in original.indices) check(actual[x] == if (rowMasks.any { x in it.left until it.right }) android.graphics.Color.BLACK else original[x]) {
+                    "截图输出与本次原图不一致，请重新生成并复核。"
+                }
+            }
+        } finally { output.recycle() }
     }
 
     private fun sourceJson(source: ImportedSource) = JSONObject().apply {
@@ -1520,11 +1708,11 @@ class ProjectStore(context: Context) {
         } }
     }
 
-    internal class Database(context: Context, path: String) : SQLiteOpenHelper(context, path, null, 6) {
+    internal class Database(context: Context, path: String) : SQLiteOpenHelper(context, path, null, 7) {
         override fun onConfigure(db: SQLiteDatabase) {
             // SQLiteOpenHelper calls this BEFORE its upgrade transaction. Changing a PRAGMA
             // inside onUpgrade is ineffective and dropping states would cascade child rows.
-            db.setForeignKeyConstraintsEnabled(db.version !in 1..5)
+            db.setForeignKeyConstraintsEnabled(db.version !in 1..6)
         }
         override fun onOpen(db: SQLiteDatabase) {
             // Runs after successful upgrade commit, but before the helper exposes the handle.
@@ -1549,6 +1737,7 @@ class ProjectStore(context: Context) {
                 width INTEGER NOT NULL CHECK(width>0), height INTEGER NOT NULL CHECK(height>0),
                 UNIQUE(project_id,asset_id), FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE
             )""")
+            createImageSources(db)
             createStates(db, "states")
             db.execSQL("""CREATE TABLE hotspots (
                 project_id TEXT NOT NULL, hotspot_id TEXT NOT NULL, state_id TEXT NOT NULL, label TEXT NOT NULL,
@@ -1648,14 +1837,25 @@ class ProjectStore(context: Context) {
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            check(oldVersion in 1..5 && newVersion == 6 && foreignKeys(db) == 0) {
+            check(oldVersion in 1..6 && newVersion == 7 && foreignKeys(db) == 0) {
                 "项目数据库需要安全迁移；请保留现有本机数据。"
             }
             if (oldVersion < 2) createNextActions(db)
             if (oldVersion < 3) createTransitions(db)
             if (oldVersion < 4) createRegions(db)
             if (oldVersion < 5) createEditorDrafts(db)
-            migrateOrigins(db)
+            createImageSources(db)
+            migrateOrigins(db, oldVersion)
+        }
+
+        private fun createImageSources(db: SQLiteDatabase) {
+            db.execSQL("""CREATE TABLE image_sources (
+                project_id TEXT NOT NULL, source_id TEXT NOT NULL UNIQUE, mime TEXT NOT NULL CHECK(mime IN ('image/png','image/jpeg')),
+                source_json TEXT NOT NULL, PRIMARY KEY(project_id,source_id),
+                FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+            )""")
+            db.execSQL("CREATE TABLE image_source_imports(asset_id TEXT PRIMARY KEY NOT NULL, source_id TEXT UNIQUE NOT NULL, mime TEXT NOT NULL)")
+            db.execSQL("CREATE TABLE image_source_cleanup(project_id TEXT NOT NULL, source_id TEXT PRIMARY KEY NOT NULL, mime TEXT NOT NULL)")
         }
 
         private fun foreignKeys(db: SQLiteDatabase): Int = db.rawQuery("PRAGMA foreign_keys", null).use {
@@ -1663,11 +1863,11 @@ class ProjectStore(context: Context) {
         }
 
         private fun createStates(db: SQLiteDatabase, table: String) {
-            check(table == "states" || table == "states_v6")
+            check(table == "states" || table == "states_v7")
             db.execSQL(STATES_SQL.replace("CREATE TABLE states (", "CREATE TABLE $table ("))
         }
 
-        private fun migrateOrigins(db: SQLiteDatabase) {
+        private fun migrateOrigins(db: SQLiteDatabase, oldVersion: Int) {
             check(db.inTransaction() && foreignKeys(db) == 0) { "项目迁移保护未就绪。" }
             // Do not silently lose user-installed schema objects on a table rebuild.
             db.rawQuery("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN ('index','trigger','view') AND sql IS NOT NULL", null).use { rows ->
@@ -1684,15 +1884,17 @@ class ProjectStore(context: Context) {
             }
             val unchanged = names.filter { it != "states" }.associateWith { fingerprint(db, it) }
             val schema = unaffectedSchema(db)
-            val states = fingerprint(db, "states", LEGACY_STATE_COLUMNS)
-            createStates(db, "states_v6")
-            db.execSQL("INSERT INTO states_v6 ($LEGACY_STATE_COLUMNS,origin_kind) SELECT $LEGACY_STATE_COLUMNS,'videoFrame' FROM states")
-            check(fingerprint(db, "states_v6", LEGACY_STATE_COLUMNS) == states) { "步骤迁移核对失败。" }
+            val preservedColumns = if (oldVersion < 6) LEGACY_STATE_COLUMNS else V6_STATE_COLUMNS
+            val states = fingerprint(db, "states", preservedColumns)
+            createStates(db, "states_v7")
+            if (oldVersion < 6) db.execSQL("INSERT INTO states_v7 ($LEGACY_STATE_COLUMNS,origin_kind) SELECT $LEGACY_STATE_COLUMNS,'videoFrame' FROM states")
+            else db.execSQL("INSERT INTO states_v7 ($V6_STATE_COLUMNS) SELECT $V6_STATE_COLUMNS FROM states")
+            check(fingerprint(db, "states_v7", preservedColumns) == states) { "步骤迁移核对失败。" }
             db.execSQL("DROP TABLE states")
-            db.execSQL("ALTER TABLE states_v6 RENAME TO states")
+            db.execSQL("ALTER TABLE states_v7 RENAME TO states")
             db.execSQL("CREATE INDEX states_order ON states(project_id,sort_order)")
             db.execSQL("CREATE INDEX states_source ON states(source_id)")
-            check(fingerprint(db, "states", LEGACY_STATE_COLUMNS) == states &&
+            check(fingerprint(db, "states", preservedColumns) == states &&
                 unchanged.all { (table, before) -> fingerprint(db, table) == before } && unaffectedSchema(db) == schema) {
                 "项目关系迁移核对失败，原数据将保留。"
             }
@@ -1738,6 +1940,7 @@ class ProjectStore(context: Context) {
 
         companion object {
             private const val LEGACY_STATE_COLUMNS = "project_id,state_id,capture_id,sort_order,title,description,is_terminal,source_id,input_asset_id,frame_pts_us,time_precision_us,masks_json"
+            private const val V6_STATE_COLUMNS = "$LEGACY_STATE_COLUMNS,origin_kind,base_asset_id,base_sha256,base_revision,base_width,base_height"
             internal val STATES_SQL = """CREATE TABLE states (
                 project_id TEXT NOT NULL, state_id TEXT NOT NULL, capture_id TEXT NOT NULL,
                 sort_order INTEGER NOT NULL CHECK(sort_order>=0),
@@ -1746,17 +1949,22 @@ class ProjectStore(context: Context) {
                 time_precision_us INTEGER CHECK(time_precision_us>0), masks_json TEXT NOT NULL,
                 origin_kind TEXT NOT NULL CHECK(origin_kind IN ('videoFrame','image')),
                 base_asset_id TEXT, base_sha256 TEXT, base_revision INTEGER, base_width INTEGER, base_height INTEGER,
-                CHECK((origin_kind='videoFrame' AND source_id IS NOT NULL AND frame_pts_us IS NOT NULL AND time_precision_us IS NOT NULL
+                image_source_id TEXT, evidence_kind TEXT NOT NULL DEFAULT 'recorded' CHECK(evidence_kind IN ('recorded','authored','imported')),
+                CHECK((origin_kind='videoFrame' AND image_source_id IS NULL AND evidence_kind='recorded' AND source_id IS NOT NULL AND frame_pts_us IS NOT NULL AND time_precision_us IS NOT NULL
                     AND base_asset_id IS NULL AND base_sha256 IS NULL AND base_revision IS NULL AND base_width IS NULL AND base_height IS NULL)
-                    OR (origin_kind='image' AND source_id IS NULL AND frame_pts_us IS NULL AND time_precision_us IS NULL
+                    OR (origin_kind='image' AND image_source_id IS NULL AND source_id IS NULL AND frame_pts_us IS NULL AND time_precision_us IS NULL
                     AND base_asset_id IS NOT NULL AND length(base_asset_id)>0 AND base_sha256 IS NOT NULL
                     AND length(base_sha256)=64 AND base_sha256 NOT GLOB '*[^0-9a-f]*'
                     AND base_revision IS NOT NULL AND base_revision>0 AND base_width IS NOT NULL AND base_width>0
-                    AND base_height IS NOT NULL AND base_height>0 AND base_width*base_height<=12000000)),
+                    AND base_height IS NOT NULL AND base_height>0 AND base_width*base_height<=12000000)
+                    OR (origin_kind='image' AND image_source_id IS NOT NULL AND length(image_source_id)>0 AND evidence_kind='authored'
+                    AND source_id IS NULL AND frame_pts_us IS NULL AND time_precision_us IS NULL
+                    AND base_asset_id IS NULL AND base_sha256 IS NULL AND base_revision IS NULL AND base_width IS NULL AND base_height IS NULL)),
                 PRIMARY KEY(project_id,state_id), UNIQUE(project_id,input_asset_id), UNIQUE(project_id,capture_id),
                 FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE,
                 FOREIGN KEY(project_id,source_id) REFERENCES sources(project_id,source_id) DEFERRABLE INITIALLY DEFERRED,
-                FOREIGN KEY(project_id,input_asset_id) REFERENCES local_assets(project_id,asset_id) DEFERRABLE INITIALLY DEFERRED
+                FOREIGN KEY(project_id,input_asset_id) REFERENCES local_assets(project_id,asset_id) DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(project_id,image_source_id) REFERENCES image_sources(project_id,source_id) DEFERRABLE INITIALLY DEFERRED
             )"""
         }
 

@@ -27,8 +27,8 @@ object EditorDraftStoreChecks {
         var failure: Throwable? = null
         try {
             checkStore(isolated(context, File(root, "store")), status)
-            for (version in 1..5) checkMigration(isolated(context, File(root, "v$version")), version)
-            status("PASS editor SQLite v1–v5-to-v6 genuine historical DDL, complete graph/assets/drafts/journals preserved before recovery, enabled foreign keys and missing-source video snapshot")
+            for (version in 1..6) checkMigration(isolated(context, File(root, "v$version")), version)
+            status("PASS editor SQLite v1–v6-to-v7 genuine historical DDL, complete graph/assets/drafts/journals preserved before recovery, enabled foreign keys and missing-source video snapshot")
             status("NOT_COVERED editor recovery: actual process kill, IME typing and Compose lifecycle gestures require separate device/UI checks")
         } catch (error: Throwable) { failure = error; throw error }
         finally {
@@ -204,8 +204,14 @@ object EditorDraftStoreChecks {
                     db.execSQL("INSERT INTO sources VALUES(?,?,?)",arrayOf(p,source.sourceId,json.toString()))
                     for (media in listOf(a,b,clip,crop)) db.execSQL("INSERT INTO local_assets VALUES(?,?,?,?,?,?,?)",
                         arrayOf(media,p,"project-assets/$p/$media.png",input.sha256,file.length(),32,48))
-                    for ((state,image) in listOf(step to a,second to b)) db.execSQL("INSERT INTO states VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                        arrayOf(p,state,state,0,"Kept","Preserve text",0,source.sourceId,image,0,1000,"[]"))
+                    for ((state,image) in listOf(step to a,second to b)) {
+                        val columns = "project_id,state_id,capture_id,sort_order,title,description,is_terminal,source_id,input_asset_id,frame_pts_us,time_precision_us,masks_json"
+                        db.execSQL(if (previous < 6) "INSERT INTO states ($columns) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
+                            else "INSERT INTO states ($columns,origin_kind) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'videoFrame')",
+                            arrayOf(p,state,state,0,"Kept","Preserve text",0,source.sourceId,image,0,1000,"[]"))
+                    }
+                    if (previous >= 6) db.execSQL("UPDATE states SET origin_kind='image',source_id=NULL,frame_pts_us=NULL,time_precision_us=NULL,base_asset_id=?,base_sha256=?,base_revision=8,base_width=32,base_height=48 WHERE project_id=? AND state_id=?",
+                        arrayOf(id(),"a".repeat(64),p,second))
                     val hotspot=id();val edge=id()
                     db.execSQL("INSERT INTO hotspots VALUES(?,?,?,?,?,?,?,?)",arrayOf(p,hotspot,step,"Manual",.1,.2,.6,.8))
                     db.execSQL("INSERT INTO edges VALUES(?,?,?,?,?,NULL)",arrayOf(p,edge,hotspot,step,second))
@@ -239,7 +245,7 @@ object EditorDraftStoreChecks {
         check(File(context.noBackupFilesDir, source.privateRelativePath).delete())
         ProjectStore.Database(context,File(context.noBackupFilesDir,"projects.sqlite").path).use { helper ->
             val db=helper.writableDatabase
-            check(db.version==6)
+            check(db.version==7)
             for ((table,expected) in expectedRows) check(migrationRows(db,table,expected.first)==expected.second) {
                 "Migration altered $table contents"
             }

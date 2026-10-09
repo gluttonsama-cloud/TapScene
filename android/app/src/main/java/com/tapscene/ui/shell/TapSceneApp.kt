@@ -31,6 +31,8 @@ import kotlinx.coroutines.withContext
 fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: CandidateWorkspace, releases: ReleaseWorkspace) {
     val transitions: TransitionWorkspace = viewModel()
     val regions: RegionWorkspace = viewModel()
+    val screenshots: ScreenshotWorkspace = viewModel()
+    val screenshotState by screenshots.state.collectAsStateWithLifecycle()
     val state by projects.state.collectAsStateWithLifecycle()
     val mediaState by media.state.collectAsStateWithLifecycle()
     val candidateState by candidates.state.collectAsStateWithLifecycle()
@@ -50,6 +52,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     var awaitingCreatedProject by rememberSaveable { mutableStateOf(false) }
     var importRequested by rememberSaveable { mutableStateOf(false) }
     var pickerProjectId by rememberSaveable { mutableStateOf<String?>(null) }
+    var screenshotPickerPending by rememberSaveable { mutableStateOf(false) }
+    var screenshotPickerProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var renaming by remember { mutableStateOf<ProjectSummary?>(null) }
     var deletingProject by remember { mutableStateOf<ProjectSummary?>(null) }
     var deletingStep by remember { mutableStateOf<ProjectStep?>(null) }
@@ -80,7 +84,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     var discardingCandidate by remember { mutableStateOf<ReleaseCandidate?>(null) }
     var exportPickerPending by rememberSaveable { mutableStateOf(false) }
     val projectId = state.project?.project?.id
-    val unavailable = state.busy || state.loadFailed || candidateState.busy || releaseState.busy
+    val unavailable = state.busy || state.loadFailed || candidateState.busy || releaseState.busy || screenshotPickerPending
     val openReleaseReview: () -> Unit = {
         if (!releaseState.busy) { reviewCandidateId = null; push("review") }
     }
@@ -264,6 +268,36 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
             } else projects.message("项目已切换，请在当前项目重新选择录屏。")
         }
     }
+    val screenshotPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val pending = screenshotPickerPending
+        val expected = screenshotPickerProjectId
+        screenshotPickerPending = false; screenshotPickerProjectId = null
+        if (pending && uri != null) {
+            val current = projects.state.value.project?.project?.id
+            if (current == expected && !projects.state.value.busy && screenshots.importScreenshot(uri, expected)) push("screenshot")
+            else projects.message("项目已切换，请重新选择截图。")
+        }
+    }
+    val requestScreenshot: () -> Unit = {
+        if (!unavailable && !mediaState.busy && !screenshotState.media.busy && !recording.isBusy &&
+            screenshots.state.value.sessionId == null) {
+            screenshotPickerProjectId = projectId
+            screenshotPickerPending = true
+            try { screenshotPicker.launch(arrayOf("image/png", "image/jpeg")) }
+            catch (_: android.content.ActivityNotFoundException) {
+                screenshotPickerPending = false; screenshotPickerProjectId = null
+                projects.message("系统没有可用的文件选择工具。")
+            }
+        }
+    }
+    val closeScreenshot: () -> Unit = { if (screenshots.close()) pop() }
+    LaunchedEffect(screenshotState.completed, screenshotState.media.busy) {
+        val saved = screenshotState.completed
+        if (saved != null && !screenshotState.media.busy && !state.busy) {
+            projects.openProject(saved.project.id)
+            screenshots.close(); pages.clear(); tab = ProjectTab.STEPS
+        }
+    }
     // Scope activation clears old sources synchronously before its asynchronous reload starts.
     LaunchedEffect(projectId, state.route, mediaState.busy, retainedMedia) {
         if (projectId != null && state.route == ProjectRoute.STEPS && !retainedMedia && !mediaState.busy && media.projectId != projectId) {
@@ -309,6 +343,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     BackHandler(enabled = page in setOf("review", "delivery", "import") && releaseState.busy) { releases.cancel() }
     BackHandler(enabled = page == "player") { closeReleasePlayer() }
     BackHandler(enabled = page == "step-correction") { closeStepCorrection() }
+    BackHandler(enabled = page == "screenshot") { if (!screenshotState.media.busy) closeScreenshot() }
     BackHandler(enabled = page == "path" && state.route != ProjectRoute.EDIT) { if (!state.busy) pop() }
     BackHandler(enabled = page == null && !retainedMedia && state.route == ProjectRoute.STEPS) {
         if (!state.busy && !mediaState.busy) projects.back()
@@ -333,7 +368,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                 }
                 if (recording.isBusy && page != "record") Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(if (recording.phase == RecordingPhase.Recording) "录制中" else "录屏处理中", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = ShellColors.Accent)
-                    TextButton(onClick = { push("record") }, enabled = mediaState.correction == null) { Text("查看") }
+                    TextButton(onClick = { push("record") }, enabled = mediaState.correction == null && screenshotState.sessionId == null) { Text("查看") }
                     if (recording.phase == RecordingPhase.Recording || recording.phase == RecordingPhase.Starting) TextButton(onClick = { RecordingCoordinator.stop(context) }) { Text("停止") }
                 }
                 if (candidateState.busy && page != "candidates") Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -344,7 +379,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                     TextButton(onClick = { push("candidates") }) { Text("查看") }
                     TextButton(onClick = candidates::cancel) { Text("取消") }
                 }
-                if (!retainedMedia && state.route != ProjectRoute.MEDIA && page != "candidate-review" && page != "step-correction") {
+                if (!retainedMedia && state.route != ProjectRoute.MEDIA && page != "candidate-review" && page != "step-correction" && page != "screenshot") {
                     if (state.busy || (scopeReady && mediaState.busy)) {
                         LinearProgressIndicator(Modifier.fillMaxWidth())
                         Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -369,6 +404,16 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                     when {
                         retainedMedia -> MediaScreen(media, onBack = { retainedMedia = false; projects.reload() })
                         page != null -> when (page) {
+                            "screenshot" -> {
+                                val draft = screenshotState.draft
+                                if (draft != null) StepImageCorrectionContent(screenshotState.media, null,
+                                    StepImageCorrectionMode.MASK,
+                                    CorrectionUiCallbacks(closeScreenshot, screenshots::cancel, {}, screenshots::addMask,
+                                        screenshots::undoMask, screenshots::makeImage, screenshots::confirm,
+                                        onRetry = { if (screenshots.close()) { pop(); requestScreenshot() } }, onSelectSource = {}),
+                                    screenshot = draft)
+                                else ScreenEmpty("截图编辑已关闭", "已确认的步骤保存在项目中；未确认的图片需重新选择。", "返回", closeScreenshot)
+                            }
                             "step-correction" -> {
                                 val correction = mediaState.correction
                                 if (correction != null && correction.projectId == projectId && correction.stepId == state.selectedStepId) {
@@ -590,7 +635,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                         if (scopeReady && !unavailable && !mediaState.busy && !mediaState.unsavedEdits) {
                                             media.selectSource(id); autoAnalyzeSource = id; push("candidates")
                                         }
-                                    })
+                                    }, onImportScreenshot = requestScreenshot)
                                 }
                                 ProjectTab.CHECKS -> DeliveryCheckScreen(state.project, state.issues, { tab = ProjectTab.STEPS },
                                     { issue -> issue.stepId?.let(projects::openStep) ?: run { tab = ProjectTab.STEPS } },
@@ -608,7 +653,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 onAi = { id -> releases.openAiPackage(id); push("ai") }) }
                             GlobalNavigation(true, { library = false }, {})
                         }
-                        else -> ProjectHomeFrame({ push("record") }, requestImport, { push("settings") }, { library = true; releases.reloadLibrary() }) {
+                        else -> ProjectHomeFrame({ push("record") }, requestImport, { push("settings") }, { library = true; releases.reloadLibrary() }, onImportScreenshot = requestScreenshot) {
                             ProjectHomeContent(state, { tab = ProjectTab.STEPS; projects.openProject(it) }, { renaming = it }, { deletingProject = it })
                         }
                     }
@@ -621,7 +666,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                 renaming = null; projects.renameProject(item.id, title)
             } }
             deletingProject?.let { item -> ConfirmDelete("删除“${item.title}”？",
-                "项目、${item.stepCount} 个步骤、热点、项目图片和本机文字建议将删除，无法撤销。原录屏与导出的文件保留；原录屏可在设置的本机保留素材中管理。", !state.busy,
+                "项目、${item.stepCount} 个步骤、热点、项目图片、原截图和本机文字建议将删除，无法撤销。原录屏与导出的文件保留；原录屏可在设置的本机保留素材中管理。", !state.busy,
                 { deletingProject = null }, { if (recording.projectId == item.id && (recording.isBusy || recording.canRetry)) {
                     deletingProject = null; projects.message("请先停止或处理这个项目的未完成录制。")
                 } else if (candidateState.projectId == item.id && candidateState.busy) {

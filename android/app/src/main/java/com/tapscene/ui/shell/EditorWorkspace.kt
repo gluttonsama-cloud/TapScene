@@ -280,7 +280,7 @@ fun EditorWorkspaceContent(
                     }
                     EditorMode.REDACTIONS -> {
                         Text("固定遮挡", style = MaterialTheme.typography.titleSmall)
-                        Text(if (step?.imageOrigin != null) "当前安全画面已有的遮挡已烧入，不能移除。"
+                        Text(if (step?.videoOrigin == null) "当前安全画面已有的遮挡已烧入，不能移除。"
                             else "当前安全画面包含 ${step?.masks?.size ?: 0} 处已生成遮挡。", style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                         OutlinedButton(onClick = { callbacks.onCorrectImage(true) }, enabled = !busy && correctionEnabled) {
