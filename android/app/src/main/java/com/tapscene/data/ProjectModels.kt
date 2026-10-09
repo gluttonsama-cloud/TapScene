@@ -47,7 +47,12 @@ data class ProjectStep(
 /** Author-arranged button outside the image, never a detected tap or implicit list-order link.
  * A null target is an unresolved action that needs repair, not an end action.
  */
-data class ProjectNextAction(val id: String, val label: String, val targetStepId: String?)
+data class ProjectNextAction(
+    val id: String,
+    val label: String,
+    val targetStepId: String?,
+    val transition: ProjectTransition? = null,
+)
 
 /** Exactly one of targetStepId and endLabel is set. Every hotspot owns one stable edge. */
 data class ProjectHotspot(
@@ -57,6 +62,47 @@ data class ProjectHotspot(
     val targetStepId: String?,
     val endLabel: String?,
     val edgeId: String,
+    val transition: ProjectTransition? = null,
+)
+
+/** A controlled, fully decoded, silent H.264 SDR output, never the private original. */
+data class TransitionAsset(
+    val id: String,
+    val privateRelativePath: String,
+    val sha256: String,
+    val byteLength: Long,
+    val width: Int,
+    val height: Int,
+    val durationUs: Long,
+)
+
+/** Source provenance and fixed masks stay private and are never projected into a viewer package. */
+data class ProjectTransition(
+    val asset: TransitionAsset,
+    val source: ImportedSource,
+    val startUs: Long,
+    val endUs: Long,
+    val masks: List<OpaqueMask>,
+    val reviewId: String,
+)
+
+/**
+ * Construct ONLY after playing these exact output bytes continuously from the beginning to EOS
+ * and the author explicitly confirms the whole clip. A seek, skip, decoder check or source preview
+ * is not that review. The store copies and revalidates these bytes; input remains caller-owned.
+ * reviewId identifies this reviewed output, making an interrupted-save retry idempotent.
+ */
+data class ReviewedTransitionInput(
+    val file: File,
+    val sha256: String,
+    val width: Int,
+    val height: Int,
+    val durationUs: Long,
+    val source: ImportedSource,
+    val startUs: Long,
+    val endUs: Long,
+    val masks: List<OpaqueMask>,
+    val reviewId: String = file.name,
 )
 
 /**
@@ -106,6 +152,8 @@ data class ProjectDeletionResult(
 )
 
 object ProjectLimits {
+    const val MAX_TRANSITION_US = 10_000_000L
+    const val MAX_TOTAL_TRANSITION_US = 60_000_000L
     const val MAX_STEPS = 40
     const val MAX_EDGES = 80
     const val MAX_HOTSPOTS_PER_STEP = 6

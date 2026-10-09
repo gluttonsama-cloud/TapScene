@@ -16,7 +16,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
-/** Restricted to our generated AVC/SDR outputs; source import/extraction never enters here. */
+/** Derived and viewer-package AVC outputs; ordinary source import never enters here. */
 internal class GeneratedVideoDecoder {
     suspend fun validate(
         file: File,
@@ -94,6 +94,7 @@ internal class GeneratedVideoDecoder {
             activeMime = inputMime
             requireBoundedDimensions(inputFormat)
             rejectHdrTransfer(inputFormat)
+            AvcOutputPolicy.checkConfiguration(inputFormat, metadata.width, metadata.height)
             if (visibleSize(inputFormat, true) != metadata.width ||
                 visibleSize(inputFormat, false) != metadata.height ||
                 inputFormat.intOrZero(MediaFormat.KEY_ROTATION) != metadata.rotationDeg ||
@@ -150,6 +151,7 @@ internal class GeneratedVideoDecoder {
                             ) throw FrameDecodeException("输出视频时间戳、时长或帧数超出支持范围。")
                             val size = extractor.readSampleData(buffer, 0)
                             if (size <= 0 || size > buffer.capacity()) throw FrameDecodeException("输出视频包含不完整的视频样本。")
+                            AvcOutputPolicy.checkSample(buffer, size, metadata.width, metadata.height)
                             decoder.queueInputBuffer(inputIndex, 0, size, pts, 0)
                             extractor.advance()
                         }
@@ -236,7 +238,7 @@ internal class GeneratedVideoDecoder {
         if (visibleSize(output, true) != metadata.width || visibleSize(output, false) != metadata.height ||
             output.intOrZero(MediaFormat.KEY_ROTATION) != 0
         ) throw FrameDecodeException("输出视频中途改变了尺寸或方向，暂不支持此格式。")
-        // This path sees only our newly encoded SDR output, never arbitrary input media.
+        // Encoded configuration and every in-band SPS pass AvcOutputPolicy first.
         // Some muxers/codecs omit colour tags. Missing tags are not evidence of HDR.
         fun value(key: String, fallback: Int) = output.intOrZero(key).takeIf { it != 0 }
             ?: input.intOrZero(key).takeIf { it != 0 } ?: fallback

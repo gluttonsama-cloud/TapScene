@@ -53,6 +53,7 @@ class MediaCompatibilityInstrumentation : Instrumentation() {
     }
 
     private suspend fun runChecks() {
+        AvcOutputPolicyChecks.run(::status)
         com.tapscene.data.ProjectEditingChecks.run(targetContext, ::status)
         com.tapscene.data.AuthoredPathChecks.run(targetContext, ::status)
         com.tapscene.ui.AuthoredPreviewChecks.run(targetContext, ::status)
@@ -257,6 +258,9 @@ class MediaCompatibilityInstrumentation : Instrumentation() {
             val selectedPts = fixture.ptsUs.filter { it >= startUs && it < endUs }.map { it - startUs }
             check(decodedPts.size == selectedPts.size && decodedPts.zip(selectedPts).all { (actual, expected) -> abs(actual - expected) < 1_000 }) {
                 "Trimmed output lost a fixture frame or changed its actual presentation time"
+            }
+            if (fixture.spec.name == "avc-sdr.mp4") {
+                com.tapscene.data.TransitionStoreChecks.run(targetContext, fixture.source, video, startUs, endUs, masks, ::status)
             }
             if (checkCancellation) {
                 checkCancelledWrite(outputDirectory) { onStage -> writer.writePng(frame.bitmap, masks, outputDirectory, onStage) }

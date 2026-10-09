@@ -483,22 +483,7 @@ class SafeMediaWriter(context: Context) {
             this.inputHeight = inputHeight
             val result = presentation.configure(inputWidth, inputHeight)
             check(result.width == width && result.height == height) { "画布规范化：输出尺寸与协商结果不一致。" }
-            val scale = minOf(width.toDouble() / inputWidth, height.toDouble() / inputHeight)
-            val contentWidth = inputWidth * scale
-            val contentHeight = inputHeight * scale
-            val xOffset = (width - contentWidth) / 2
-            val yOffset = (height - contentHeight) / 2
-            configuredMasks = masks.map { mask ->
-                // Preserve the editor's outward-rounded pixel coverage. A one-output-pixel
-                // guard also covers resampling footprints and floating-point edge rounding.
-                val rect = mask.toPixelRect(inputWidth, inputHeight)
-                OpaqueMask(
-                    ((xOffset + rect.left * scale - 1) / width).toFloat().coerceIn(0f, 1f),
-                    ((yOffset + rect.top * scale - 1) / height).toFloat().coerceIn(0f, 1f),
-                    ((xOffset + rect.right * scale + 1) / width).toFloat().coerceIn(0f, 1f),
-                    ((yOffset + rect.bottom * scale + 1) / height).toFloat().coerceIn(0f, 1f),
-                )
-            }
+            configuredMasks = SafeMediaWriterValidation.normalizeMasks(inputWidth, inputHeight, width, height, masks)
             return result
         }
 

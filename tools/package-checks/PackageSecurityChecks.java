@@ -131,12 +131,17 @@ public final class PackageSecurityChecks {
             try (ZipFile zip = new ZipFile(archive.toFile())) { require(zip.size() == 42, "boundary file count differs"); }
             readValid(archive, boundary);
         });
+        run("schema1-baseline-digests-remain-byte-identical", () -> {
+            require(ViewerPackageCodec.contentDigest(minimal).equals("6030c18fdb5da412fb4845933fb1fce2b364ebe20a92c5629a1ac56bdd15d500"), "Old minimal digest changed");
+            require(ViewerPackageCodec.contentDigest(branch).equals("c50b6a8619acb220bc508b56820a3cdfb191843cd7e6823421ac1dce151da996"), "Old branch digest changed");
+        });
         jsonCorpus();
         graphCorpus();
         traversalCorpus();
         zipCorpus();
         pngCorpus();
         directoryAndCancellationCorpus();
+        run("restricted-video-package-and-traversal-corpus", () -> VideoPackageChecks.run(root.resolve("video")));
         String summary = "TAPSCENE_PACKAGE_CHECKS_" + (failed == 0 ? "OK" : "FAILED")
                 + ": passed=" + passed + " failed=" + failed;
         System.out.println(summary);
@@ -432,8 +437,8 @@ public final class PackageSecurityChecks {
         extra.add(new Entry("nested.zip", zip(List.of(new Entry("script.js", new byte[] {1})))));
         rejectEntries("nested-archive", extra);
         List<Entry> tooMany = entries(minimal, png);
-        for (int n = 0; n < 40; n++) tooMany.add(new Entry("extra-" + n + ".txt", new byte[] {1}));
-        rejectEntries("more-than-42-zip-files", tooMany);
+        for (int n = 0; n < 120; n++) tooMany.add(new Entry("assets/" + id(30000 + n) + ".png", png));
+        rejectEntries("more-than-122-zip-files", tooMany);
         List<Entry> symlink = entries(minimal, png);
         symlink.get(2).madeBy = 0x0314;
         symlink.get(2).externalAttributes = 0120777L << 16;

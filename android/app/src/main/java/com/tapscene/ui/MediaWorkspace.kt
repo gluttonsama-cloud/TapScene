@@ -501,7 +501,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
     }
 
     companion object {
-        private val operationLock = Mutex()
+        internal val operationLock = Mutex()
         private val activeSessions = mutableSetOf<String>()
         private val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     }

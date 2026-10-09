@@ -223,6 +223,33 @@ fun OcrControlsSamplePreview() {
     }
 }
 
+@PreviewTest
+@Preview(name = "14_transition_editor_sample", widthDp = 412, heightDp = 915, locale = "zh-rCN", showBackground = true)
+@Composable
+fun TransitionEditorSamplePreview() {
+    val bitmap = remember { ShellPreviewFixture.bitmap(1) }
+    val source = ShellPreviewFixture.sources.first().source
+    ReviewSurface(sample = true) {
+        TransitionEditorContent(com.tapscene.ui.TransitionUiState(
+            projectId = "layout-project", stepId = "layout-step", edgeId = "layout-edge", revision = 1,
+            fromTitle = "填写信息", targetTitle = "报名完成", sources = listOf(source), selectedSourceId = source.sourceId,
+            startUs = 6_000_000, endUs = 8_500_000, otherDurationUs = 3_000_000,
+            frame = com.tapscene.media.DecodedFrame(bitmap, 6_000_000),
+            masks = listOf(com.tapscene.media.OpaqueMask(.1f, .35f, .9f, .46f)),
+        ), {}, {}, { _, _ -> }, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})
+    }
+}
+
+@PreviewTest
+@Preview(name = "15_transition_review_sample", widthDp = 412, heightDp = 915, locale = "zh-rCN", showBackground = true)
+@Composable
+fun TransitionReviewSamplePreview() {
+    ReviewSurface(sample = true) {
+        ReleaseReviewContent(remember { ReleasePreviewFixture.videoReviewFailureState }, 4L,
+            {}, {}, {}, {}, {}, {}, {}, {}, initialSection = 1)
+    }
+}
+
 @Composable
 private fun SampleProjectFrame(tab: ProjectTab, content: @Composable () -> Unit) {
     ProjectWorkspaceFrame(

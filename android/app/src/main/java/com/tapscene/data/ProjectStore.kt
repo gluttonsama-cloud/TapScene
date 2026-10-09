@@ -8,6 +8,7 @@ import android.database.sqlite.SQLiteOpenHelper
 import android.graphics.BitmapFactory
 import android.system.Os
 import android.system.OsConstants
+import com.tapscene.media.MediaInputPolicy
 import com.tapscene.media.ImportedSource
 import com.tapscene.media.OpaqueMask
 import com.tapscene.media.SafeMediaWriterValidation
@@ -29,7 +30,7 @@ import org.json.JSONObject
  * Private offline draft graph. Call from Dispatchers.IO; no method does network or shares media.
  * All instances in this process share one lock. SQLite transactions and foreign keys protect
  * graph edits; an asset is copied, synced, technically checked, then atomically renamed before
- * its metadata commits. Only addReviewedStep accepts reviewed output, never a raw video frame.
+ * its metadata commits. Reviewed step/transition inputs are actual outputs, never raw frames or clips.
  */
 class ProjectStore(context: Context) {
     private val app = context.applicationContext
@@ -83,12 +84,12 @@ class ProjectStore(context: Context) {
             db.update("projects", ContentValues().apply { putNull("start_state_id") },
                 "project_id=?", arrayOf(projectId))
             db.delete("projects", "project_id=?", arrayOf(projectId))
-            ProjectDeletionResult(current.steps.size, hotspots, edgeCount(current), current.steps.size)
+            ProjectDeletionResult(current.steps.size, hotspots, edgeCount(current), current.steps.size + transitions(current).size)
         }
         // Cleanup cannot turn a committed deletion into a reported failure. A journal row stays
         // until its exact, no-longer-referenced asset is gone, including across process restart.
         cleanupPending(db)
-        result.copy(pendingAssetCleanupCount = pendingCleanupCount(db, projectId, result.stepCount))
+        result.copy(pendingAssetCleanupCount = pendingCleanupCount(db, projectId, result.pendingAssetCleanupCount))
     }
 
     /**
@@ -229,6 +230,166 @@ class ProjectStore(context: Context) {
             // Never falsely report that the graph save failed after its commit point.
             if (cleanup != null && !committed) {
                 if (failure != null) failure.addSuppressed(cleanup) else throw cleanup
+            }
+        }
+    }
+
+    /**
+     * Copies a human-reviewed complete clip, validates every saved frame, then atomically binds
+     * it to one unchanged edge. Cancellation before commit or a failed/stale save never replaces the old clip.
+     * If cancellation races the committed return, callers must reload the actual binding.
+     * Source deletion must be serialized with this operation, just like addReviewedStep.
+     */
+    suspend fun bindReviewedTransition(
+        projectId: String,
+        edgeId: String,
+        expectedRevision: Long,
+        input: ReviewedTransitionInput,
+    ): ProjectSnapshot {
+        validId(projectId)
+        validId(edgeId)
+        val frozen = input.copy(masks = input.masks.toList())
+        val alreadySaved = access { db ->
+            val current = requireSnapshot(db, projectId)
+            requireEdge(current, edgeId)
+            if (hasMatchingTransition(current, edgeId, frozen)) current else {
+                check(current.project.revision == expectedRevision) { "草稿已改变，请重新打开过渡编辑。" }
+                null
+            }
+        }
+        if (alreadySaved != null) return alreadySaved
+        validateTransitionInput(frozen)
+        val assetId = newId()
+        val relativePath = assetPath(projectId, assetId, "mp4")
+        access { db ->
+            transaction(db) {
+                db.insertOrThrow("transition_imports", null, ContentValues().apply {
+                    put("project_id", projectId); put("asset_id", assetId)
+                })
+            }
+            activeImports.add(importKey(assetId))
+        }
+        val stagingRoot = File(root, "project-staging")
+        val operationDirectory = File(stagingRoot, assetId)
+        val temporary = File(operationDirectory, "candidate.part")
+        var committed = false
+        var failure: Throwable? = null
+        try {
+            privateDirectory(stagingRoot, root)
+            check(operationDirectory.mkdir()) { "无法建立过渡暂存目录。" }
+            val owner = currentCoroutineContext()
+            val digest = MessageDigest.getInstance("SHA-256")
+            var byteLength = 0L
+            frozen.file.inputStream().use { source ->
+                FileOutputStream(temporary).use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        owner.ensureActive()
+                        val count = source.read(buffer, 0, minOf(buffer.size.toLong(), MAX_PNG_BYTES - byteLength + 1).toInt())
+                        if (count < 0) break
+                        check(count > 0) { "无法继续读取已复核过渡。" }
+                        byteLength += count
+                        require(byteLength <= MAX_PNG_BYTES) { "过渡 MP4 超过 50 MiB。" }
+                        digest.update(buffer, 0, count)
+                        output.write(buffer, 0, count)
+                    }
+                    output.fd.sync()
+                }
+            }
+            check(byteLength > 0 && temporary.length() == byteLength && hex(digest.digest()) == frozen.sha256.lowercase()) {
+                "过渡实际文件已改变，请重新生成并完整复核。"
+            }
+            val canvas = MediaInputPolicy.fitOutputSize(frozen.source.metadata.displayWidth, frozen.source.metadata.displayHeight)
+            val outputMasks = SafeMediaWriterValidation.normalizeMasks(canvas.first, canvas.second,
+                frozen.width, frozen.height, frozen.masks)
+            val actual = SafeMediaWriterValidation.verifyStoredVideoOutput(app, temporary, outputMasks,
+                frozen.width, frozen.height)
+            check(actual.durationUs == frozen.durationUs && sha256(temporary) == frozen.sha256.lowercase()) {
+                "过渡实际时长或内容改变，请重新完整复核。"
+            }
+            owner.ensureActive()
+            return withContext(NonCancellable) {
+                synchronized(lock) {
+                    val db = helper.writableDatabase
+                    val result = transaction(db) {
+                        val current = requireSnapshot(db, projectId)
+                        requireEdge(current, edgeId)
+                        if (hasMatchingTransition(current, edgeId, frozen)) return@transaction current
+                        check(current.project.revision == expectedRevision) { "草稿已改变，原过渡保持不变，请重新编辑。" }
+                        val totalUs = transitions(current).filterKeys { it != edgeId }.values.sumOf { it.asset.durationUs } + actual.durationUs
+                        require(totalUs <= ProjectLimits.MAX_TOTAL_TRANSITION_US) { "全部边绑定的视频累计不能超过 60 秒。" }
+                        val source = readSource(db, projectId, frozen.source.sourceId)
+                        check(source == null || source == frozen.source) { "来源记录已改变，请重新生成过渡。" }
+                        if (source == null) db.insertOrThrow("sources", null, ContentValues().apply {
+                            put("project_id", projectId); put("source_id", frozen.source.sourceId)
+                            put("source_json", sourceJson(frozen.source).toString())
+                        })
+                        // Remove only inside this transaction. Rollback restores the old binding and
+                        // its cleanup journal; the new file is still covered by transition_imports.
+                        removeTransitionRow(db, projectId, edgeId)
+                        val directory = projectAssetDirectory(projectId)
+                        val destination = File(directory, "$assetId.mp4")
+                        check(!destination.exists()) { "过渡文件名称冲突，请重试。" }
+                        Files.move(temporary.toPath(), destination.toPath(), StandardCopyOption.ATOMIC_MOVE)
+                        syncDirectory(directory)
+                        db.insertOrThrow("local_assets", null, ContentValues().apply {
+                            put("asset_id", assetId); put("project_id", projectId); put("relative_path", relativePath)
+                            put("sha256", frozen.sha256.lowercase()); put("byte_length", byteLength)
+                            put("width", actual.width); put("height", actual.height)
+                        })
+                        db.insertOrThrow("edge_transitions", null, ContentValues().apply {
+                            put("project_id", projectId); put("edge_id", edgeId); put("asset_id", assetId)
+                            put("source_id", frozen.source.sourceId); put("start_us", frozen.startUs); put("end_us", frozen.endUs)
+                            put("duration_us", actual.durationUs); put("masks_json", masksJson(frozen.masks).toString())
+                            put("review_id", frozen.reviewId)
+                        })
+                        pruneSources(db, projectId)
+                        bump(db, projectId)
+                        requireSnapshot(db, projectId)
+                    }
+                    committed = true
+                    result
+                }
+            }
+        } catch (error: Throwable) {
+            failure = error
+            throw error
+        } finally {
+            val cleanup = synchronized(lock) {
+                activeImports.remove(importKey(assetId))
+                runCatching {
+                    cleanupImport(helper.writableDatabase, projectId, assetId, "mp4")
+                    cleanupPending(helper.writableDatabase)
+                }.exceptionOrNull()
+            }
+            if (cleanup != null && !committed) {
+                if (failure != null) failure.addSuppressed(cleanup) else throw cleanup
+            }
+        }
+    }
+
+    fun removeTransition(projectId: String, edgeId: String, expectedRevision: Long): ProjectSnapshot = access { db ->
+        val result = transaction(db) {
+            val current = requireSnapshot(db, projectId)
+            requireEdge(current, edgeId)
+            if (edgeId !in transitions(current)) return@transaction current
+            check(current.project.revision == expectedRevision) { "草稿已改变，请重新打开过渡编辑。" }
+            removeTransitionRow(db, projectId, edgeId)
+            pruneSources(db, projectId)
+            bump(db, projectId)
+            requireSnapshot(db, projectId)
+        }
+        cleanupPending(db)
+        result
+    }
+
+    /** Hash-checked persisted output only; raw-source fallback is forbidden. */
+    fun resolveTransition(projectId: String, edgeId: String): File = access { db ->
+        val transition = transitions(requireSnapshot(db, projectId))[edgeId] ?: error("这条边没有已保存过渡。")
+        val asset = transition.asset
+        checkedAssetFile(projectId, asset.privateRelativePath).also { file ->
+            check(file.isFile && file.length() == asset.byteLength && sha256(file) == asset.sha256) {
+                "已保存过渡缺失或内容改变，请返回编辑；不会改用原片。"
             }
         }
     }
@@ -436,9 +597,7 @@ class ProjectStore(context: Context) {
             db.delete("states", "project_id=? AND state_id=?", arrayOf(projectId, stepId))
             queueAsset(db, projectId, step.asset.privateRelativePath)
             db.delete("local_assets", "project_id=? AND asset_id=?", arrayOf(projectId, step.asset.id))
-            if (count(db, "states", "project_id=? AND source_id=?", projectId, step.sourceId) == 0) {
-                db.delete("sources", "project_id=? AND source_id=?", arrayOf(projectId, step.sourceId))
-            }
+            clearChangedTransitions(db, current, requireSnapshot(db, projectId))
             remaining.forEachIndexed { index, item ->
                 db.update("states", ContentValues().apply { put("sort_order", index) },
                     "project_id=? AND state_id=?", arrayOf(projectId, item.id))
@@ -522,7 +681,7 @@ class ProjectStore(context: Context) {
     }
 
     /**
-     * Copy only persisted, reviewed PNG inputs while holding the SAME process lock as edits and
+     * Copy only persisted, reviewed PNG and MP4 inputs while holding the SAME process lock as edits and
      * deletion. The returned revision and every copied byte therefore describe one snapshot.
      * Destination is an existing, empty app-private assets directory owned by ReleaseStore.
      * Caller owns partial output on failure; this method never deletes or moves draft/source data.
@@ -535,16 +694,23 @@ class ProjectStore(context: Context) {
             target.path.startsWith(root.path + File.separator) &&
             target.listFiles()?.isEmpty() == true) { "成品复制目标必须是空的本机私有目录。" }
         var total = 0L
-        current.steps.forEach { step ->
-            val asset = step.asset
+        val allAssets = current.steps.map { it.asset } + transitions(current).values.map { it.asset }.map {
+            StepAsset(it.id, it.privateRelativePath, it.sha256, it.byteLength, it.width, it.height)
+        }
+        check(allAssets.map { it.id }.toSet().size == allAssets.size) { "成品资产标识重复。" }
+        check(transitions(current).values.sumOf { it.asset.durationUs } <= ProjectLimits.MAX_TOTAL_TRANSITION_US) {
+            "全部边绑定视频累计超过 60 秒。"
+        }
+        allAssets.forEach { asset ->
             validId(asset.id)
             val source = checkedAssetFile(projectId, asset.privateRelativePath)
             check(source.isFile && source.length() == asset.byteLength && sha256(source) == asset.sha256) {
                 "步骤画面缺失或改变，请返回编辑。"
             }
             total += asset.byteLength
-            check(total <= MAX_PNG_BYTES) { "成品图片合计超过 50 MiB。" }
-            val output = File(target, "${asset.id}.png")
+            check(total <= MAX_PNG_BYTES) { "成品图片和视频合计超过 50 MiB。" }
+            val extension = asset.privateRelativePath.substringAfterLast('.')
+            val output = File(target, "${asset.id}.$extension")
             check(!output.exists() && output.canonicalFile == output.absoluteFile) { "成品图片标识重复。" }
             source.inputStream().use { input ->
                 FileOutputStream(output).use { sink ->
@@ -571,7 +737,8 @@ class ProjectStore(context: Context) {
     }
 
     fun isSourceReferenced(sourceId: String): Boolean = access { db ->
-        count(db, "states", "source_id=?", sourceId) > 0
+        count(db, "states", "source_id=?", sourceId) > 0 ||
+            count(db, "edge_transitions", "source_id=?", sourceId) > 0
     }
 
     private fun <T> access(block: (SQLiteDatabase) -> T): T = synchronized(lock) {
@@ -583,8 +750,9 @@ class ProjectStore(context: Context) {
 
     private fun edit(projectId: String, change: (SQLiteDatabase) -> Unit): ProjectSnapshot = access { db ->
         transaction(db) {
-            requireSnapshot(db, projectId)
+            val before = requireSnapshot(db, projectId)
             change(db)
+            clearChangedTransitions(db, before, requireSnapshot(db, projectId))
             require(count(db, "edges", "project_id=?", projectId) +
                 count(db, "next_actions", "project_id=?", projectId) <= ProjectLimits.MAX_EDGES) {
                 "每个项目最多 80 条连线（包括热点和下一步动作）。"
@@ -669,6 +837,7 @@ class ProjectStore(context: Context) {
                     OpaqueMask(cursor.float("rect_left"), cursor.float("rect_top"),
                         cursor.float("rect_right"), cursor.float("rect_bottom")),
                     cursor.nullableString("to_state_id"), cursor.nullableString("end_label"), cursor.string("edge_id"),
+                    readTransition(db, projectId, cursor.string("edge_id")),
                 ))
             }
         }
@@ -676,7 +845,8 @@ class ProjectStore(context: Context) {
     private fun readNextAction(db: SQLiteDatabase, projectId: String, stepId: String): ProjectNextAction? =
         db.rawQuery("SELECT action_id,label,to_state_id FROM next_actions WHERE project_id=? AND from_state_id=?",
             arrayOf(projectId, stepId)).use { cursor ->
-            if (cursor.moveToFirst()) ProjectNextAction(cursor.getString(0), cursor.getString(1), cursor.nullableString("to_state_id"))
+            if (cursor.moveToFirst()) ProjectNextAction(cursor.getString(0), cursor.getString(1), cursor.nullableString("to_state_id"),
+                readTransition(db, projectId, cursor.getString(0)))
             else null
         }
 
@@ -685,6 +855,108 @@ class ProjectStore(context: Context) {
             put("project_id", projectId); put("action_id", action.id); put("from_state_id", stepId); put("label", action.label)
             if (action.targetStepId == null) putNull("to_state_id") else put("to_state_id", action.targetStepId)
         })
+    }
+
+    private fun transitions(snapshot: ProjectSnapshot): Map<String, ProjectTransition> = buildMap {
+        snapshot.steps.forEach { step ->
+            step.hotspots.forEach { hotspot -> hotspot.transition?.let { put(hotspot.edgeId, it) } }
+            step.nextAction?.let { next -> next.transition?.let { put(next.id, it) } }
+        }
+    }
+
+    private fun requireEdge(snapshot: ProjectSnapshot, edgeId: String) {
+        val hotspot = snapshot.steps.flatMap { it.hotspots }.firstOrNull { it.edgeId == edgeId }
+        val next = snapshot.steps.mapNotNull { it.nextAction }.firstOrNull { it.id == edgeId }
+        require(hotspot != null || next != null) { "这条边不属于当前项目或已删除。" }
+        require(next == null || next.targetStepId != null) { "请先修复下一步目标，再添加过渡。" }
+    }
+
+    /** Compare source/destination/end semantics. Labels, hotspot geometry and list order retain the clip. */
+    private fun edgeSignatures(snapshot: ProjectSnapshot): Map<String, List<Any?>> = buildMap {
+        snapshot.steps.forEach { step ->
+            step.hotspots.forEach { h -> put(h.edgeId, listOf("tap", step.id, h.targetStepId, h.endLabel)) }
+            step.nextAction?.let { n -> put(n.id, listOf("continue", step.id, n.targetStepId)) }
+        }
+    }
+
+    private fun clearChangedTransitions(db: SQLiteDatabase, before: ProjectSnapshot, after: ProjectSnapshot) {
+        val old = edgeSignatures(before)
+        val next = edgeSignatures(after)
+        transitions(before).keys.filter { old[it] != next[it] }.forEach {
+            removeTransitionRow(db, before.project.id, it)
+        }
+        pruneSources(db, before.project.id)
+    }
+
+    private fun readTransition(db: SQLiteDatabase, projectId: String, edgeId: String): ProjectTransition? =
+        db.rawQuery("""
+            SELECT t.*, a.relative_path, a.sha256, a.byte_length, a.width, a.height, s.source_json
+            FROM edge_transitions t
+            JOIN local_assets a ON a.project_id=t.project_id AND a.asset_id=t.asset_id
+            JOIN sources s ON s.project_id=t.project_id AND s.source_id=t.source_id
+            WHERE t.project_id=? AND t.edge_id=?
+        """.trimIndent(), arrayOf(projectId, edgeId)).use { cursor ->
+            if (!cursor.moveToFirst()) null else ProjectTransition(
+                TransitionAsset(cursor.string("asset_id"), cursor.string("relative_path"), cursor.string("sha256"),
+                    cursor.long("byte_length"), cursor.int("width"), cursor.int("height"), cursor.long("duration_us")),
+                parseSource(JSONObject(cursor.string("source_json"))), cursor.long("start_us"), cursor.long("end_us"),
+                parseMasks(JSONArray(cursor.string("masks_json"))), cursor.string("review_id"))
+        }
+
+    private fun removeTransitionRow(db: SQLiteDatabase, projectId: String, edgeId: String) {
+        val transition = readTransition(db, projectId, edgeId) ?: return
+        queueAsset(db, projectId, transition.asset.privateRelativePath)
+        db.delete("edge_transitions", "project_id=? AND edge_id=?", arrayOf(projectId, edgeId))
+        db.delete("local_assets", "project_id=? AND asset_id=?", arrayOf(projectId, transition.asset.id))
+    }
+
+    private fun pruneSources(db: SQLiteDatabase, projectId: String) {
+        db.execSQL("""DELETE FROM sources WHERE project_id=?
+            AND NOT EXISTS(SELECT 1 FROM states s WHERE s.project_id=sources.project_id AND s.source_id=sources.source_id)
+            AND NOT EXISTS(SELECT 1 FROM edge_transitions t WHERE t.project_id=sources.project_id AND t.source_id=sources.source_id)
+        """.trimIndent(), arrayOf(projectId))
+    }
+
+    private fun hasMatchingTransition(snapshot: ProjectSnapshot, edgeId: String, input: ReviewedTransitionInput): Boolean {
+        val existing = transitions(snapshot).entries.firstOrNull { it.value.reviewId == input.reviewId } ?: return false
+        val value = existing.value
+        check(existing.key == edgeId && value.asset.sha256 == input.sha256.lowercase() &&
+            value.asset.width == input.width && value.asset.height == input.height && value.asset.durationUs == input.durationUs &&
+            value.source == input.source && value.startUs == input.startUs && value.endUs == input.endUs && value.masks == input.masks) {
+            "此复核令牌对应的过渡或边已改变，请重新完整复核。"
+        }
+        val file = checkedAssetFile(snapshot.project.id, value.asset.privateRelativePath)
+        check(file.isFile && file.length() == value.asset.byteLength && sha256(file) == value.asset.sha256) {
+            "已保存过渡缺失或改变，请重新生成并完整复核。"
+        }
+        return true
+    }
+
+    private fun validateTransitionInput(input: ReviewedTransitionInput) {
+        require(input.reviewId.isNotBlank() && input.reviewId.length <= 160 && input.reviewId.none { it.isISOControl() }) {
+            "过渡复核令牌无效。"
+        }
+        require(SHA.matches(input.sha256) && input.width > 0 && input.height > 0 &&
+            minOf(input.width, input.height) <= 1080 && maxOf(input.width, input.height) <= 2400) { "过渡摘要或画布尺寸无效。" }
+        require(input.durationUs in 1..ProjectLimits.MAX_TRANSITION_US && input.startUs >= 0 &&
+            input.endUs > input.startUs && input.endUs <= input.source.metadata.durationUs &&
+            input.endUs - input.startUs <= ProjectLimits.MAX_TRANSITION_US &&
+            input.durationUs <= input.endUs - input.startUs + 1_000L) { "过渡裁剪或实际时长无效，单段最多 10 秒。" }
+        require(input.masks.size <= 20) { "每个过渡最多 20 块固定遮挡；无敏感画面可不遮挡。" }
+        validId(input.source.sourceId)
+        val sourceFile = File(root, input.source.privateRelativePath)
+        val metadata = input.source.metadata
+        require(input.source.privateRelativePath == "sources/${input.source.sourceId}.mp4" &&
+            sourceFile.canonicalFile == sourceFile.absoluteFile && sourceFile.isFile &&
+            metadata.byteLength > 0 && sourceFile.length() == metadata.byteLength && SHA.matches(metadata.sha256) &&
+            metadata.width > 0 && metadata.height > 0 && metadata.durationUs > 0 &&
+            metadata.rotationDeg in setOf(0, 90, 180, 270) && metadata.pixelWidthHeightRatio.isFinite() &&
+            metadata.pixelWidthHeightRatio > 0f) { "本机原素材已缺失或来源记录无效。" }
+        val candidate = input.file.canonicalFile
+        require(candidate.isFile && candidate.path.startsWith(root.path + File.separator) &&
+            candidate != sourceFile.canonicalFile && candidate.length() in 1..MAX_PNG_BYTES) {
+            "只能保存本机生成并完整复核的 MP4 候选。"
+        }
     }
 
     private fun edgeCount(snapshot: ProjectSnapshot): Int =
@@ -725,17 +997,17 @@ class ProjectStore(context: Context) {
     /** Called only under the process-shared lock. Recovery is journal-driven, never a sweep. */
     private fun recoverImports(db: SQLiteDatabase) {
         runCatching {
-            val imports = db.rawQuery("SELECT project_id,asset_id FROM asset_imports", null).use { cursor ->
-                buildList { while (cursor.moveToNext()) add(cursor.getString(0) to cursor.getString(1)) }
+            val imports = db.rawQuery("SELECT project_id,asset_id,'png' FROM asset_imports UNION ALL SELECT project_id,asset_id,'mp4' FROM transition_imports", null).use { cursor ->
+                buildList { while (cursor.moveToNext()) add(Triple(cursor.getString(0), cursor.getString(1), cursor.getString(2))) }
             }
-            imports.forEach { (projectId, assetId) ->
-                if (importKey(assetId) !in activeImports) runCatching { cleanupImport(db, projectId, assetId) }
+            imports.forEach { (projectId, assetId, extension) ->
+                if (importKey(assetId) !in activeImports) runCatching { cleanupImport(db, projectId, assetId, extension) }
             }
         }
     }
 
     /** A failed deletion keeps its journal row. Committed final assets are always retained. */
-    private fun cleanupImport(db: SQLiteDatabase, projectId: String, assetId: String) {
+    private fun cleanupImport(db: SQLiteDatabase, projectId: String, assetId: String, extension: String = "png") {
         validId(projectId)
         validId(assetId)
         check(importKey(assetId) !in activeImports) { "步骤保存仍在进行，不能清理。" }
@@ -750,13 +1022,14 @@ class ProjectStore(context: Context) {
             check(directory.isDirectory && directory.delete()) { "步骤暂存目录清理失败。" }
             syncDirectory(stagingRoot)
         }
-        val path = assetPath(projectId, assetId)
+        val path = assetPath(projectId, assetId, extension)
         if (count(db, "local_assets", "relative_path=?", path) == 0) {
             deleteImportFile(checkedAssetFile(projectId, path))
         }
         // Do not tie this row to a project FK: deleting a project during an active copy must
         // leave the recovery record until that copy's private files have actually been removed.
-        db.delete("asset_imports", "project_id=? AND asset_id=?", arrayOf(projectId, assetId))
+        db.delete(if (extension == "mp4") "transition_imports" else "asset_imports",
+            "project_id=? AND asset_id=?", arrayOf(projectId, assetId))
     }
 
     private fun deleteImportFile(file: File) {
@@ -807,10 +1080,10 @@ class ProjectStore(context: Context) {
     private fun checkedAssetFile(projectId: String, path: String): File {
         validId(projectId)
         val parts = path.split('/')
-        check(parts.size == 3 && parts[0] == "project-assets" && parts[1] == projectId && parts[2].endsWith(".png")) {
+        check(parts.size == 3 && parts[0] == "project-assets" && parts[1] == projectId && (parts[2].endsWith(".png") || parts[2].endsWith(".mp4"))) {
             "步骤资产路径不受支持。"
         }
-        validId(parts[2].removeSuffix(".png"))
+        validId(parts[2].substringBeforeLast('.'))
         val directory = File(root, "project-assets/$projectId")
         val file = File(root, path)
         check(directory.canonicalFile == directory.absoluteFile &&
@@ -880,7 +1153,7 @@ class ProjectStore(context: Context) {
         } }
     }
 
-    private class Database(context: Context, path: String) : SQLiteOpenHelper(context, path, null, 2) {
+    private class Database(context: Context, path: String) : SQLiteOpenHelper(context, path, null, 3) {
         override fun onConfigure(db: SQLiteDatabase) { db.setForeignKeyConstraintsEnabled(true) }
         override fun onCreate(db: SQLiteDatabase) {
             db.execSQL("""CREATE TABLE projects (
@@ -936,6 +1209,7 @@ class ProjectStore(context: Context) {
             db.execSQL("CREATE INDEX hotspots_state ON hotspots(project_id,state_id)")
             db.execSQL("CREATE INDEX edges_target ON edges(project_id,to_state_id)")
             createNextActions(db)
+            createTransitions(db)
         }
 
         private fun createNextActions(db: SQLiteDatabase) {
@@ -949,11 +1223,31 @@ class ProjectStore(context: Context) {
             db.execSQL("CREATE INDEX next_actions_target ON next_actions(project_id,to_state_id)")
         }
 
+        private fun createTransitions(db: SQLiteDatabase) {
+            // No edge FK: saveStepDraft replaces edge rows atomically while preserving stable
+            // IDs. The transaction reconciles semantic edge changes and queues old asset removal.
+            db.execSQL("""CREATE TABLE edge_transitions (
+                project_id TEXT NOT NULL, edge_id TEXT NOT NULL, asset_id TEXT NOT NULL,
+                source_id TEXT NOT NULL, start_us INTEGER NOT NULL CHECK(start_us>=0),
+                end_us INTEGER NOT NULL CHECK(end_us>start_us AND end_us-start_us<=10000000),
+                duration_us INTEGER NOT NULL CHECK(duration_us>0 AND duration_us<=10000000),
+                masks_json TEXT NOT NULL, review_id TEXT NOT NULL CHECK(length(review_id)>0),
+                PRIMARY KEY(project_id,edge_id), UNIQUE(project_id,asset_id), UNIQUE(project_id,review_id),
+                FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE,
+                FOREIGN KEY(project_id,asset_id) REFERENCES local_assets(project_id,asset_id) DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(project_id,source_id) REFERENCES sources(project_id,source_id) DEFERRABLE INITIALLY DEFERRED
+            )""")
+            db.execSQL("CREATE INDEX edge_transitions_source ON edge_transitions(source_id)")
+            // Recovery rows deliberately outlive project deletion, exactly like image imports.
+            db.execSQL("CREATE TABLE transition_imports(project_id TEXT NOT NULL, asset_id TEXT PRIMARY KEY NOT NULL)")
+        }
+
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            check(oldVersion == 1 && newVersion == 2) { "项目数据库需要安全迁移；请保留现有本机数据。" }
-            // SQLiteOpenHelper wraps this additive migration and user_version in one transaction.
-            // Existing hotspot tables, graph IDs, source records and asset paths stay untouched.
-            createNextActions(db)
+            check(oldVersion in 1..2 && newVersion == 3) { "项目数据库需要安全迁移；请保留现有本机数据。" }
+            // SQLiteOpenHelper commits both additive migrations and user_version together. Never
+            // rebuild old tables or drop pending image cleanup/import records during an upgrade.
+            if (oldVersion < 2) createNextActions(db)
+            if (oldVersion < 3) createTransitions(db)
         }
     }
 
@@ -975,7 +1269,7 @@ class ProjectStore(context: Context) {
         }
         private fun newId() = UUID.randomUUID().toString()
         private fun validId(id: String) { require(runCatching { UUID.fromString(id).toString() == id }.getOrDefault(false)) { "项目对象标识无效。" } }
-        private fun assetPath(projectId: String, assetId: String) = "project-assets/$projectId/$assetId.png"
+        private fun assetPath(projectId: String, assetId: String, extension: String = "png") = "project-assets/$projectId/$assetId.$extension"
         private fun text(value: String, label: String, limit: Int, allowEmpty: Boolean = false): String {
             val result = value.trim()
             require((allowEmpty || result.isNotBlank()) && result.length <= limit &&
