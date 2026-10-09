@@ -1670,10 +1670,11 @@ class ProjectStore(context: Context) {
         private fun migrateOrigins(db: SQLiteDatabase) {
             check(db.inTransaction() && foreignKeys(db) == 0) { "项目迁移保护未就绪。" }
             // Do not silently lose user-installed schema objects on a table rebuild.
-            db.rawQuery("SELECT type,name,tbl_name FROM sqlite_master WHERE type IN ('index','trigger','view') AND sql IS NOT NULL", null).use { rows ->
+            db.rawQuery("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN ('index','trigger','view') AND sql IS NOT NULL", null).use { rows ->
                 while (rows.moveToNext()) {
                     check(rows.getString(0) == "index" && (rows.getString(2) != "states" ||
-                        rows.getString(1) in setOf("states_order", "states_source"))) {
+                        rows.getString(3) in setOf("CREATE INDEX states_order ON states(project_id,sort_order)",
+                            "CREATE INDEX states_source ON states(source_id)"))) {
                         "项目包含额外数据库对象，无法安全迁移；请保留本机数据。"
                     }
                 }
@@ -1682,6 +1683,7 @@ class ProjectStore(context: Context) {
                 buildList { while (it.moveToNext()) add(it.getString(0)) }
             }
             val unchanged = names.filter { it != "states" }.associateWith { fingerprint(db, it) }
+            val schema = unaffectedSchema(db)
             val states = fingerprint(db, "states", LEGACY_STATE_COLUMNS)
             createStates(db, "states_v6")
             db.execSQL("INSERT INTO states_v6 ($LEGACY_STATE_COLUMNS,origin_kind) SELECT $LEGACY_STATE_COLUMNS,'videoFrame' FROM states")
@@ -1691,7 +1693,7 @@ class ProjectStore(context: Context) {
             db.execSQL("CREATE INDEX states_order ON states(project_id,sort_order)")
             db.execSQL("CREATE INDEX states_source ON states(source_id)")
             check(fingerprint(db, "states", LEGACY_STATE_COLUMNS) == states &&
-                unchanged.all { (table, before) -> fingerprint(db, table) == before }) {
+                unchanged.all { (table, before) -> fingerprint(db, table) == before } && unaffectedSchema(db) == schema) {
                 "项目关系迁移核对失败，原数据将保留。"
             }
             db.rawQuery("PRAGMA foreign_key_check", null).use { check(!it.moveToFirst()) { "项目关系无效，原数据将保留。" } }
@@ -1699,6 +1701,12 @@ class ProjectStore(context: Context) {
                 check(rows.moveToFirst() && rows.getString(0) == "ok" && !rows.moveToNext()) { "项目完整性核对失败。" }
             }
         }
+
+        private fun unaffectedSchema(db: SQLiteDatabase): List<List<String?>> = db.rawQuery(
+            "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name!='states' AND name NOT LIKE 'sqlite_%' ORDER BY type,name", null,
+        ).use { rows -> buildList {
+            while (rows.moveToNext()) add((0..3).map { if (rows.isNull(it)) null else rows.getString(it) })
+        } }
 
         /** Stream all exact typed values, ordered by every projected column. Includes drafts,
          * self-links, NULL targets, assets and journals; empty FK checks alone miss cascaded rows. */

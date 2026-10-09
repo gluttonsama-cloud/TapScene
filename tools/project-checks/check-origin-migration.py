@@ -60,10 +60,11 @@ def migrate(db, version, fail=None):
     for sql in legacy:
         if introduced(sql)>version: db.execute(sql)
     # Mirror production's fail-closed schema object gate.
-    for kind,name,table in db.execute("SELECT type,name,tbl_name FROM sqlite_master WHERE type IN ('index','trigger','view') AND sql IS NOT NULL"):
-        assert kind == 'index' and (table != 'states' or name in ('states_order','states_source'))
+    for kind,name,table,sql in db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN ('index','trigger','view') AND sql IS NOT NULL"):
+        assert kind == 'index' and (table != 'states' or sql in ('CREATE INDEX states_order ON states(project_id,sort_order)','CREATE INDEX states_source ON states(source_id)'))
     before = {t:rows(db,t) for t in tables(db) if t!='states'}
     old = rows(db,'states',columns)
+    unchanged_schema = list(db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name!='states' AND name NOT LIKE 'sqlite_%' ORDER BY type,name"))
     db.execute(new_state.replace('CREATE TABLE states (','CREATE TABLE states_v6 ('))
     db.execute(f"INSERT INTO states_v6 ({columns},origin_kind) SELECT {columns},'videoFrame' FROM states")
     checkpoint(fail,'copy')
@@ -75,6 +76,7 @@ def migrate(db, version, fail=None):
     checkpoint(fail,'indexes')
     assert rows(db,'states',columns)==old
     assert before=={t:rows(db,t) for t in before}
+    assert unchanged_schema == list(db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name!='states' AND name NOT LIKE 'sqlite_%' ORDER BY type,name"))
     assert not list(db.execute('PRAGMA foreign_key_check'))
     assert list(db.execute('PRAGMA integrity_check'))==[('ok',)]
     db.execute('PRAGMA user_version=6'); checkpoint(fail,'version')
@@ -100,9 +102,11 @@ for version in range(1,6):
     print(f'PASS v{version}->v6 exact graph/assets/drafts/journals, composite IDs, all five DDL/version rollback points')
 
 # Gates reject unexpected schema and pre-existing orphan relationships without changing anything.
-for bad in ('index','trigger','orphan'):
+for bad in ('index','changed-index','trigger','orphan'):
     db=fixture(5)
     if bad=='index': db.execute('CREATE INDEX custom_states ON states(title)')
+    elif bad=='changed-index':
+        db.execute('DROP INDEX states_source'); db.execute('CREATE INDEX states_source ON states(title)')
     elif bad=='trigger': db.execute('CREATE TRIGGER custom_states AFTER UPDATE ON states BEGIN SELECT 1; END')
     else:
         db.execute('PRAGMA foreign_keys=OFF');db.execute("UPDATE states SET source_id='missing' WHERE project_id='p'");db.commit()
