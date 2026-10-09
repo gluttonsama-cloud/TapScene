@@ -56,6 +56,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     var confirmLeave by rememberSaveable { mutableStateOf(false) }
     var projectMore by rememberSaveable { mutableStateOf(false) }
     var transitionEdgeId by rememberSaveable { mutableStateOf<String?>(null) }
+    var correctionStartsWithMask by rememberSaveable { mutableStateOf(false) }
     var retainedMedia by remember { mutableStateOf(false) }
     var pendingCandidateProject by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingCandidateSource by rememberSaveable { mutableStateOf<String?>(null) }
@@ -141,6 +142,28 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
         if ((page == "transition" || page == "regions" || page == "path") && projectId == null && !state.busy) pop()
     }
     val scopeReady = projectId != null && media.projectId == projectId && !retainedMedia
+    val openStepCorrection: (Boolean) -> Unit = { masks ->
+        val snapshot = projects.state.value.project
+        val step = projects.state.value.selectedStepId
+        if (!unavailable && scopeReady && snapshot != null && step != null && media.openStepCorrection(snapshot, step)) {
+            correctionStartsWithMask = masks
+            push("step-correction")
+        }
+    }
+    val closeStepCorrection: () -> Unit = {
+        val correction = media.state.value.correction
+        val completed = media.state.value.completedCorrectionId != null
+        if (!projects.state.value.busy && media.closeStepCorrection()) {
+            // A failed/stale preparation may have discovered a newer persisted revision.
+            // Refresh without saving or discarding the author's retained text and actions.
+            if (correction != null && !completed) projects.refreshAfterTransition(correction.projectId, correction.stepId)
+            pop()
+        }
+    }
+    LaunchedEffect(page, mediaState.completedCorrectionId, mediaState.busy, state.busy) {
+        if (page == "step-correction" && mediaState.completedCorrectionId != null && !mediaState.busy && !state.busy)
+            closeStepCorrection()
+    }
     val openRecordedCandidates: (String, String, Boolean) -> Unit = { id, source, analyze ->
         pendingCandidateProject = id
         pendingCandidateSource = source
@@ -285,6 +308,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     BackHandler(enabled = page != null && !retainedMedia) { pop() }
     BackHandler(enabled = page in setOf("review", "delivery", "import") && releaseState.busy) { releases.cancel() }
     BackHandler(enabled = page == "player") { closeReleasePlayer() }
+    BackHandler(enabled = page == "step-correction") { closeStepCorrection() }
     BackHandler(enabled = page == "path" && state.route != ProjectRoute.EDIT) { if (!state.busy) pop() }
     BackHandler(enabled = page == null && !retainedMedia && state.route == ProjectRoute.STEPS) {
         if (!state.busy && !mediaState.busy) projects.back()
@@ -309,7 +333,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                 }
                 if (recording.isBusy && page != "record") Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(if (recording.phase == RecordingPhase.Recording) "录制中" else "录屏处理中", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = ShellColors.Accent)
-                    TextButton(onClick = { push("record") }) { Text("查看") }
+                    TextButton(onClick = { push("record") }, enabled = mediaState.correction == null) { Text("查看") }
                     if (recording.phase == RecordingPhase.Recording || recording.phase == RecordingPhase.Starting) TextButton(onClick = { RecordingCoordinator.stop(context) }) { Text("停止") }
                 }
                 if (candidateState.busy && page != "candidates") Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -320,7 +344,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                     TextButton(onClick = { push("candidates") }) { Text("查看") }
                     TextButton(onClick = candidates::cancel) { Text("取消") }
                 }
-                if (!retainedMedia && state.route != ProjectRoute.MEDIA && page != "candidate-review") {
+                if (!retainedMedia && state.route != ProjectRoute.MEDIA && page != "candidate-review" && page != "step-correction") {
                     if (state.busy || (scopeReady && mediaState.busy)) {
                         LinearProgressIndicator(Modifier.fillMaxWidth())
                         Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -345,6 +369,24 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                     when {
                         retainedMedia -> MediaScreen(media, onBack = { retainedMedia = false; projects.reload() })
                         page != null -> when (page) {
+                            "step-correction" -> {
+                                val correction = mediaState.correction
+                                if (correction != null && correction.projectId == projectId && correction.stepId == state.selectedStepId) {
+                                    StepImageCorrectionContent(mediaState, state.bitmap,
+                                        if (correctionStartsWithMask) StepImageCorrectionMode.MASK else StepImageCorrectionMode.FRAME,
+                                        CorrectionUiCallbacks(closeStepCorrection, media::cancel, media::takeFrame,
+                                            media::addMask, media::undoMask, media::makeImage,
+                                            onConfirm = { digest ->
+                                                val current = media.state.value
+                                                if (!current.busy && !projects.state.value.busy && !projects.state.value.loadFailed &&
+                                                    current.correction == correction && current.frameReviewId == correction.sessionId &&
+                                                    current.candidate?.sha256 == digest && current.candidateImage != null) {
+                                                    media.review(true)
+                                                    media.saveReviewedImage { input -> projects.replaceReviewedStep(correction, input) }
+                                                }
+                                            }, onRetry = media::retryStepCorrection, onSelectSource = media::selectCorrectionSource))
+                                } else ScreenEmpty("已返回保存的画面", "未确认的新画面没有替换原步骤。", "返回步骤", closeStepCorrection)
+                            }
                             "record" -> RecordingCaptureRoute(projects, pop, requestImport, openRecordedCandidates)
                             "settings" -> {
                                 val storage by produceState<Pair<Int, Long>?>(null, state.projects, state.retainedMediaWorkspaces, mediaState.drafts) {
@@ -427,8 +469,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                         closeEditor, projects::editTitle, projects::editDescription, projects::editTerminal,
                                         projects::putHotspot, projects::removeHotspot, projects::saveStepDraft, projects::discardStepDraft,
                                         {}, { id -> projects.saveBeforeTransition { transitionEdgeId = id; push("transition") } }, projects::putNextAction, projects::removeNextAction,
-                                        onOpenRegions = { if (state.dirtyStepIds.isEmpty()) push("regions") }),
-                                        previewEnabled = false, regionsEnabled = state.dirtyStepIds.isEmpty())
+                                        onOpenRegions = { if (state.dirtyStepIds.isEmpty()) push("regions") }, onCorrectImage = openStepCorrection),
+                                        previewEnabled = false, regionsEnabled = state.dirtyStepIds.isEmpty(), correctionEnabled = scopeReady && !mediaState.busy)
                                 } else AuthoredPathScreen(snapshot, pathStepIds, unavailable || mediaState.busy,
                                     { if (!state.busy) pop() },
                                     { ids, terminal, revision ->
@@ -509,8 +551,9 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 projects::putHotspot, projects::removeHotspot, projects::saveStepDraft, projects::discardStepDraft,
                                 { projects.startPreview(true) }, { id -> projects.saveBeforeTransition { transitionEdgeId = id; push("transition") } },
                                 projects::putNextAction, projects::removeNextAction,
-                                onOpenRegions = { if (state.dirtyStepIds.isEmpty()) push("regions") }),
-                                previewEnabled = state.dirtyStepIds.isEmpty(), regionsEnabled = state.dirtyStepIds.isEmpty())
+                                onOpenRegions = { if (state.dirtyStepIds.isEmpty()) push("regions") }, onCorrectImage = openStepCorrection),
+                                previewEnabled = state.dirtyStepIds.isEmpty(), regionsEnabled = state.dirtyStepIds.isEmpty(),
+                                correctionEnabled = scopeReady && !mediaState.busy)
                         } }
                         state.route == ProjectRoute.PREVIEW -> state.project?.let { snapshot -> state.preview?.let { preview ->
                             DraftPreviewContent(snapshot, preview, state.bitmap, unavailable, projects::chooseHotspot,

@@ -476,6 +476,85 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         stepId
     }
 
+    /** Runs under MediaWorkspace's candidate lock; never auto-saves typed text or actions. */
+    suspend fun replaceReviewedStep(correction: StepImageCorrection, input: ReviewedStepInput) =
+        withContext(Dispatchers.Main.immediate) {
+            check(!state.value.busy) { "项目正在保存，请稍后重试" }
+            if (state.value.project?.project?.id != correction.projectId || state.value.loadFailed)
+                throw StepCorrectionException("项目已改变，请返回后重新打开这一步。")
+            mutableState.update { it.copy(busy = true, stage = "替换已复核画面", message = null) }
+            var locked = false
+            var committed: ProjectSnapshot? = null
+            try {
+                operationLock.lock()
+                locked = true
+                invalidatePreview(edited = true)
+                val saved = withContext(Dispatchers.IO) {
+                    store.replaceReviewedStep(correction.projectId, correction.stepId, correction.expectedRevision, input)
+                }
+                committed = saved
+                reconcileReplacementDrafts(saved, correction.stepId)
+                applyProject(saved)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                val current = withContext(Dispatchers.IO) { store.readProject(correction.projectId) }
+                throw StepCorrectionException(if (current?.project?.revision != correction.expectedRevision)
+                    "步骤已改变，未覆盖当前画面。请返回后重新打开。"
+                    else "画面暂未替换，请检查本机存储后重试；原步骤仍保留。")
+            } finally {
+                withContext(NonCancellable) {
+                    try {
+                        val fresh = withContext(Dispatchers.IO) { store.readProject(correction.projectId) }
+                        val saved = fresh?.steps?.singleOrNull { it.id == correction.stepId && it.captureId == input.captureId }
+                        if (fresh != null) {
+                            if (saved != null) reconcileReplacementDrafts(fresh, correction.stepId)
+                            applyProject(fresh)
+                            selectCommittedStep(correction.stepId)
+                            fresh.steps.firstOrNull { it.id == correction.stepId }?.let { step ->
+                                try { loadBitmap(fresh, step) } catch (_: Exception) { clearFailedBitmap() }
+                            }
+                            if (saved != null) message("画面已替换；文字和动作保持原样" +
+                                if (correction.regionCount + correction.transitionCount > 0) "，区域和相关过渡需重新处理" else "")
+                        }
+                    } catch (_: Exception) {
+                        // The returned commit remains authoritative if a subsequent reread fails.
+                        committed?.let { reconcileReplacementDrafts(it, correction.stepId); applyProject(it) }
+                        mutableState.update { it.copy(loadFailed = true, bitmap = null,
+                            message = if (committed != null) "画面已保存，但暂时无法重读；请刷新项目。"
+                                else "暂时无法确认保存结果；请返回后刷新项目。") }
+                    } finally {
+                        if (locked) operationLock.unlock()
+                        mutableState.update { it.copy(busy = false, stage = null) }
+                    }
+                }
+            }
+        }
+
+    /** Clear invalidated media on every retained draft, including incoming edges on other steps. */
+    private fun reconcileReplacementDrafts(fresh: ProjectSnapshot, replacedStepId: String) {
+        drafts.keys.filter { it.first == fresh.project.id }.forEach { key ->
+            val record = drafts[key] ?: return@forEach
+            val actual = fresh.steps.firstOrNull { it.id == key.second } ?: return@forEach
+            val clearedEdges = record.baseStep.hotspots.filter {
+                it.transition != null && (record.baseStep.id == replacedStepId || it.targetStepId == replacedStepId) &&
+                    actual.hotspots.firstOrNull { current -> current.edgeId == it.edgeId }?.transition == null
+            }.map { it.edgeId }.toSet()
+            val clearedNext = record.baseStep.nextAction?.takeIf {
+                it.transition != null && (record.baseStep.id == replacedStepId || it.targetStepId == replacedStepId) &&
+                    actual.nextAction?.takeIf { current -> current.id == it.id }?.transition == null
+            }?.id
+            fun clearMedia(draft: StepEditDraft) = draft.copy(
+                hotspots = draft.hotspots.map { if (it.edgeId in clearedEdges) it.copy(transition = null) else it },
+                nextAction = draft.nextAction?.let { if (it.id == clearedNext) it.copy(transition = null) else it })
+            val updated = clearMedia(record.draft)
+            // Only a media-only saved change may rebase unsaved author edits automatically.
+            if (sameEdits(clearMedia(record.baseStep.toDraft()), actual))
+                drafts[key] = DraftRecord(updated.copy(dirty = !sameEdits(updated, actual)), actual, fresh.project.revision)
+            else drafts[key] = record.copy(draft = updated)
+        }
+    }
+
     private fun selectCommittedStep(stepId: String) {
         val project = state.value.project ?: return
         val step = project.steps.firstOrNull { it.id == stepId } ?: return
