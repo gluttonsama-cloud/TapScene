@@ -11,10 +11,12 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.text.KeyboardOptions
@@ -139,6 +141,8 @@ fun EditorWorkspaceContent(
 
     BoxWithConstraints(modifier.fillMaxSize()) {
         val panelMaxHeight = (maxHeight * 0.32f).coerceIn(92.dp, 216.dp)
+        val compactHeader = maxWidth > maxHeight && maxWidth >= 560.dp
+        val showUnsaved = dirtyStepCount > 0 && (!previewEnabled || !regionsEnabled)
         Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
             Row(Modifier.fillMaxWidth().heightIn(min = 60.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = goBack, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("返回") }
@@ -163,6 +167,10 @@ fun EditorWorkspaceContent(
                             else -> MaterialTheme.colorScheme.onSurfaceVariant
                         })
                 }
+                if (compactHeader && showUnsaved) TextButton(onClick = callbacks.onResolveUnsavedSteps,
+                    enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) {
+                    Text("还有 ${dirtyStepCount} 步待保存 · 去处理")
+                }
                 if (draft.recoveryStatus == DraftRecoveryStatus.FAILED) {
                     TextButton(onClick = callbacks.onRetryStaging, enabled = !busy,
                         modifier = Modifier.heightIn(min = 48.dp)) { Text("重试") }
@@ -172,17 +180,19 @@ fun EditorWorkspaceContent(
                     modifier = Modifier.heightIn(min = 48.dp)) { Text("保存") }
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            if (dirtyStepCount > 0 && (!previewEnabled || !regionsEnabled))
+            if (!compactHeader && showUnsaved)
                 UnsavedStepsAction(dirtyStepCount, !busy, callbacks.onResolveUnsavedSteps)
-            EditorCanvas(bitmap = bitmap,
+            val editorCanvas: @Composable (Modifier) -> Unit = { canvasModifier ->
+                EditorCanvas(bitmap = bitmap,
                 hotspots = if (mode == EditorMode.HOTSPOTS || mode == EditorMode.BRANCHES) draft.hotspots else emptyList(),
-                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                modifier = canvasModifier.padding(horizontal = 16.dp, vertical = 4.dp),
                 enabled = !busy && mode == EditorMode.HOTSPOTS,
                 busy = busy, selectedHotspotId = selectedId, adding = adding && canAdd,
                 onSelect = { selectedId = it }, onCreate = openNew,
                 onChangeRect = { id, rect -> draft.hotspots.firstOrNull { it.id == id }?.let { callbacks.onPutHotspot(it.copy(rect = rect)) } })
-            // The panel is bounded; the canvas receives every remaining pixel, including landscape.
-            Column(Modifier.fillMaxWidth().heightIn(max = panelMaxHeight).verticalScroll(rememberScrollState())
+            }
+            val editorPanel: @Composable (Modifier) -> Unit = { panelModifier ->
+            Column(panelModifier.verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 when (mode) {
                     EditorMode.FRAME -> {
@@ -310,6 +320,16 @@ fun EditorWorkspaceContent(
 
                     }
                 }
+            }
+            }
+            if (compactHeader) {
+                Row(Modifier.weight(1f).fillMaxWidth()) {
+                    editorCanvas(Modifier.weight(1f).fillMaxHeight())
+                    editorPanel(Modifier.width((maxWidth * .4f).coerceIn(240.dp, 320.dp)).fillMaxHeight())
+                }
+            } else {
+                editorCanvas(Modifier.weight(1f).fillMaxWidth())
+                editorPanel(Modifier.fillMaxWidth().heightIn(max = panelMaxHeight))
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Row(Modifier.fillMaxWidth()) {
