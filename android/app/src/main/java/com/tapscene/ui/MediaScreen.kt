@@ -72,6 +72,8 @@ import com.tapscene.data.ReviewedStepInput
 import com.tapscene.media.OpaqueMask
 import com.tapscene.media.SafeMediaWriter
 import com.tapscene.ui.shell.ScreenEmpty
+import com.tapscene.ui.shell.CandidateTextSuggestions
+import com.tapscene.ui.shell.OcrSuggestions
 import com.tapscene.ui.shell.ShellColors
 import com.tapscene.ui.shell.ShellTopBar
 import com.tapscene.ui.shell.StatusNote
@@ -93,6 +95,10 @@ fun MediaScreen(
     batchReview: Boolean = false,
     reviewItemId: String? = null,
     onSkip: (() -> Unit)? = null,
+    textSuggestions: CandidateTextSuggestions? = null,
+    stepTitle: String? = null,
+    onStepTitleChange: (String) -> Unit = {},
+    onUseSuggestedTitle: (String) -> Unit = {},
     onReviewedImage: (suspend (ReviewedStepInput) -> Unit)? = null,
 ) {
     val state by workspace.state.collectAsStateWithLifecycle()
@@ -106,6 +112,31 @@ fun MediaScreen(
     val idle = !state.busy && !savePending
     val canEdit = idle && !state.unsavedEdits
     val canLeave = canEdit
+    val matchingSuggestions = textSuggestions?.takeIf {
+        it.candidateId == reviewItemId && it.matches(workspace.projectId, state.selected?.source, state.frameReviewId, state.frame)
+    }
+    val suggestionsPanel: @Composable () -> Unit = {
+        if (matchingSuggestions != null && stepTitle != null) {
+            OcrSuggestions(matchingSuggestions.result, stepTitle, canEdit, (state.selected?.masks?.size ?: 20) < 20,
+                onUseTitle = { suggestion ->
+                    val current = workspace.state.value
+                    if (!savePending && !current.busy && !current.unsavedEdits && stepTitle.isBlank() &&
+                        matchingSuggestions.matches(workspace.projectId, current.selected?.source, current.frameReviewId, current.frame)) {
+                        onUseSuggestedTitle(suggestion)
+                    }
+                },
+                onMask = { mask ->
+                    val current = workspace.state.value
+                    if (!savePending && !current.busy && !current.unsavedEdits && (current.selected?.masks?.size ?: 20) < 20 &&
+                        matchingSuggestions.matches(workspace.projectId, current.selected?.source, current.frameReviewId, current.frame)) {
+                        workspace.addMask(mask)
+                        mode = ManualMediaMode.MASK
+                    }
+                })
+        } else if (textSuggestions != null && !state.busy && state.frame != null) {
+            Text("画面已调整，原文字建议不再适用。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+        }
+    }
     val leave: () -> Unit = {
         if (canLeave) onBack?.invoke() else workspace.message("请等待处理完成，或先取消处理并保存修改")
     }
@@ -240,6 +271,7 @@ fun MediaScreen(
                             if (batchReview) workspace.prepareCandidateImage(selected.source.sourceId, time, requireNotNull(reviewItemId)) else workspace.takeFrame(time)
                         },
                             enabled = canEdit, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("手动取这一帧") }
+                        suggestionsPanel()
                         if (state.frame != null && !batchReview) {
                             Text("没有敏感内容可直接继续；需要遮挡时切换到“遮挡”。",
                                 style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
@@ -261,6 +293,7 @@ fun MediaScreen(
                                 TextButton(onClick = workspace::undoMask, enabled = canEdit && selected.masks.isNotEmpty(),
                                     modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("撤销最后一块") }
                             }
+                            suggestionsPanel()
                             Button(onClick = workspace::makeImage, enabled = canEdit,
                                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("生成画面并复核") }
                         } ?: StatusNote("先在“画面”中取一帧，再按需添加遮挡。")
@@ -306,13 +339,22 @@ fun MediaScreen(
                             Text("${candidate.width} × ${candidate.height} · ${if (isImage) "PNG" else "无音轨 MP4"}",
                                 style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                             if (isImage && onReviewedImage != null) {
+                                if (stepTitle != null) {
+                                    OutlinedTextField(value = stepTitle, onValueChange = { value ->
+                                        if (value.length <= 120 && value.none { it.isISOControl() }) onStepTitleChange(value)
+                                    }, label = { Text("步骤标题（可选）") }, singleLine = true, enabled = canEdit,
+                                        modifier = Modifier.fillMaxWidth())
+                                    Text("标题会进入作品，请一并复核。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                                }
+                                suggestionsPanel()
                                 Text("请检查上方画面；如有敏感内容，确认已完整遮挡。",
                                     style = MaterialTheme.typography.bodyMedium)
                                 Button(onClick = {
                                     // Do not approve a replacement candidate from a stale composition.
                                     val current = workspace.state.value
                                     if (!savePending && !current.busy && !current.unsavedEdits &&
-                                        current.candidate?.sha256 == candidate.sha256 && current.candidateImage != null) {
+                                        current.candidate?.sha256 == candidate.sha256 && current.candidateImage != null &&
+                                        (!batchReview || current.frameReviewId == reviewItemId)) {
                                         workspace.review(true)
                                         workspace.saveReviewedImage(onReviewedImage)
                                     }
@@ -359,7 +401,7 @@ fun MediaScreen(
     }
     if (deleteDialog) AlertDialog(onDismissRequest = { deleteDialog = false },
         title = { Text("删除 App 中的素材副本？") },
-        text = { Text("只删除 TapScene 私有空间中的这段录屏副本及取帧、遮挡记录，无法撤销。系统原文件和已导出文件不受影响；仍被项目步骤引用的素材会保留。") },
+        text = { Text("只删除 TapScene 私有空间中的这段录屏副本及取帧、遮挡记录、本机文字建议，无法撤销。系统原文件和已导出文件不受影响；仍被项目步骤引用的素材会保留。") },
         confirmButton = { TextButton(onClick = { deleteDialog = false; workspace.deleteSelected() }, enabled = canEdit) { Text("删除 App 副本") } },
         dismissButton = { TextButton(onClick = { deleteDialog = false }) { Text("取消") } })
     if (maskDialog) MaskDialog(onDismiss = { maskDialog = false }) { mask ->

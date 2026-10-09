@@ -8,6 +8,7 @@ import android.provider.DocumentsContract
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.tapscene.data.ProjectStore
+import com.tapscene.data.CandidateOcrStore
 import com.tapscene.data.ReviewedStepInput
 import com.tapscene.data.SourceDraft
 import com.tapscene.data.WorkspaceStore
@@ -387,6 +388,9 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
                 store.update { current ->
                     val latest = current.firstOrNull { it.source.sourceId == selected.source.sourceId }
                     if (latest != null) {
+                        // Delete only this source's derived text and revoke its active OCR
+                        // lease before source removal. A late result must never restore it.
+                        CandidateOcrStore(app).deleteSource(latest.source.sourceId)
                         val sourceFile = File(app.noBackupFilesDir, latest.source.privateRelativePath)
                         require(sourceFile.canonicalFile.parentFile == File(app.noBackupFilesDir, "sources").canonicalFile)
                         check(!sourceFile.exists() || sourceFile.delete()) { "素材文件清理失败" }

@@ -1,0 +1,233 @@
+{
+  "schema": 1,
+  "purpose": "Synthetic host-only offline OCR checks; not Android screenshots or tap evidence.",
+  "generator": "generate-fixtures.py",
+  "pillow_version": "12.3.0",
+  "font": {
+    "filename": "NotoSansCJK-Regular.ttc",
+    "collection_index": 2,
+    "sha256": "b76b0433203017ca80401b2ee0dd69350349871c4b19d504c34dbdd80541690a",
+    "license": "SIL Open Font License 1.1; rasterized synthetic text only, font not redistributed"
+  },
+  "fixtures": [
+    {
+      "name": "normal",
+      "group": "core",
+      "file": "normal.pgm.gz",
+      "width": 720,
+      "height": 440,
+      "pgm_sha256": "b1ea947740db5f666ea9c179ac9591dc02a53bb4725c9e3e373dcb901584f47a",
+      "lines": [
+        {
+          "text": "创建演示",
+          "box": [
+            40,
+            36,
+            168,
+            68
+          ],
+          "font_px": 32
+        },
+        {
+          "text": "选择画面",
+          "box": [
+            40,
+            140,
+            144,
+            166
+          ],
+          "font_px": 26
+        },
+        {
+          "text": "上一步",
+          "box": [
+            52,
+            326,
+            130,
+            352
+          ],
+          "font_px": 26
+        },
+        {
+          "text": "下一步",
+          "box": [
+            420,
+            326,
+            498,
+            352
+          ],
+          "font_px": 26
+        }
+      ]
+    },
+    {
+      "name": "mixed",
+      "group": "core",
+      "file": "mixed.pgm.gz",
+      "width": 720,
+      "height": 440,
+      "pgm_sha256": "ea75c4d2adfe3cf9bae249eedce77fc2f92a196437b69a9dbedc3f18252a0822",
+      "lines": [
+        {
+          "text": "项目 Demo 2026",
+          "box": [
+            40,
+            36,
+            263,
+            64
+          ],
+          "font_px": 30
+        },
+        {
+          "text": "步骤 03 / 12",
+          "box": [
+            40,
+            140,
+            177,
+            168
+          ],
+          "font_px": 26
+        },
+        {
+          "text": "保存为 PNG",
+          "box": [
+            40,
+            252,
+            177,
+            278
+          ],
+          "font_px": 26
+        }
+      ]
+    },
+    {
+      "name": "dark",
+      "group": "core",
+      "file": "dark.pgm.gz",
+      "width": 720,
+      "height": 440,
+      "pgm_sha256": "4acfebfbf2bf4f6c585731c2edd76c2c8f26a8938688e7a556faee6124e6d25a",
+      "lines": [
+        {
+          "text": "隐私检查",
+          "box": [
+            40,
+            36,
+            168,
+            68
+          ],
+          "font_px": 32
+        },
+        {
+          "text": "确认当前画面",
+          "box": [
+            40,
+            140,
+            196,
+            166
+          ],
+          "font_px": 26
+        },
+        {
+          "text": "继续",
+          "box": [
+            420,
+            326,
+            472,
+            352
+          ],
+          "font_px": 26
+        }
+      ]
+    },
+    {
+      "name": "small",
+      "group": "stress",
+      "file": "small.pgm.gz",
+      "width": 720,
+      "height": 440,
+      "pgm_sha256": "aa3b66d5d8f5a4e86c0d4c835afddb6133a65f054eb805d41d846b7c647839de",
+      "lines": [
+        {
+          "text": "编辑步骤",
+          "box": [
+            40,
+            40,
+            96,
+            54
+          ],
+          "font_px": 14
+        },
+        {
+          "text": "尚未确认",
+          "box": [
+            40,
+            142,
+            88,
+            154
+          ],
+          "font_px": 12
+        },
+        {
+          "text": "返回列表",
+          "box": [
+            420,
+            326,
+            476,
+            341
+          ],
+          "font_px": 14
+        }
+      ]
+    },
+    {
+      "name": "low-contrast",
+      "group": "stress",
+      "file": "low-contrast.pgm.gz",
+      "width": 720,
+      "height": 440,
+      "pgm_sha256": "5d2e7bc882951e04c1c3b27dd79d3a6dd16019785b5d96c72288b32e7f21cd21",
+      "lines": [
+        {
+          "text": "候选画面",
+          "box": [
+            40,
+            36,
+            136,
+            60
+          ],
+          "font_px": 24
+        },
+        {
+          "text": "重新分析",
+          "box": [
+            40,
+            142,
+            120,
+            162
+          ],
+          "font_px": 20
+        },
+        {
+          "text": "保留此帧",
+          "box": [
+            420,
+            326,
+            500,
+            346
+          ],
+          "font_px": 20
+        }
+      ]
+    },
+    {
+      "name": "icons-only",
+      "group": "negative",
+      "file": "icons-only.pgm.gz",
+      "width": 720,
+      "height": 440,
+      "pgm_sha256": "03ce14c0ef92eaee03e4450289766f6a76a42efd053bbcb10ff8d4618e0378f1",
+      "lines": []
+    }
+  ]
+}

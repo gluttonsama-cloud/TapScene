@@ -364,7 +364,8 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
      * Called directly inside MediaWorkspace's operation lock. This must remain a suspending commit,
      * never a viewModelScope launch: the caller owns and may clean up the reviewed candidate.
      */
-    suspend fun saveReviewedStep(projectId: String, input: ReviewedStepInput, openEditor: Boolean = true): String = withContext(Dispatchers.Main.immediate) {
+    suspend fun saveReviewedStep(projectId: String, input: ReviewedStepInput, openEditor: Boolean = true,
+        title: String? = null): String = withContext(Dispatchers.Main.immediate) {
         check(!state.value.busy) { "项目正在保存，请稍后重试" }
         check(state.value.project?.project?.id == projectId) { "当前项目已变化，请重新打开素材工作台" }
         check(!state.value.loadFailed) { "请先重新读取本地项目" }
@@ -376,9 +377,12 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
             operationLock.lock()
             locked = true
             invalidatePreview(edited = true)
-            val title = "步骤 ${(state.value.project?.steps?.size ?: 0) + 1}"
+            // A title is author-approved input for a NEW step only. addReviewedStep's capture
+            // token reconciliation returns the original step on retry, without changing it.
+            val newTitle = title?.trim()?.takeIf { it.isNotEmpty() }
+                ?: "步骤 ${(state.value.project?.steps?.size ?: 0) + 1}"
             val saved = withContext(Dispatchers.IO) {
-                store.addReviewedStep(projectId, input, title, stepId = stepId)
+                store.addReviewedStep(projectId, input, newTitle, stepId = stepId)
             }
             committed = saved
             // A retry may return the existing step for this candidate's capture token.

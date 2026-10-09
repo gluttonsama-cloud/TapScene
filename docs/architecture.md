@@ -4,14 +4,16 @@
 
 本文定义待实现的数据、接口和模块；具体版本组合与兼容范围在实现时验证。
 
-当前 Android 壳层复用既有本地项目与媒体用例：顶层项目/演示库，项目工作区步骤/素材/检查，单步编辑器独立五模式；录制与候选接入本机实现；交付、账号、版本和观看器仍提供真实空态与禁用执行，不伪造后端状态。现有项目/素材持久化与安全输出边界不因换壳改变。
+当前 Android 壳层复用既有本地项目与媒体用例：顶层项目/演示库，项目工作区步骤/素材/检查，单步编辑器独立五模式；录制与候选、本地封存与静态离线观看已接入本机实现；托管交付与账号仍提供真实空态及禁用执行，不伪造后端状态。现有项目/素材持久化与安全输出边界不因换壳改变。
 
 录制采用 MediaProjection + MediaRecorder 无声 H.264 Surface，前台服务在获取投影前启动；每会话只消费一次授权和一次 virtual display，不持久化授权令牌。停止先断开采集，原始文件封口、同步后写 journal，再按稳定 sourceId 校验和登记私有素材；登记持久化未确认时保留 sealed 副本，重试幂等，中断不自动重新采集。仅当前会话的独占临时文件可显式删除。Workspace 局部更新在共享锁内读改写，原子替换后同步目录；“可能已提交”失败不删除原片。
 
 API 32+ 利用系统等比 fit/居中输出固定编码画布，旋转和窗口变化可产生留边；API 34 记录内容尺寸回调及粗略 fit 区域，但时间不是媒体 PTS，不能用于触点映射。API 26–31 检测显示变化即结束本段。画面候选使用一个 Media3 Surface 会话，最多 361 次时间请求、30 个候选；32×32 特征比较并按实际帧 PTS 去重，毫秒精度。独立私有 SQLite 保存 source SHA、算法版本、检查点和人工选择；确认 PNG 保存为步骤后以稳定 captureId 对账，不把候选选择当复核。
 
-授权只在点击开始时请求；前台通知可停止，通知权限拒绝仍可回 App 停止。此增量新增 mediaProjection 前台服务及通知权限，没有音频、网络、广泛存储或无障碍权限。画面可能含可见密码/键盘输入，不能承诺自动排除；尊重 FLAG_SECURE。Accessibility、OCR、自动热点与精确触点仍未实现。官方约束参见 [MediaProjection 会话与尺寸变化](https://developer.android.com/media/grow/media-projection)、[前台服务类型](https://developer.android.com/develop/background-work/services/fgs/service-types#media-projection)、[受保护窗口](https://developer.android.com/reference/android/view/WindowManager.LayoutParams#FLAG_SECURE)。
+授权只在点击开始时请求；前台通知可停止，通知权限拒绝仍可回 App 停止。此增量新增 mediaProjection 前台服务及通知权限，没有音频、网络、广泛存储或无障碍权限。画面可能含可见密码/键盘输入，不能承诺自动排除；尊重 FLAG_SECURE。Accessibility、自动热点与精确触点仍未实现。官方约束参见 [MediaProjection 会话与尺寸变化](https://developer.android.com/media/grow/media-projection)、[前台服务类型](https://developer.android.com/develop/background-work/services/fgs/service-types#media-projection)、[受保护窗口](https://developer.android.com/reference/android/view/WindowManager.LayoutParams#FLAG_SECURE)。
 
+
+离线 OCR 使用官方 PP-OCRv6_tiny ONNX 模型、官方 Maven ONNX Runtime 1.31.0 及 OpenCV 4.14.0 core/imgproc 源码；模型与字典随包、摘要固定，无运行时下载。受限 Bitmap RGB → 检测/裁切/识别/CTC 管线在单一后台任务运行，关闭 runtime 遥测并丢弃引擎日志。原始行/像素框按项目、源 SHA、实际帧时间/精度和模型版本保存在排除备份的私有 SQLite，不进入离线包。取消或切换保留已完成帧；删除项目/来源撤销在途写入并清除结果。标题只由用户显式采用且不覆盖已有文字，框仅供人工遮挡，遮挡后仍须重生成并复核实际输出。依赖与限额见 [原生实现](../tools/ocr-native/README.md)；主机合成图不代替 Android 性能或隐私覆盖验收。
 
 ```mermaid
 flowchart TB
@@ -697,7 +699,7 @@ HTTP 映射：400 输入错误；401 会话失效；404 不存在或无权；409
 | Kotlin、Compose、Navigation、ViewModel、Coroutines / Flow | 原生 UI、导航、并发和状态观察 | `android/` 页面及本地用例 |
 | [Room](https://developer.android.com/training/data-storage/room/defining-data)、kotlinx.serialization | Entity / DAO / 事务 / 迁移；DTO 编解码，后续独立做语义校验 | `android/` 数据访问与包读取 |
 | MediaExtractor / MediaCodec、Bitmap / Canvas、[Media3 ExoPlayer / Transformer](https://developer.android.com/media/media3/transformer/transformations) | 实际画面取帧（当前 FrameExtractor 返回毫秒精度）、图片重编码、视频烧录遮挡与去音轨、播放 | Android 媒体管线；Transformer 须禁用 transmux 和裁剪原样本保留优化，无法保证时使用显式 codec 管线 |
-| [ML Kit Text Recognition bundled Latin / 中文模型](https://developers.google.com/ml-kit/vision/text-recognition/v2/android)（候选） | 首次使用即可端侧 OCR；[官方隐私说明](https://developers.google.com/ml-kit/terms)包含性能 / 使用指标发送 | 本机素材分析；只有能受支持地禁用非必要外传并实测通过才接入，否则采用可控端侧 OCR |
+| [Paddle PP-OCRv6_tiny](https://github.com/PaddlePaddle/PaddleOCR/tree/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android)、[ONNX Runtime](https://onnxruntime.ai/docs/get-started/with-cpp.html)、OpenCV core/imgproc | 随包离线中文/数字文字候选，源码与模型固定许可/摘要 | 私有候选分析；批量识别、显式采用标题/遮挡框，不记录点击或自动保证脱敏 |
 | [WorkManager](https://developer.android.com/develop/background-work/background-tasks/persistent/how-to/long-running) | 按系统约束调度恢复任务；恢复事实来自 local_jobs | Android 任务调度；force-stop 后由应用恢复流程重新检查 |
 | OkHttp（拟用）、浏览器 fetch | 管理 API 上传与观看请求 | Android 托管用例；`web-player/` |
 | Node.js / Fastify、PostgreSQL、Ajv | HTTP 路由、事务和受信 schema 校验 | `server/` API 与校验 worker |

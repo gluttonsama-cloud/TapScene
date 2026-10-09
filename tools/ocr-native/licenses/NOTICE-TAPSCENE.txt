@@ -1,0 +1,12 @@
+TapScene offline OCR uses modified preprocessing and postprocessing from
+PaddlePaddle/PaddleOCR (Copyright 2026 PaddlePaddle Authors), commit
+dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf, under Apache License 2.0.
+The C++ port changes memory ownership, logging, runtime integration,
+cancellation and resource bounds. It is not the upstream Android SDK.
+PP-OCRv6_tiny detector and recognizer are official PaddlePaddle models
+with Apache-2.0 model-card metadata at the fixed revisions in the lock.
+OpenCV 4.14.0 is built from fixed official source with only core/imgproc;
+its optional downloads and zlib persistence compression are disabled.
+ONNX Runtime 1.31.0 uses unmodified official platform binaries and headers.
+Source and model identifiers, hashes, URLs and changes are in the associated
+build source under tools/ocr-native/dependencies.lock.json and README.md.

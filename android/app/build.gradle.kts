@@ -9,15 +9,24 @@ android {
     namespace = "com.tapscene"
     compileSdk = 36
     buildToolsVersion = "35.0.0"
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         applicationId = "com.tapscene"
         minSdk = 26
         targetSdk = 36
-        versionCode = 8
-        versionName = "0.6.0-offline-dev"
+        versionCode = 9
+        versionName = "0.7.0-ocr-dev"
         testInstrumentationRunner = "com.tapscene.media.MediaCompatibilityInstrumentation"
         manifestPlaceholders["appLabel"] = "TapScene"
+        ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64") }
+        externalNativeBuild {
+            cmake {
+                arguments += listOf("-DANDROID_STL=c++_static", "-DCMAKE_BUILD_TYPE=Release",
+                    "-DCMAKE_JOB_POOLS=compile_pool=2;link_pool=1",
+                    "-DCMAKE_JOB_POOL_COMPILE=compile_pool", "-DCMAKE_JOB_POOL_LINK=link_pool")
+            }
+        }
     }
     buildTypes {
         debug {
@@ -33,6 +42,13 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     buildFeatures { compose = true }
+    externalNativeBuild {
+        cmake { path = file("src/main/cpp/CMakeLists.txt"); version = "3.22.1" }
+    }
+    // Only locked local model bytes and their licenses are included. The app never downloads models.
+    sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("ocr/assets"))
+    // Preserve the already stripped official runtime byte-for-byte for supply-chain checks.
+    packaging { jniLibs.keepDebugSymbols += "**/libonnxruntime.so" }
     experimentalProperties["android.experimental.enableScreenshotTest"] = true
     lint { abortOnError = true }
 }
