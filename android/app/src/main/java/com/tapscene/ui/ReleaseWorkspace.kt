@@ -566,9 +566,12 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     fun resetAiPath() = editAi { config -> config.copy(visits = listOf(RenderPlan.Visit(java.util.UUID.randomUUID().toString(), config.scene.startStateId, null, 90)), effects = emptyList()) }
     fun setAiCanvas(landscape: Boolean) = editAi { it.copy(width = if (landscape) 1920 else 1080, height = if (landscape) 1080 else 1920) }
     fun setAiHold(visitId: String, frames: Int) = editAi { config ->
-        check(frames in 1..RenderPlan.MAX_HOLD_FRAMES) { "每次停留为 1 到 1800 帧。" }
+        check(frames in 1..RenderPlan.MAX_HOLD_FRAMES) { "每步停留须在 1/30 秒到 60 秒之间。" }
+        val index = config.visits.indexOfFirst { it.visitId == visitId }
+        check(index >= 0) { "播放顺序中没有这一步。" }
+        val previousVisitId = config.visits.getOrNull(index - 1)?.visitId
         config.copy(visits = config.visits.map { if (it.visitId == visitId) RenderPlan.Visit(it.visitId, it.stateId, it.selectedEdgeId, frames) else it },
-            effects = config.effects.filterNot { it.visitId == visitId || it.type == "transition" })
+            effects = config.effects.filterNot { it.visitId == visitId || (it.visitId == previousVisitId && it.type == "transition") })
     }
     fun toggleAiEffect(visitId: String, type: String, regionId: String? = null, text: String? = null) = editAi { config ->
         val visit = config.visits.single { it.visitId == visitId }

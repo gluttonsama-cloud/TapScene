@@ -2,6 +2,8 @@ package com.tapscene.ui.shell
 
 import android.graphics.Bitmap
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -36,8 +38,10 @@ private object AiPreviewFixture {
         listOf(region), base.assets + crop)
     val visits = scene.states.mapIndexed { index, state -> RenderPlan.Visit(id("visit-$index"), state.id,
         scene.edges.firstOrNull { it.fromStateId == state.id && it.trigger == "tap" }?.id, 90) }
-    val config = AiPackageConfiguration(scene, visits, listOf(RenderPlan.Effect("focus", visits[1].visitId, 0, 90,
-        null, region.id, null, null)))
+    val config = AiPackageConfiguration(scene, visits, listOf(
+        RenderPlan.Effect("focus", visits[1].visitId, 0, 90, null, region.id, null, null),
+        RenderPlan.Effect("annotation", visits[0].visitId, 0, 90, null, null,
+            "点击报名，确认信息后提交。", ViewerScene.Rect(.08, .08, .84, .14))))
 }
 
 @PreviewTest
@@ -68,9 +72,20 @@ fun FixedRegionReviewSamplePreview() {
     }
 }
 
+@PreviewTest
+@Preview(name = "22_ai_export_review_sample", widthDp = 412, heightDp = 915, locale = "zh-rCN", showBackground = true)
+@Composable
+fun AiExportReviewSamplePreview() {
+    AiReviewSurface {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+            AiExportReviewContent(AiPreviewFixture.config, AiPreviewFixture.config.resolve())
+        }
+    }
+}
+
 @Composable
 private fun AiReviewSurface(content: @Composable () -> Unit) {
-    MaterialTheme {
+    TapSceneTheme {
         Surface {
             Column(Modifier.fillMaxSize()) {
                 Text("布局样例 · 合成内容 · 不代表设备或媒体验证", Modifier.fillMaxWidth().background(ShellColors.AccentSoft).padding(8.dp),

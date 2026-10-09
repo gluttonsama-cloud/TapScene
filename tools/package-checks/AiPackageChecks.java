@@ -41,7 +41,7 @@ public final class AiPackageChecks {
         media.add(png(assets,id(25),detail.getSubimage(36,240,468,230),ViewerScene.Asset.ROLE_REGION_CROP));
         ViewerScene scene = new ViewerScene(3,ViewerPackageCodec.REGION_POLICY_VERSION,ViewerPackageCodec.COMPILER_VERSION,id(1),
                 "Synthetic product walkthrough", "Authored test UI; not a user recording",1700000000000L,id(11),
-                List.of(state(11,21,"Discover",false),state(12,22,"Collection",false),state(13,23,"Complete",true)),
+                List.of(state(11,21,"从灵感收藏开始，逐步检查关键内容并完成这次安全演示",false),state(12,22,"Collection",false),state(13,23,"Complete",true)),
                 List.of(edge(41,11,12,31),edge(42,11,13,32),new ViewerScene.Edge(id(43),id(12),id(11),null,null,"Return to discover","continue","authored"),edge(44,12,13,33)),
                 List.of(spot(31,11,"View collection",.1,.56,.8,.1),spot(32,11,"Finish demo",.1,.7,.8,.1),spot(33,12,"Save collection",.1,.56,.8,.1)),
                 List.of(region(51,11,21,24),region(52,12,22,25)),media);
@@ -51,7 +51,7 @@ public final class AiPackageChecks {
                 effect("click",61,50,15,31,null,null,null),
                 effect("transition",61,67,8,null,null,null,null),
                 effect("highlight",62,10,40,null,52,null,null),
-                effect("annotation",63,4,40,null,null,"Return visits keep a distinct identity",new ViewerScene.Rect(.08,.15,.84,.12)),
+                effect("annotation",63,4,40,null,null,"返回前面的步骤后，仍会保留独立的播放顺序。请再次核对这张已复核画面的说明、按钮名称与可见区域，确认无误后再继续演示。",new ViewerScene.Rect(.08,.15,.84,.12)),
                 effect("click",63,45,15,32,null,null,null));
         RenderPlan portrait=RenderPlan.build(scene,1080,1920,visits,effects), landscape=RenderPlan.build(scene,1920,1080,visits,effects);
         require(portrait.totalFrames==262,"Crossfade accounting differs");

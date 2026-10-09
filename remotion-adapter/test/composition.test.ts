@@ -204,7 +204,7 @@ test("each annotation renders literal text inside its own normalized rectangle",
   assert.match(html, /font-size:55px;[^>]*-webkit-line-clamp:2/);
 });
 
-test("crossfades fade out old visits and multiply incoming/outgoing opacity during consecutive overlaps", () => {
+test("crossfades preserve same-color luminance and unmount each old visit", () => {
   const { scene, plan } = fixture();
   scene.states[0].terminal = false;
   scene.states.push(
@@ -251,8 +251,8 @@ test("crossfades fade out old visits and multiply incoming/outgoing opacity duri
   plan.effects = ["first", "second"].map((visitId) => ({
     type: "transition",
     visitId,
-    startFrame: 30,
-    durationFrames: 60,
+    startFrame: 60,
+    durationFrames: 30,
     hotspotId: null,
     regionId: null,
     text: null,
@@ -260,12 +260,12 @@ test("crossfades fade out old visits and multiply incoming/outgoing opacity duri
   }));
   plan.timeline = plan.visits.map((visit, i) => ({
     visitId: visit.visitId,
-    startFrame: i * 30,
+    startFrame: i * 60,
     durationFrames: 90,
     transitionFrames: 0,
-    overlapFrames: i < 2 ? 60 : 0,
+    overlapFrames: i < 2 ? 30 : 0,
   }));
-  plan.totalFrames = 150;
+  plan.totalFrames = 210;
   const opacities = (frame: number) =>
     Object.fromEntries(
       [
@@ -278,12 +278,19 @@ test("crossfades fade out old visits and multiply incoming/outgoing opacity duri
       ]),
     );
   assert.deepEqual(opacities(0), { first: 1 });
-  assert.deepEqual(opacities(30), { first: 1, second: 0 });
-  assert.deepEqual(opacities(75), {
-    first: 0.25,
-    second: 0.75 * 0.75,
-    third: 0.25,
-  });
-  assert.deepEqual(opacities(90), { second: 0.5, third: 0.5 });
-  assert.deepEqual(opacities(120), { third: 1 });
+  assert.deepEqual(opacities(60), { first: 1, second: 0 });
+  assert.deepEqual(opacities(75), { first: 1, second: 0.5 });
+  assert.deepEqual(opacities(90), { second: 1 });
+  assert.deepEqual(opacities(135), { second: 1, third: 0.5 });
+  assert.deepEqual(opacities(150), { third: 1 });
+  for (let frame = 0; frame < plan.totalFrames; frame++) {
+    const layers = Object.values(opacities(frame));
+    assert.ok(layers.length <= 2, "at most two active visits");
+    // Source-over compositing of two equal pixels must preserve their color,
+    // not reveal the dark page behind two partially transparent layers.
+    const pixel = layers.reduce((below, alpha) => 220 * alpha + below * (1 - alpha), 17);
+    assert.ok(Math.abs(pixel - 220) < 1e-9, `same-color pixel dimmed at frame ${frame}`);
+  }
+  const incoming = markup(scene, plan, 75).match(/<div[^>]*data-tapscene-visit="second"[^>]*>/)?.[0];
+  assert.match(incoming ?? "", /background:#111816/);
 });

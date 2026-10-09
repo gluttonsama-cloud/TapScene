@@ -92,102 +92,138 @@ fun RegionEditorContent(state: RegionUiState, callbacks: RegionEditorCallbacks, 
     val overlays = visible.map { region -> ProjectHotspot(region.id, region.name,
         regionNormalizedBox(region.bbox, region.sourceWidth, region.sourceHeight), null, null, region.id) }
 
+    val heading: @Composable () -> Unit = {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(if (state.cropBitmap == null) step?.title ?: "正在读取步骤" else selected?.name.orEmpty(),
+                    style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(if (state.cropBitmap == null) "安全截图裁片 · ${state.regions.size}/12"
+                    else selected?.asset?.let { "实际 PNG · ${it.width} × ${it.height} 像素" }.orEmpty(),
+                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (state.cropBitmap == null) TextButton(onClick = callbacks.onReload, enabled = !state.busy) { Text("重读") }
+        }
+    }
+    val canvas: @Composable (Modifier) -> Unit = { canvasModifier ->
+        if (state.cropBitmap != null) {
+            ActualRegionCrop(state, callbacks.onDisplayed, canvasModifier)
+        } else {
+            EditorCanvas(state.bitmap, overlays, canvasModifier,
+                enabled = canEdit, busy = state.busy, selectedHotspotId = state.selectedId,
+                adding = adding && state.canAdd, onSelect = { callbacks.onSelect(it); adding = false }, onCreate = create,
+                onChangeRect = { id, rect -> visible.firstOrNull { it.id == id }?.let { region ->
+                    if (step != null) edit(region, regionPixelBox(rect, step.asset.width, step.asset.height))
+                } }, objectLabel = "区域")
+        }
+    }
+    val details: @Composable (Modifier) -> Unit = { detailsModifier ->
+        Column(detailsModifier
+            .padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            state.message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+            if (state.failedToLoad) Text("安全画面尚未就绪，请重新读取；已保存内容仍保留。",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            if (state.cropBitmap != null) {
+                Text(if (selected?.reviewedAt != null) "这张裁片已人工复核。" else "检查完整图片的文字、边缘和遮挡后，再确认无遗漏的敏感内容。",
+                    style = MaterialTheme.typography.bodyMedium)
+                Text("双指放大与移动可检查细节。锚点位于裁片内，不会重建遮住的背景。",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = callbacks.onCloseCrop, enabled = !state.busy) { Text("返回安全图") }
+                    TextButton(onClick = { regenerating = true }, enabled = !state.busy) { Text("重新生成") }
+                }
+            } else {
+                Text(when {
+                    adding -> "在安全图上拖出矩形；也可按像素输入。"
+                    state.regions.isEmpty() -> "只裁取当前安全图中可见的像素，保留截图外观。"
+                    else -> "点选区域后拖移或调整右下角，再确认像素范围。"
+                }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (state.regions.isNotEmpty()) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    state.regions.forEach { region ->
+                        FilterChip(region.id == state.selectedId, { callbacks.onSelect(region.id); adding = false },
+                            enabled = canEdit, label = { Text(region.name, maxLines = 1) })
+                    }
+                }
+                if (selected != null) {
+                    Text(when {
+                        !currentBase -> "底图已改变：先校正范围并保存，再重新生成。"
+                        selected.asset == null -> "待生成实际裁片"
+                        selected.reviewedAt == null -> "裁片已生成 · 待人工复核"
+                        else -> "实际裁片已人工复核"
+                    }, style = MaterialTheme.typography.labelMedium,
+                        color = if (!currentBase) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
+                    Text("x ${selected.bbox.x} · y ${selected.bbox.y} · ${selected.bbox.width} × ${selected.bbox.height} px" +
+                        "\n组 ${selected.group ?: "未分组"} · 次序 ${selected.zIndex} · 锚点 (${selected.anchorX}, ${selected.anchorY})",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { edit(selected, selected.bbox) }, enabled = canEdit) { Text("编辑区域") }
+                        if (selected.asset != null) TextButton(onClick = { regenerating = true }, enabled = canEdit && currentBase) {
+                            Text("重生成")
+                        }
+                        TextButton(onClick = { deleting = true }, enabled = canEdit) { Text("移除") }
+                    }
+                } else TextButton(onClick = { create(OpaqueMask(0.25f, 0.3f, 0.75f, 0.5f)) }, enabled = state.canAdd) {
+                    Text("按像素添加（无需拖动）")
+                }
+                Text("移动截图内容需要真实干净底板；此处不生成原生组件或隐藏背景。",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (state.busy) Text(state.stage.orEmpty(), style = MaterialTheme.typography.bodySmall)
+        }
+    }
+    val primaryAction: @Composable (Modifier) -> Unit = { buttonModifier ->
+        Button(onClick = if (selected?.asset == null) callbacks.onGenerate else callbacks.onOpenCrop,
+            enabled = canEdit && selected != null && currentBase, modifier = buttonModifier.heightIn(min = 48.dp)) {
+            Text(if (selected?.asset == null) "生成裁片" else if (selected.reviewedAt == null) "查看并复核" else "查看裁片")
+        }
+    }
+    val addAction: @Composable (Modifier) -> Unit = { buttonModifier ->
+        OutlinedButton(onClick = { adding = !adding; callbacks.onSelect(null) }, enabled = state.canAdd,
+            modifier = buttonModifier.heightIn(min = 48.dp)) { Text(if (adding) "取消框选" else "+ 框选区域") }
+    }
+    val actions: @Composable (Boolean) -> Unit = { compact ->
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            when {
+                state.busy -> OutlinedButton(onClick = callbacks.onCancel, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("取消处理") }
+                state.cropBitmap != null -> Button(onClick = callbacks.onReview, enabled = state.canReview,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                    Text(if (selected?.reviewedAt != null) "已复核这张裁片" else "确认实际裁片已复核")
+                }
+                compact -> { addAction(Modifier.fillMaxWidth()); primaryAction(Modifier.fillMaxWidth()) }
+                else -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    addAction(Modifier.weight(1f)); primaryAction(Modifier.weight(1.2f))
+                }
+            }
+        }
+    }
     BoxWithConstraints(modifier.fillMaxSize()) {
+        val wide = maxWidth > maxHeight && maxWidth >= 600.dp
         val panelHeight = (maxHeight * 0.35f).coerceIn(128.dp, 276.dp)
         Column(Modifier.fillMaxSize()) {
             ShellTopBar(if (state.cropBitmap == null) "可见区域" else "复核实际裁片", onBack = callbacks.onBack)
-            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(if (state.cropBitmap == null) step?.title ?: "正在读取步骤" else selected?.name.orEmpty(),
-                        style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(if (state.cropBitmap == null) "安全截图裁片 · ${state.regions.size}/12"
-                        else selected?.asset?.let { "实际 PNG · ${it.width} × ${it.height} 像素" }.orEmpty(),
-                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (wide) {
+                // Keep the image tall in landscape; only the narrow controls pane scrolls.
+                Row(Modifier.weight(1f).fillMaxWidth()) {
+                    canvas(Modifier.weight(1f).fillMaxHeight().padding(start = 16.dp, end = 8.dp, bottom = 12.dp))
+                    VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Column(Modifier.width(296.dp).fillMaxHeight()) {
+                        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
+                            heading()
+                            details(Modifier.fillMaxWidth())
+                        }
+                        if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        actions(true)
+                    }
                 }
-                if (state.cropBitmap == null) TextButton(onClick = callbacks.onReload, enabled = !state.busy) { Text("重读") }
-            }
-            if (state.cropBitmap != null) {
-                ActualRegionCrop(state, callbacks.onDisplayed, Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp))
             } else {
-                EditorCanvas(state.bitmap, overlays, Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
-                    enabled = canEdit, busy = state.busy, selectedHotspotId = state.selectedId,
-                    adding = adding && state.canAdd, onSelect = { callbacks.onSelect(it); adding = false }, onCreate = create,
-                    onChangeRect = { id, rect -> visible.firstOrNull { it.id == id }?.let { region ->
-                        if (step != null) edit(region, regionPixelBox(rect, step.asset.width, step.asset.height))
-                    } }, objectLabel = "区域")
-            }
-            if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
-            Column(Modifier.fillMaxWidth().heightIn(max = panelHeight).verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                state.message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
-                if (state.failedToLoad) Text("安全画面尚未就绪，请重新读取；已保存内容仍保留。",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                if (state.cropBitmap != null) {
-                    Text(if (selected?.reviewedAt != null) "这张裁片已人工复核。" else "检查完整图片的文字、边缘和遮挡后，再确认无遗漏的敏感内容。",
-                        style = MaterialTheme.typography.bodyMedium)
-                    Text("双指放大与移动可检查细节。锚点位于裁片内，不会重建遮住的背景。",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = callbacks.onCloseCrop, enabled = !state.busy) { Text("返回安全图") }
-                        TextButton(onClick = { regenerating = true }, enabled = !state.busy) { Text("重新生成") }
-                    }
-                } else {
-                    Text(when {
-                        adding -> "在安全图上拖出矩形；也可按像素输入。"
-                        state.regions.isEmpty() -> "只裁取当前安全图中可见的像素，保留截图外观。"
-                        else -> "点选区域后拖移或调整右下角，再确认像素范围。"
-                    }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (state.regions.isNotEmpty()) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        state.regions.forEach { region ->
-                            FilterChip(region.id == state.selectedId, { callbacks.onSelect(region.id); adding = false },
-                                enabled = canEdit, label = { Text(region.name, maxLines = 1) })
-                        }
-                    }
-                    if (selected != null) {
-                        Text(when {
-                            !currentBase -> "底图已改变：先校正范围并保存，再重新生成。"
-                            selected.asset == null -> "待生成实际裁片"
-                            selected.reviewedAt == null -> "裁片已生成 · 待人工复核"
-                            else -> "实际裁片已人工复核"
-                        }, style = MaterialTheme.typography.labelMedium,
-                            color = if (!currentBase) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
-                        Text("x ${selected.bbox.x} · y ${selected.bbox.y} · ${selected.bbox.width} × ${selected.bbox.height} px" +
-                            "\n组 ${selected.group ?: "未分组"} · 次序 ${selected.zIndex} · 锚点 (${selected.anchorX}, ${selected.anchorY})",
-                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(onClick = { edit(selected, selected.bbox) }, enabled = canEdit) { Text("精调 / 命名") }
-                            if (selected.asset != null) TextButton(onClick = { regenerating = true }, enabled = canEdit && currentBase) {
-                                Text("重生成")
-                            }
-                            TextButton(onClick = { deleting = true }, enabled = canEdit) { Text("移除") }
-                        }
-                    } else TextButton(onClick = { create(OpaqueMask(0.25f, 0.3f, 0.75f, 0.5f)) }, enabled = state.canAdd) {
-                        Text("按像素添加（无需拖动）")
-                    }
-                    Text("移动截图内容需要真实干净底板；此处不生成原生组件或隐藏背景。",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                if (state.busy) Text(state.stage.orEmpty(), style = MaterialTheme.typography.bodySmall)
-            }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                when {
-                    state.busy -> OutlinedButton(onClick = callbacks.onCancel, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("取消处理") }
-                    state.cropBitmap != null -> Button(onClick = callbacks.onReview, enabled = state.canReview,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                        Text(if (selected?.reviewedAt != null) "已复核这张裁片" else "确认实际裁片已复核")
-                    }
-                    else -> {
-                        OutlinedButton(onClick = { adding = !adding; callbacks.onSelect(null) }, enabled = state.canAdd,
-                            modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text(if (adding) "取消框选" else "+ 框选区域") }
-                        Button(onClick = if (selected?.asset == null) callbacks.onGenerate else callbacks.onOpenCrop,
-                            enabled = canEdit && selected != null && currentBase,
-                            modifier = Modifier.weight(1.2f).heightIn(min = 48.dp)) {
-                            Text(if (selected?.asset == null) "生成裁片" else if (selected.reviewedAt == null) "查看并复核" else "查看裁片")
-                        }
-                    }
-                }
+                heading()
+                canvas(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp))
+                if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+                details(Modifier.fillMaxWidth().heightIn(max = panelHeight).verticalScroll(rememberScrollState()))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                actions(false)
             }
         }
     }
@@ -254,7 +290,7 @@ private fun RegionDefinitionSheet(initial: RegionEdit, sourceWidth: Int, sourceH
     val ay = anchorY.toDoubleOrNull()?.takeIf { it.isFinite() && it in 0.0..1.0 }
     val valid = name.isNotBlank() && name.trim().length <= 120 && group.trim().length <= 120 && box != null && z != null && ax != null && ay != null
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp),
+        Column(Modifier.fillMaxWidth().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(if (initial.regionId == null) "新增可见区域" else "编辑可见区域", style = MaterialTheme.typography.titleMedium)
             Text("范围基于当前安全图的 $sourceWidth × $sourceHeight 像素。保存会清除旧裁片和复核。",

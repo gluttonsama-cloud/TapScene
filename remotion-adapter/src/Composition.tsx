@@ -33,6 +33,7 @@ export const TapSceneDemo: React.FC<RenderProps> = ({ scene, plan }) => {
           position: "absolute",
           left: portrait ? 70 : 90,
           top: portrait ? 76 : 62,
+          zIndex: 100,
           fontSize: 22,
           letterSpacing: 5,
           color: accent,
@@ -45,6 +46,7 @@ export const TapSceneDemo: React.FC<RenderProps> = ({ scene, plan }) => {
           position: "absolute",
           right: portrait ? 70 : 90,
           top: portrait ? 76 : 62,
+          zIndex: 100,
           fontSize: 21,
           color: muted,
           fontVariantNumeric: "tabular-nums",
@@ -76,16 +78,9 @@ export const TapSceneDemo: React.FC<RenderProps> = ({ scene, plan }) => {
                 extrapolateRight: "clamp",
               })
             : 1;
-        const outgoingOpacity =
-          time.overlapFrames > 0
-            ? interpolate(
-                local,
-                [time.durationFrames - time.overlapFrames, time.durationFrames],
-                [1, 0],
-                { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
-              )
-            : 1;
-        const opacity = incomingOpacity * outgoingOpacity;
+        // A true source-over dissolve keeps the old complete layer opaque.
+        // Only the incoming layer fades; fading both exposes the dark backdrop.
+        const opacity = incomingOpacity;
         const panel = fit(
           state.width,
           state.height,
@@ -113,7 +108,7 @@ export const TapSceneDemo: React.FC<RenderProps> = ({ scene, plan }) => {
           <AbsoluteFill
             key={visit.visitId}
             data-tapscene-visit={visit.visitId}
-            style={{ opacity }}
+            style={{ opacity, background: "#111816", zIndex: 0 }}
           >
             <div
               style={{
@@ -375,6 +370,7 @@ export const TapSceneDemo: React.FC<RenderProps> = ({ scene, plan }) => {
           left: portrait ? 70 : 90,
           right: portrait ? 70 : 90,
           bottom: 66,
+          zIndex: 100,
           height: 3,
           background: "#344038",
         }}
@@ -392,6 +388,7 @@ export const TapSceneDemo: React.FC<RenderProps> = ({ scene, plan }) => {
           position: "absolute",
           left: portrait ? 70 : 90,
           bottom: 30,
+          zIndex: 100,
           fontSize: 16,
           color: "#718177",
           letterSpacing: 1,
