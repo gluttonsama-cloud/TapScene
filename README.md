@@ -4,7 +4,16 @@
 
 [业务功能](#业务模块) · [页面安排](#页面与流转) · [数据表](docs/architecture.md#数据层) · [API/SDK](docs/architecture.md#应用接口层) · [当前任务](docs/tasks.md)
 
-当前只有产品与开发文档、文档 CI，产品尚未实现。
+`android/` 正在实现第一步媒体链路：选取录屏、私有导入、真实 PTS 取帧、不透明遮挡、重新编码和实际输出复核。下列业务模块是首版目标，尚未全部实现；端侧 OCR、演示图、观看包、托管与 AI 交付待开发。
+
+## 开发入口
+
+- 验证基线：Android 8.0 / API 26 起；compile / target API 36；JDK 17、Gradle 8.13、AGP 8.13.2、Kotlin 2.2.21、Media3 1.9.4。正式兼容设备范围待实测。
+- 已装上述工具和已接受许可的 Android SDK 时，运行 `gradle -p android :app:assembleDebug :app:lintDebug`；APK 在 `android/app/build/outputs/apk/debug/`。当前未附 Gradle Wrapper 二进制。
+- `ci/gate` 构建 APK、运行 Android lint，并检查合并后的 Manifest 没有联网或广泛存储权限；成功产物在该次 GitHub Actions 中保留 7 天。
+- 当前页面只处理本机媒体素材；生成的 PNG / 无音轨 MP4 需查看实际输出并确认后才能保存。短视频须从头完整播放后确认。已保存媒体不是离线观看包。
+- 原片、取帧位置和遮挡保存在 `noBackupFilesDir`；备份及设备迁移规则显式排除应用数据，OEM 迁移行为仍待设备验证。没有接入 ML Kit：其官方指标外传行为尚不满足本项目隐私条件。
+- 本机工具安装受阻，设备上的解码、编码、色彩、遮挡效果和取消恢复尚未实测；CI 构建不能代替真机验证。
 
 ## 业务模块
 

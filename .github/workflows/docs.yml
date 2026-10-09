@@ -15,7 +15,7 @@ jobs:
   gate:
     name: ci/gate
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
       - name: Check out the proposed merge
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,3 +36,45 @@ jobs:
                   Path(path).read_bytes().decode("utf-8")
           PY
           git diff --check "$BASE_SHA" HEAD
+      - name: Use the runner's JDK 17
+        run: |
+          test -x "$JAVA_HOME_17_X64/bin/javac"
+          echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+          echo "$JAVA_HOME_17_X64/bin" >> "$GITHUB_PATH"
+      - name: Set up pinned Gradle
+        uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+        with:
+          gradle-version: '8.13'
+          cache-disabled: true
+      - name: Build Android and run lint
+        run: gradle -p android --no-daemon :app:assembleDebug :app:lintDebug
+      - name: Check merged privacy settings
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          candidates = list(Path("android/app/build/intermediates/merged_manifests").glob("debug/**/AndroidManifest.xml"))
+          assert len(candidates) == 1, candidates
+          root = ET.parse(candidates[0]).getroot()
+          namespace = "{http://schemas.android.com/apk/res/android}"
+          permissions = {item.get(namespace + "name") for item in root.findall("uses-permission")}
+          forbidden = {
+              "android.permission.INTERNET", "android.permission.ACCESS_NETWORK_STATE",
+              "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE",
+              "android.permission.MANAGE_EXTERNAL_STORAGE", "android.permission.READ_MEDIA_VIDEO",
+          }
+          assert not permissions & forbidden, permissions
+          assert root.find("application").get(namespace + "allowBackup") == "false"
+          print("Merged manifest: no network or broad storage permission; backup disabled.")
+          PY
+      - name: Keep the debug APK and lint result
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tapscene-debug
+          path: |
+            android/app/build/outputs/apk/debug/app-debug.apk
+            android/app/build/reports/lint-results-debug.html
+          retention-days: 7
+          if-no-files-found: error
