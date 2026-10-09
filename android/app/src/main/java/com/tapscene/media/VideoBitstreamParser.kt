@@ -369,7 +369,9 @@ internal object VideoBitstreamParser {
             val type = extendedByteValue()
             val length = extendedByteValue()
             requireStream(length <= data.size - offset - 1, "HEVC SEI 参数不完整。")
-            requireStream(type !in setOf(4, 23, 137, 141, 142, 144, 147, 148),
+            // Only timing, opaque encoder user-data, recovery and decoded hashes are supported.
+            // Unknown/nested SEI can carry colour transforms; a blacklist misses nested HDR.
+            requireStream(type in setOf(0, 1, 5, 6, 132),
                 "暂不支持 HDR、动态色彩或未验证的 HEVC 色彩元数据，请使用 SDR 录屏。")
             offset += length
         }

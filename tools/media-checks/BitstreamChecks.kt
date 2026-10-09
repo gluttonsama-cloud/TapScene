@@ -64,11 +64,15 @@ fun main(args: Array<String>) {
         val invalid = hevc.clone().apply { this[5] = (this[5].toInt() and 0xF8).toByte() }
         VideoBitstreamParser.validateConfiguration("video/hevc", listOf(invalid))
     }
-    for (seiType in listOf(4, 137, 142, 144, 147)) {
+    for (seiType in listOf(4, 23, 47, 133, 137, 141, 142, 144, 147, 148, 149, 157)) {
         rejected("HDR/dynamic SEI $seiType") {
             val sei = byteArrayOf(0, 0, 0, 1, 0x4E, 1, seiType.toByte(), 0, 0x80.toByte())
             VideoBitstreamParser.verifySample(ByteBuffer.wrap(sei), sei.size, hevcConfig)
         }
+    }
+    rejected("scalable nesting containing PQ transfer") {
+        val nested = byteArrayOf(0, 0, 0, 1, 0x4E, 1, 0x85.toByte(), 4, 0x20, 0x93.toByte(), 1, 0x10, 0x80.toByte())
+        VideoBitstreamParser.verifySample(ByteBuffer.wrap(nested), nested.size, hevcConfig)
     }
     rejected("oversized CSD") {
         VideoBitstreamParser.validateConfiguration("video/hevc", listOf(ByteArray(65_537)))
