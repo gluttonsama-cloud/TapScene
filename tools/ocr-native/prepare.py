@@ -21,7 +21,9 @@ ROOT = HERE.parents[1]
 LOCK = json.loads((HERE / 'dependencies.lock.json').read_text())
 HOSTS = {'codeload.github.com', 'raw.githubusercontent.com', 'repo.maven.apache.org',
          'huggingface.co', 'cdn-lfs.huggingface.co', 'cdn-lfs-us-1.hf.co',
-         'cas-bridge.xethub.hf.co', 'files.pythonhosted.org'}
+         'cas-bridge.xethub.hf.co', 'files.pythonhosted.org',
+         # Current HF CDN edges, published in its download docs and meta.json.
+         'us.aws.cdn.hf.co', 'us.gcp.cdn.hf.co'}
 
 
 def check(path, entry):
@@ -36,7 +38,8 @@ class OfficialRedirects(urllib.request.HTTPRedirectHandler):
 
 def validate_url(url):
     parsed = urllib.parse.urlparse(url)
-    if parsed.scheme != 'https' or parsed.hostname not in HOSTS or parsed.username or parsed.password:
+    if (parsed.scheme != 'https' or parsed.hostname not in HOSTS or
+            parsed.port not in (None, 443) or parsed.username or parsed.password):
         raise RuntimeError('OCR dependency host rejected')
 
 

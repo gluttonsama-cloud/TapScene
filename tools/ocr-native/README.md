@@ -50,7 +50,13 @@ change build locations. Preparation must finish before CMake starts. A failed
 preparation does not silently change the lock; CMake rejects a different prepared
 lock. Source archives reject traversal, symlinks, special entries and expansion
 above 224 MiB. ZIP extraction selects only exact hash/length-locked members.
-All downloads use allow-listed official HTTPS destinations including redirects.
+All downloads use exact allow-listed official HTTPS destinations on port 443,
+including redirects. The current Hugging Face CDN edges `us.aws.cdn.hf.co` and
+`us.gcp.cdn.hf.co` are explicitly listed in its
+[official download documentation](https://huggingface.co/docs/hub/models-downloading#downloading-behind-a-proxy-or-firewall)
+and [official endpoint metadata](https://huggingface.co/.well-known/meta.json).
+No wildcard domains or automatic endpoint-list expansion are allowed; all bytes
+still must match the fixed model lengths and SHA-256 digests.
 
 Generated paths, not committed:
 
