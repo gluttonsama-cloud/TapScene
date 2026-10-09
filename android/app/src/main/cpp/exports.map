@@ -1,0 +1,4 @@
+{
+  global: Java_com_tapscene_ocr_OcrNative_*;
+  local: *;
+};

@@ -1,0 +1,204 @@
+{
+  "scope": "Read-only archive inspection, not installed or Android-run; LOAD alignment does not establish final APK ZIP alignment or runtime compatibility",
+  "artifacts": [
+    {
+      "filename": "onnxruntime-android-1.31.0.aar",
+      "bytes": 55138854,
+      "sha256": "72683787a80d0608a3121b967d8e1239aef48286826661c953211626690540a7",
+      "native": [
+        {
+          "path": "jni/arm64-v8a/libonnxruntime.so",
+          "bytes": 34208680,
+          "compressed_bytes": 12887720,
+          "load_alignments": [
+            16384,
+            16384,
+            16384
+          ],
+          "sha256": "8005a741e57117b4d7b476417706c0e9af13cf1b89db47e60f0cbc56e1af91e0"
+        },
+        {
+          "path": "jni/arm64-v8a/libonnxruntime4j_jni.so",
+          "bytes": 122576,
+          "compressed_bytes": 35935,
+          "load_alignments": [
+            16384,
+            16384
+          ],
+          "sha256": "5f2f1a99fd9f65fd6271eed825632f4ae5ada95f5cc13d66605888ccb80cdc29"
+        },
+        {
+          "path": "jni/armeabi-v7a/libonnxruntime.so",
+          "bytes": 24182012,
+          "compressed_bytes": 11639973,
+          "load_alignments": [
+            16384,
+            16384,
+            16384
+          ],
+          "sha256": "2a63f9a56b211511209dbf4b5bc143f18d0b365977dd7a0afd57d95c85479af6"
+        },
+        {
+          "path": "jni/armeabi-v7a/libonnxruntime4j_jni.so",
+          "bytes": 89900,
+          "compressed_bytes": 32091,
+          "load_alignments": [
+            16384,
+            16384
+          ],
+          "sha256": "6cc9816ea72fa290c6b13627412efad178eca031421ac9c367ebf4523b971b3d"
+        },
+        {
+          "path": "jni/x86/libonnxruntime.so",
+          "bytes": 40741404,
+          "compressed_bytes": 15126919,
+          "load_alignments": [
+            16384,
+            16384,
+            16384
+          ],
+          "sha256": "0bde71eda837043ef1520837da5e75deb938d3be5a4a585ef3e4a2cb132d7762"
+        },
+        {
+          "path": "jni/x86/libonnxruntime4j_jni.so",
+          "bytes": 103076,
+          "compressed_bytes": 31903,
+          "load_alignments": [
+            16384,
+            16384
+          ],
+          "sha256": "f7c23d4ef72414d58a581837a756f374737b3c9b82cbd6d6699a5e70db12eeaf"
+        },
+        {
+          "path": "jni/x86_64/libonnxruntime.so",
+          "bytes": 40827944,
+          "compressed_bytes": 14993057,
+          "load_alignments": [
+            16384,
+            16384,
+            16384
+          ],
+          "sha256": "068896846a7fe679cf780c1c532745286d9ef2e469f3dbde5bb9cf2c02095b18"
+        },
+        {
+          "path": "jni/x86_64/libonnxruntime4j_jni.so",
+          "bytes": 109848,
+          "compressed_bytes": 33664,
+          "load_alignments": [
+            16384,
+            16384
+          ],
+          "sha256": "07e725e73555fd89ce260e45c88f835c969831fbb6d6aeef59e9ff924d1d241f"
+        }
+      ],
+      "classes_jar_bytes": 149233,
+      "maven": "com.microsoft.onnxruntime:onnxruntime-android:1.31.0",
+      "source_url": "https://repo.maven.apache.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/1.31.0/onnxruntime-android-1.31.0.aar",
+      "published_sha1": "09e434725ac3aea8a313f74d942c1b6e0ad5091e"
+    },
+    {
+      "filename": "opencv-5.0.0.1.aar",
+      "bytes": 153027846,
+      "sha256": "edb1406a223d2820460b8366a790238b400f5d5c9ea2e98d44b889f0f3c66849",
+      "native": [
+        {
+          "path": "jni/x86_64/libopencv_java5.so",
+          "bytes": 67776008,
+          "compressed_bytes": 27804775,
+          "load_alignments": [
+            16384,
+            16384,
+            16384
+          ],
+          "sha256": "c7f44785a3d5d66c00b0eb55ff9b8d41f1890a134d82b9f1acab45ed746b80b9"
+        },
+        {
+          "path": "jni/x86_64/libc++_shared.so",
+          "bytes": 1252080,
+          "compressed_bytes": 416045,
+          "load_alignments": [
+            16384,
+            16384,
+            16384,
+            16384
+          ],
+          "sha256": "db9609240e60ca18b816a5e95a6bbc784e799261efbd5b30c8e2e03b540b3fa8"
+        },
+        {
+          "path": "jni/x86/libopencv_java5.so",
+          "bytes": 53727072,
+          "compressed_bytes": 21737266,
+          "load_alignments": [
+            4096,
+            4096,
+            4096
+          ],
+          "sha256": "f9c7e2ca3ad81ee0f37f4b0a0bcb60a164bbc34c682faf9558c3af5e1c25f19b"
+        },
+        {
+          "path": "jni/x86/libc++_shared.so",
+          "bytes": 1254988,
+          "compressed_bytes": 437373,
+          "load_alignments": [
+            4096,
+            4096,
+            4096,
+            4096
+          ],
+          "sha256": "318e833e6f7ec76cc73303da68004ebd63a1bbedd754e30440c78a90d80504d3"
+        },
+        {
+          "path": "jni/arm64-v8a/libopencv_java5.so",
+          "bytes": 33382992,
+          "compressed_bytes": 13723076,
+          "load_alignments": [
+            16384,
+            16384,
+            16384
+          ],
+          "sha256": "c5f7d77b1d4c9d030f08061f40afc68289719fb2a30cd462239e184e307a2567"
+        },
+        {
+          "path": "jni/arm64-v8a/libc++_shared.so",
+          "bytes": 1292904,
+          "compressed_bytes": 406563,
+          "load_alignments": [
+            16384,
+            16384,
+            16384,
+            16384
+          ],
+          "sha256": "4397241b4bd20a8e579bfb41d21107857e12985f6a01ca0c2a5f83380d1270b4"
+        },
+        {
+          "path": "jni/armeabi-v7a/libopencv_java5.so",
+          "bytes": 22293164,
+          "compressed_bytes": 11603937,
+          "load_alignments": [
+            4096,
+            4096,
+            4096
+          ],
+          "sha256": "d0ea39088c90b8d14b3525a8171db8e27b65ed1486bda1f2eccd0fa2e42b693d"
+        },
+        {
+          "path": "jni/armeabi-v7a/libc++_shared.so",
+          "bytes": 872872,
+          "compressed_bytes": 349046,
+          "load_alignments": [
+            4096,
+            4096,
+            4096,
+            4096
+          ],
+          "sha256": "91b49f121b3120538faff020fcf535ade1d945e65ccd793fc0b815b5799bbdf0"
+        }
+      ],
+      "classes_jar_bytes": 439842,
+      "maven": "org.opencv:opencv:5.0.0.1",
+      "source_url": "https://repo.maven.apache.org/maven2/org/opencv/opencv/5.0.0.1/opencv-5.0.0.1.aar",
+      "published_sha256": "edb1406a223d2820460b8366a790238b400f5d5c9ea2e98d44b889f0f3c66849",
+      "upstream_fix": "https://github.com/opencv/opencv/issues/29375"
+    }
+  ]
+}

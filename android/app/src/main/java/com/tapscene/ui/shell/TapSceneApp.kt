@@ -59,6 +59,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     var autoAnalyzeSource by rememberSaveable { mutableStateOf<String?>(null) }
     var reviewQueue by rememberSaveable { mutableStateOf(arrayListOf<String>()) }
     var reviewedStepIds by rememberSaveable { mutableStateOf(arrayListOf<String>()) }
+    // Only text explicitly adopted or typed by the author is retained here, never raw OCR.
+    var reviewTitles by rememberSaveable { mutableStateOf(hashMapOf<String, String>()) }
     var pathStepIds by rememberSaveable { mutableStateOf<ArrayList<String>?>(null) }
     var pathMarkLastTerminal by rememberSaveable { mutableStateOf<Boolean?>(null) }
     var pendingPathProject by rememberSaveable { mutableStateOf<String?>(null) }
@@ -175,6 +177,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
         if (!unavailable && scopeReady && !mediaState.busy && eligible.isNotEmpty()) {
             if (eligible.size > ProjectLimits.MAX_STEPS - (state.project?.steps?.size ?: 0)) projects.message("所选画面超过项目剩余步骤数量。")
             else {
+                // Returning to another queue must not discard the author's earlier title drafts.
                 reviewQueue = ArrayList(eligible.map { it.id }); reviewedStepIds = arrayListOf(); reviewIndex = 0; preparedCandidate = null
                 push("candidate-review")
             }
@@ -308,7 +311,10 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                     if (recording.phase == RecordingPhase.Recording || recording.phase == RecordingPhase.Starting) TextButton(onClick = { RecordingCoordinator.stop(context) }) { Text("停止") }
                 }
                 if (candidateState.busy && page != "candidates") Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("正在整理候选 ${candidateState.completedSamples}/${candidateState.totalSamples}", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
+                    Text(if (candidateState.ocrStatus == CandidateOcrStatus.RUNNING)
+                        "本机识别文字 ${candidateState.ocrCompleted}/${candidateState.ocrTotal}"
+                        else "正在整理候选 ${candidateState.completedSamples}/${candidateState.totalSamples}",
+                        Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
                     TextButton(onClick = { push("candidates") }) { Text("查看") }
                     TextButton(onClick = candidates::cancel) { Text("取消") }
                 }
@@ -369,6 +375,15 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 val item = queuedCandidate
                                 val targetProject = projectId
                                 if (item != null && scopeReady && targetProject != null) Column(Modifier.fillMaxSize()) {
+                                    val suggestionSource = candidateState.sourceSha256
+                                    val suggestionResult = candidateState.ocrResults[item.id]?.takeIf {
+                                        candidateState.projectId == targetProject && candidateState.sourceId == item.sourceId &&
+                                            suggestionSource != null && it.width == item.width && it.height == item.height
+                                    }
+                                    val titleKey = "$targetProject:${item.sourceId}:${item.id}"
+                                    val textSuggestions = if (suggestionResult != null && suggestionSource != null)
+                                        CandidateTextSuggestions(targetProject, item.sourceId, suggestionSource, item.id,
+                                            item.actualTimeUs, item.timePrecisionUs, suggestionResult) else null
                                     if (!mediaState.busy && mediaState.candidate == null && preparedCandidate == item.id) {
                                         TextButton(onClick = { media.prepareCandidateImage(item.sourceId, item.actualTimeUs, item.id) }) { Text("重试准备画面") }
                                     }
@@ -377,15 +392,28 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                             headerTitle = "校正 ${reviewIndex + 1}/${reviewQueue.size}",
                                             confirmLabel = if (reviewIndex == reviewQueue.lastIndex) "确认画面并完成" else "确认画面并下一张",
                                             batchReview = true, reviewItemId = item.id, onSkip = { media.invalidateCandidate(); reviewIndex++; preparedCandidate = null },
+                                            textSuggestions = textSuggestions, stepTitle = reviewTitles[titleKey].orEmpty(),
+                                            onStepTitleChange = { title ->
+                                                if (reviewQueue.getOrNull(reviewIndex) == item.id && !media.state.value.busy) {
+                                                    reviewTitles = HashMap(reviewTitles).apply { put(titleKey, title) }
+                                                }
+                                            },
+                                            onUseSuggestedTitle = { title ->
+                                                if (reviewQueue.getOrNull(reviewIndex) == item.id && !media.state.value.busy && reviewTitles[titleKey].isNullOrBlank()) {
+                                                    reviewTitles = HashMap(reviewTitles).apply { put(titleKey, title) }
+                                                }
+                                            },
                                             onReviewedImage = { input ->
                                                 check(reviewQueue.getOrNull(reviewIndex) == item.id && preparedCandidate == item.id &&
                                                     media.state.value.frameReviewId == item.id && input.source.sourceId == item.sourceId &&
                                                     input.frameTimeUs == media.state.value.frame?.presentationTimeUs) {
                                                     "候选画面已变化，请返回重新选择。"
                                                 }
-                                                val stepId = projects.saveReviewedStep(targetProject, input.copy(captureId = "candidate-${item.id}"), openEditor = false)
+                                                val stepId = projects.saveReviewedStep(targetProject, input.copy(captureId = "candidate-${item.id}"),
+                                                    openEditor = false, title = reviewTitles[titleKey])
                                                 if (stepId !in reviewedStepIds) reviewedStepIds = ArrayList(reviewedStepIds + stepId)
                                                 candidates.markUsed(item.id, stepId)
+                                                reviewTitles = HashMap(reviewTitles).apply { remove(titleKey) }
                                                 reviewIndex++; preparedCandidate = null
                                             })
                                     }
@@ -519,12 +547,12 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                 renaming = null; projects.renameProject(item.id, title)
             } }
             deletingProject?.let { item -> ConfirmDelete("删除“${item.title}”？",
-                "项目、${item.stepCount} 个步骤、热点和项目图片将删除，无法撤销。原录屏与导出的文件保留；原录屏可在设置的本机保留素材中管理。", !state.busy,
+                "项目、${item.stepCount} 个步骤、热点、项目图片和本机文字建议将删除，无法撤销。原录屏与导出的文件保留；原录屏可在设置的本机保留素材中管理。", !state.busy,
                 { deletingProject = null }, { if (recording.projectId == item.id && (recording.isBusy || recording.canRetry)) {
                     deletingProject = null; projects.message("请先停止或处理这个项目的未完成录制。")
                 } else if (candidateState.projectId == item.id && candidateState.busy) {
-                    deletingProject = null; projects.message("请先取消候选整理。")
-                } else { deletingProject = null; projects.deleteProject(item.id) } }) }
+                    deletingProject = null; projects.message("请先取消当前分析。")
+                } else { deletingProject = null; reviewTitles = HashMap(reviewTitles.filterKeys { !it.startsWith("${item.id}:") }); projects.deleteProject(item.id) } }) }
             deletingStep?.let { step -> ConfirmDelete("删除“${step.title}”？",
                 "步骤、图片及 ${projects.deletionHotspotCount(step.id)} 个关联热点将删除，包括未保存草稿中指向它的热点。${projects.deletionNextActionCount(step.id)} 个下一步动作受影响；指向此步的下一步保留为待补目标。原录屏保留。${if (state.project?.project?.startStepId == step.id) "删除后需要重新设置起点。" else ""}", !state.busy,
                 { deletingStep = null }, { deletingStep = null; projects.deleteStep(step.id) }) }

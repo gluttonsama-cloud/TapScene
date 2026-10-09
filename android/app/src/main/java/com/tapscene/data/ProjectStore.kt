@@ -32,6 +32,7 @@ import org.json.JSONObject
  * its metadata commits. Only addReviewedStep accepts reviewed output, never a raw video frame.
  */
 class ProjectStore(context: Context) {
+    private val app = context.applicationContext
     private val root = context.applicationContext.noBackupFilesDir.canonicalFile
     private val helper = Database(context.applicationContext, File(root, "projects.sqlite").path)
 
@@ -71,6 +72,10 @@ class ProjectStore(context: Context) {
 
     /** Source files are workspace-owned and are NEVER deleted by this store. */
     fun deleteProject(projectId: String): ProjectDeletionResult = access { db ->
+        // OCR is derived private source data, not a saved step or a sealed release. Revoke
+        // live writers first so a cancelled analysis cannot recreate it after deletion.
+        requireSnapshot(db, projectId)
+        CandidateOcrStore(app).deleteProject(projectId)
         val result = transaction(db) {
             val current = requireSnapshot(db, projectId)
             val hotspots = current.steps.sumOf { it.hotspots.size }

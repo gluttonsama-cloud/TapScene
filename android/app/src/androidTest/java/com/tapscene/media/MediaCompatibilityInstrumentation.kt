@@ -59,6 +59,7 @@ class MediaCompatibilityInstrumentation : Instrumentation() {
         com.tapscene.data.ReleaseStoreChecks.run(targetContext, ::status)
         com.tapscene.data.SourceRegistrationChecks.run(targetContext, ::status)
         CandidateAnalysisChecks.run(targetContext, ::status)
+        com.tapscene.data.CandidateOcrChecks.run(targetContext, ::status)
         com.tapscene.recording.RecordingRecoveryTest.run(targetContext, ::status)
         val outputRoot = File(targetContext.noBackupFilesDir, "media-checks-${UUID.randomUUID()}")
         check(outputRoot.mkdir()) { "Could not reserve private smoke-check directory" }

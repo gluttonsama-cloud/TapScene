@@ -1,0 +1,208 @@
+{
+  "source_commit": "dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf",
+  "models": {
+    "PP-OCRv6_tiny_det_onnx": {
+      "commit": "2ba1506c0380b8f0b03dd142459aac66d4421f6c",
+      "license": "apache-2.0"
+    },
+    "PP-OCRv6_tiny_rec_onnx": {
+      "commit": "2612ab37152ae0a677521bae4e1e3d4fb4cf7c30",
+      "license": "apache-2.0"
+    }
+  },
+  "files": [
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/build.gradle.kts",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/build.gradle.kts",
+      "bytes": 1110,
+      "sha256": "adc4c4369baf5b275b23ba3291ecfc1f0ce5cb60007307a6b3a6bcafff989514"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/EngineConfig.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/EngineConfig.kt",
+      "bytes": 704,
+      "sha256": "886b7ef3dd4600ff92ff77c44643ce800e3f0da2d74de43112dbd79648ecdcda"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/PaddleOCR.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/PaddleOCR.kt",
+      "bytes": 4286,
+      "sha256": "961945f4532b6339d20afa8415f8e6e289eeef20d2e142f67d37cc35b9310ede"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/PaddleOCRConfig.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/PaddleOCRConfig.kt",
+      "bytes": 1155,
+      "sha256": "ebe53f5f21e127857b7b947995a19b5baa966d996104daa5c36ac5c07affa7d5"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/engine/DetectionEngine.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/engine/DetectionEngine.kt",
+      "bytes": 3385,
+      "sha256": "b99dfce96cc2819e28a068e535fd096185b4abf41d1038079bf6836c8a1a985a"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/engine/OCREngine.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/engine/OCREngine.kt",
+      "bytes": 6905,
+      "sha256": "ad235c1c01522fa41729d58d5a9405ffaff3ad6f391e920cb6a942ef78256446"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/engine/OCREngineResult.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/engine/OCREngineResult.kt",
+      "bytes": 1429,
+      "sha256": "6f1b7853dfc5b2ba1a70cb1d77518a10bbff45d71f3a689105f675c4d3be9a7a"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/engine/ORTSessionManager.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/engine/ORTSessionManager.kt",
+      "bytes": 5886,
+      "sha256": "edc1b780d5277bcef93d052f3f1bddcad49830dcfa0a3b13ae63e18300e6f394"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/engine/RecognitionEngine.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/engine/RecognitionEngine.kt",
+      "bytes": 2270,
+      "sha256": "00e683a56ec2741a0daca0ff8f2ceb001ae690f30e03dc6118cd49828b747396"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/model/ModelConfig.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/model/ModelConfig.kt",
+      "bytes": 4890,
+      "sha256": "e64e9262839b9e4da57d00a5cfef7ab3f81dcb5be1b96f47c4067449f306ddf0"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/model/OCRBox.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/model/OCRBox.kt",
+      "bytes": 852,
+      "sha256": "4db761a2e541db9145ba9512c4a5e8719ee70b09e241616525afcbf61abbcbc9"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/model/OCRError.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/model/OCRError.kt",
+      "bytes": 1380,
+      "sha256": "e360a2aa3580692d6ef8d98c9a740260566d5731f5f20f3633feadd55337fe6e"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/model/OCRResult.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/model/OCRResult.kt",
+      "bytes": 789,
+      "sha256": "0f492da6f396886ad68c5d0dc09a853715e50e1c23cd9f4c1fbbde7eedbb5264"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/model/OCRRunResult.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/model/OCRRunResult.kt",
+      "bytes": 1386,
+      "sha256": "ba90ee5a89fa3bba36e4325dd1ed1b18e90e6c10401eb00df29937bfadccbed4"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/postprocess/BoxSorter.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/postprocess/BoxSorter.kt",
+      "bytes": 1629,
+      "sha256": "d298db1421a7a0250db3c76627f640c13cccd66e4c6960116286a3b2399f7ccc"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/postprocess/CTCDecoder.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/postprocess/CTCDecoder.kt",
+      "bytes": 2456,
+      "sha256": "ae5ee6c3bd3e5993e80f20f2e35e90c7b50801d0b84fd9caff74966af4337a1f"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/postprocess/DBPostProcessor.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/postprocess/DBPostProcessor.kt",
+      "bytes": 7115,
+      "sha256": "53923f88a025a4810d009223a79d15e9e27200673f40722ff0f9e105d2b12276"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/postprocess/PolygonUnclip.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/postprocess/PolygonUnclip.kt",
+      "bytes": 4631,
+      "sha256": "bc575aba1d0f7618473b87c64ca0a7d0219d3bbfe57f356fd2a51d1cc2703cdd"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/postprocess/QuadGeometry.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/postprocess/QuadGeometry.kt",
+      "bytes": 1434,
+      "sha256": "936674693f20b2120663fb33576a6ee9264c44b28e2a1e3a01dbab0d6023ded5"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/postprocess/QuadTextCrop.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/postprocess/QuadTextCrop.kt",
+      "bytes": 3142,
+      "sha256": "49f8889430ca8aeda4ef5e90f8de4b0e695696de64fdd97d8ed7421d21198109"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/preprocess/DetPreprocessor.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/preprocess/DetPreprocessor.kt",
+      "bytes": 3300,
+      "sha256": "9e16244a57d8d8be5aba3eff85c676d0b08282f396868fa244bf35dd572dcff8"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/preprocess/RecPreprocessor.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/preprocess/RecPreprocessor.kt",
+      "bytes": 3947,
+      "sha256": "edf40bd7e4cec5411a92dda05291cff524794f00bf63615f82e184b54dee9fab"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/util/BitmapUtils.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/util/BitmapUtils.kt",
+      "bytes": 2285,
+      "sha256": "66b5771266ad5166453b428d01ea707efcc56e076c7d4813347d672629e2330c"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/util/ImageUtils.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/util/ImageUtils.kt",
+      "bytes": 1963,
+      "sha256": "205fd17a1dcfacdbbc8f5bb76e059aba7c0fffecfaff443812a1960272ecfbbe"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/util/MathUtils.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/util/MathUtils.kt",
+      "bytes": 1039,
+      "sha256": "7465d79388376ccbbd4c575d1c03fe4524877db79cf92e74d3c35d1b7e22efd8"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/util/OpenCVUtils.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/util/OpenCVUtils.kt",
+      "bytes": 1106,
+      "sha256": "ed3fd0918df9ccff85c6f2da3ea22a1cabe31d1cd68f11a3a3c1915a758bb5f5"
+    },
+    {
+      "path": "official-source/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/util/YamlUtils.kt",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/deploy/ppocr-android/ppocr-sdk/src/main/java/com/paddle/ocr/util/YamlUtils.kt",
+      "bytes": 811,
+      "sha256": "d61f540ed2420dea704dc381d91eb5e154191817745a8ecb2f1e712d58938f1a"
+    },
+    {
+      "path": "PP-OCRv6_tiny_det_onnx/inference.onnx",
+      "url": "https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det_onnx/resolve/2ba1506c0380b8f0b03dd142459aac66d4421f6c/inference.onnx",
+      "bytes": 1780590,
+      "sha256": "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8"
+    },
+    {
+      "path": "PP-OCRv6_tiny_det_onnx/inference.yml",
+      "url": "https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det_onnx/resolve/2ba1506c0380b8f0b03dd142459aac66d4421f6c/inference.yml",
+      "bytes": 883,
+      "sha256": "3ac018be6f97499a08faa3bbdeb33640968d9307f6736d152902747a9f259593"
+    },
+    {
+      "path": "PP-OCRv6_tiny_rec_onnx/inference.onnx",
+      "url": "https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_rec_onnx/resolve/2612ab37152ae0a677521bae4e1e3d4fb4cf7c30/inference.onnx",
+      "bytes": 4462639,
+      "sha256": "9ef676d6ed3c88256a2d92c640c44f25b0c40947e111b14b8be8f594091563e6"
+    },
+    {
+      "path": "PP-OCRv6_tiny_rec_onnx/inference.yml",
+      "url": "https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_rec_onnx/resolve/2612ab37152ae0a677521bae4e1e3d4fb4cf7c30/inference.yml",
+      "bytes": 55571,
+      "sha256": "66170210bad538e83fff3c4a3867e547d6bf20b50d64b20347c4b913f3034ea1"
+    }
+  ],
+  "host_packages": {
+    "onnxruntime": "1.31.0",
+    "opencv-python-headless": "5.0.0.93",
+    "numpy": "2.3.5",
+    "PyYAML": "6.0.3"
+  },
+  "scope": "Only synthetic host comparison; official Android defaults; no Android engine integration"
+}

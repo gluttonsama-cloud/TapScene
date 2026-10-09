@@ -1,0 +1,4 @@
+# Fixed upstream data: the final dictionary entry is an intentional space.
+tools/ocr-native/characters.txt -whitespace
+# Preserve upstream license/notice bytes, including blank final lines.
+tools/ocr-native/licenses/*.txt -whitespace

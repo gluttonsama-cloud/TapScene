@@ -1,17 +1,23 @@
 package com.tapscene.ui.shell
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.height
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.android.tools.screenshot.PreviewTest
@@ -112,7 +118,14 @@ fun CandidateSelectionSamplePreview() {
     val images = remember { List(3, ShellPreviewFixture::bitmap) }
     ReviewSurface(sample = true) {
         CandidateSelectionContent(
-            state = ShellPreviewFixture.candidateState,
+            state = ShellPreviewFixture.candidateState.copy(
+                ocrStatus = com.tapscene.data.CandidateOcrStatus.COMPLETED,
+                ocrCompleted = 2, ocrTotal = 2,
+                ocrResults = mapOf(ShellPreviewFixture.candidateState.candidates.first().id to
+                    com.tapscene.ocr.OcrResult(480, 840, listOf(
+                        com.tapscene.ocr.OcrWord("Choose an activity", 36, 80, 340, 115, 96f, 0, 0),
+                    ), false)),
+            ),
             sources = ShellPreviewFixture.sources,
             sourceReady = true,
             remainingSteps = 37,
@@ -184,6 +197,29 @@ fun OfflinePlayerSamplePreview() {
 fun OfflineImportFailureSamplePreview() {
     ReviewSurface(sample = true) {
         OfflineImportContent(com.tapscene.ui.ReleaseUiState(message = "布局样例：观看包缺少一张图片，未加入演示库。"), {}, {})
+    }
+}
+
+/** Production text-controls component with in-memory layout data; no inference claim. */
+@PreviewTest
+@Preview(name = "13_ocr_controls_sample", widthDp = 412, heightDp = 915, locale = "zh-rCN", showBackground = true)
+@Composable
+fun OcrControlsSamplePreview() {
+    val bitmap = remember { ShellPreviewFixture.bitmap(0) }
+    val text = remember {
+        com.tapscene.ocr.OcrResult(480, 840, listOf(
+            com.tapscene.ocr.OcrWord("Choose an activity", 36, 80, 340, 115, 96f, 0, 0),
+            com.tapscene.ocr.OcrWord("Weekend workshop", 60, 226, 340, 258, 91f, 1, 1),
+        ), false)
+    }
+    ReviewSurface(sample = true) {
+        Column(Modifier.fillMaxSize()) {
+            ShellTopBar("文字建议", {})
+            Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp)) {
+                Image(bitmap.asImageBitmap(), "组件布局合成画面", Modifier.fillMaxWidth().height(290.dp), contentScale = ContentScale.Fit)
+                OcrSuggestions(text, "", true, true, {}, {}, initiallyExpanded = true)
+            }
+        }
     }
 }
 

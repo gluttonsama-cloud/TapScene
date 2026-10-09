@@ -19,7 +19,7 @@ jobs:
   gate:
     name: ci/gate
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Check out the proposed merge
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -101,6 +101,36 @@ jobs:
       - name: Check project graph schema invariants
         if: steps.scope.outputs.android == 'true'
         run: python3 tools/project-checks/check-schema.py
+      - name: Prepare the pinned offline OCR sources and models
+        if: steps.scope.outputs.android == 'true'
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;28.2.13676358" "cmake;3.22.1"
+          python3 tools/ocr-native/prepare.py --host
+      - name: Build and exercise the same raw-pixel OCR core on synthetic UI images
+        if: steps.scope.outputs.android == 'true'
+        run: |
+          cmake -S android/app/src/main/cpp -B "$RUNNER_TEMP/ocr-host" \
+            -DCMAKE_BUILD_TYPE=Release -DTAPSCENE_HOST_TEST=ON
+          cmake --build "$RUNNER_TEMP/ocr-host" --target tapscene_ocr_fixture tapscene_ocr_core_tests -j2
+          "$RUNNER_TEMP/ocr-host/tapscene_ocr_core_tests" android/app/build/ocr/assets/ocr
+          python3 tools/ocr-checks/check-store.py
+          python3 tools/ocr-checks/check-metrics.py
+          python3 tools/ocr-checks/check-ocr.py \
+            --native-runner "$RUNNER_TEMP/ocr-host/tapscene_ocr_fixture" \
+            --model-dir android/app/build/ocr/assets/ocr \
+            --output "$RUNNER_TEMP/ocr-results" --repeat 2
+          python3 tools/ocr-native/check-resources.py \
+            --native-runner "$RUNNER_TEMP/ocr-host/tapscene_ocr_fixture" \
+            --model-dir android/app/build/ocr/assets/ocr --output "$RUNNER_TEMP/ocr-results/resources"
+      - name: Keep the synthetic OCR results
+        if: always() && steps.scope.outputs.android == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tapscene-ocr-checks
+          path: |
+            ${{ runner.temp }}/ocr-results/
+          retention-days: 7
+          if-no-files-found: ignore
       - name: Check the real offline package codec and player reducer
         if: steps.scope.outputs.android == 'true'
         run: |
@@ -123,9 +153,14 @@ jobs:
             ${{ runner.temp }}/package-fixtures/synthetic.tapscene
           retention-days: 7
           if-no-files-found: error
-      - name: Build the side-by-side preview and run lint
+      - name: Build the arm64 phone preview and run lint
         if: steps.scope.outputs.android == 'true'
-        run: gradle -p android --no-daemon -PcompatibilityPreview=true :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+        run: gradle -p android --no-daemon --max-workers=2 -PcompatibilityPreview=true -PtapsceneAbi=arm64-v8a :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+      - name: Inspect packaged OCR models, native dependencies, alignment and size
+        if: steps.scope.outputs.android == 'true'
+        run: |
+          python3 tools/ocr-checks/check-apk.py android/app/build/outputs/apk/debug/app-debug.apk --abis arm64-v8a \
+            --readelf "$ANDROID_HOME/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
       - name: Check merged privacy settings
         if: steps.scope.outputs.android == 'true'
         run: |
@@ -149,6 +184,10 @@ jobs:
           assert not permissions & forbidden, permissions
           application = root.find("application")
           assert application.get(namespace + "allowBackup") == "false"
+          # The official ORT AAR also contains a network telemetry Java wrapper;
+          # only its pinned native runtime is imported by the C++ pipeline.
+          assert all(not (item.get(namespace + "name") or "").startswith("ai.onnxruntime.")
+                     for item in application.iter())
           services = application.findall("service")
           recording = [item for item in services if item.get(namespace + "name") == "com.tapscene.recording.RecordingService"]
           assert len(recording) == 1
@@ -163,7 +202,7 @@ jobs:
         if: success() && steps.scope.outputs.android == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: tapscene-debug
+          name: tapscene-phone-arm64-v8a
           path: |
             android/app/build/outputs/apk/debug/app-debug.apk
             android/app/build/reports/lint-results-debug.html
@@ -183,7 +222,7 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 12, f"Expected twelve Compose review images, found {len(images)}"
+          assert len(images) == 13, f"Expected thirteen Compose review images, found {len(images)}"
           lines = [
               "TapScene shell review: host-side Compose / Layoutlib renders.",
               "Not device screenshots; does not validate media decoding, touch, or system pickers.",
@@ -224,6 +263,10 @@ jobs:
             echo "::warning::Android media runtime checks NOT RUN: no usable KVM. Build/lint are separate checks."
             exit 0
           fi
+          # Build x86 only for a runner that can actually execute this emulator.
+          # The arm64 phone artifact was already inspected and uploaded above.
+          gradle -p android --no-daemon --max-workers=2 -PcompatibilityPreview=true \
+            -PtapsceneAbi=x86_64 :app:assembleDebug :app:assembleDebugAndroidTest
           # adb and emulator must use the same standard key/preferences directory.
           export ANDROID_USER_HOME="$HOME/.android"
           export ANDROID_AVD_HOME="$RUNNER_TEMP/android-avd"

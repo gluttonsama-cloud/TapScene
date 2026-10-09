@@ -18,6 +18,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.tapscene.data.SourceDraft
+import com.tapscene.data.CandidateOcrStatus
 import com.tapscene.media.CandidateAnalysisStatus
 import com.tapscene.media.CandidateDecision
 import com.tapscene.media.CandidateReason
@@ -54,6 +55,7 @@ fun CandidateSelectionScreen(
             onCancel = workspace::cancel,
             onSetDecision = workspace::setDecision,
             onSetDecisions = workspace::setDecisions,
+            onRecognizeText = workspace::recognizeText,
         ),
         candidateThumbnail = { candidate -> CandidateThumbnail(workspace, candidate, state.busy || state.loading) },
     )
@@ -68,6 +70,7 @@ data class CandidateSelectionCallbacks(
     val onCancel: () -> Unit,
     val onSetDecision: (String, CandidateDecision) -> Unit,
     val onSetDecisions: (List<String>, CandidateDecision) -> Unit,
+    val onRecognizeText: (List<String>) -> Unit = {},
 )
 
 /** Uses the production layout without a ViewModel, file access or media decoding. */
@@ -88,14 +91,15 @@ fun CandidateSelectionContent(
     val selected = state.candidates.filter { it.decision == CandidateDecision.KEPT && it.usedStepId == null }
     val visible = state.candidates.filter { showDismissed || it.decision != CandidateDecision.DISMISSED }
     val source = sources.firstOrNull { it.source.sourceId == state.sourceId }
+    val recognizing = state.ocrStatus == CandidateOcrStatus.RUNNING
     Column(Modifier.fillMaxSize()) {
         ShellTopBar("候选步骤", callbacks.onBack) {
             Box {
-                TextButton(onClick = { menu = true }, enabled = !state.busy && sources.isNotEmpty()) { Text("素材 ▾") }
+                TextButton(onClick = { menu = true }, enabled = !state.busy && !state.loading && sources.isNotEmpty()) { Text("素材 ▾") }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     sources.forEach { draft ->
                         DropdownMenuItem(text = { Text(draft.source.displayName, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-                            onClick = { menu = false; callbacks.onSource(draft.source.sourceId) })
+                            onClick = { menu = false; callbacks.onSource(draft.source.sourceId) }, enabled = !disabled)
                     }
                 }
             }
@@ -109,16 +113,21 @@ fun CandidateSelectionContent(
                         TextButton(onClick = { showHelp = true }) { Text("说明") }
                     }
                     if (state.busy) {
-                        if (state.totalSamples > 0) LinearProgressIndicator(
-                            progress = { (state.completedSamples.toFloat() / state.totalSamples).coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+                        val total = if (recognizing) state.ocrTotal else if (state.status == CandidateAnalysisStatus.RUNNING) state.totalSamples else 0
+                        val completed = if (recognizing) state.ocrCompleted else state.completedSamples
+                        if (total > 0) LinearProgressIndicator(
+                            progress = { (completed.toFloat() / total).coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
                         else LinearProgressIndicator(Modifier.fillMaxWidth())
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(if (state.totalSamples > 0) "已检查 ${state.completedSamples}/${state.totalSamples} 个时间位置" else "正在准备画面分析…",
+                            Text(if (recognizing) "本机识别文字 · $completed/$total 帧"
+                                else if (state.status == CandidateAnalysisStatus.RUNNING && total > 0) "已检查 $completed/$total 个时间位置"
+                                else "正在处理候选…",
                                 Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                            TextButton(onClick = callbacks.onCancel) { Text("取消") }
+                            if (recognizing || state.status == CandidateAnalysisStatus.RUNNING) TextButton(onClick = callbacks.onCancel) { Text("取消") }
                         }
                     } else if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
                     state.message?.let { StatusNote(it) }
+                    state.ocrMessage?.let { StatusNote(it) }
                     if (!state.busy && !state.loading) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(onClick = callbacks.onAnalyze, enabled = !disabled,
@@ -164,6 +173,16 @@ fun CandidateSelectionContent(
                         }, style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                         Text(if (used) "已加入步骤" else if (candidate.decision == CandidateDecision.DISMISSED) "已略过" else "待校正与复核",
                             style = MaterialTheme.typography.labelMedium, color = if (used) ShellColors.Accent else ShellColors.Muted)
+                        val ocr = state.ocrResults[candidate.id]
+                        val lines = remember(ocr) { ocr?.let(::ocrTextSuggestions).orEmpty() }
+                        Text(if (candidate.id == state.ocrFailedCandidateId && ocr == null) "识别未完成，可重试"
+                            else if (ocr == null) "文字未识别" else if (ocr.words.isEmpty()) "未识别到文字"
+                            else "文字建议 · ${lines.size} 行 / ${ocr.words.size} 段",
+                            style = MaterialTheme.typography.labelSmall, color = ShellColors.Muted)
+                        val title = lines.firstNotNullOfOrNull { it.title }
+                        if (title != null) Text(title, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        else if (ocr != null && ocr.words.isNotEmpty()) Text("暂无标题建议", style = MaterialTheme.typography.labelSmall, color = ShellColors.Muted)
+                        if (ocr?.truncated == true) Text("仅识别了部分文字", style = MaterialTheme.typography.labelSmall, color = ShellColors.Muted)
                         if (!used) Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                             TextButton(onClick = { callbacks.onReview(listOf(candidate.id)) }, enabled = !disabled && remainingSteps > 0) { Text("校正") }
                             TextButton(onClick = {
@@ -182,14 +201,17 @@ fun CandidateSelectionContent(
                 val allSelected = eligible.isNotEmpty() && eligible.all { it.decision == CandidateDecision.KEPT }
                 callbacks.onSetDecisions(eligible.map { it.id }, if (allSelected) CandidateDecision.SUGGESTED else CandidateDecision.KEPT)
             }, enabled = !disabled && state.candidates.any { it.usedStepId == null }) { Text(if (selectable.isNotEmpty() && selectable.all { it.decision == CandidateDecision.KEPT }) "清空" else "全选") }
+            OutlinedButton(onClick = { callbacks.onRecognizeText(selected.map { it.id }) },
+                enabled = !disabled && selected.any { it.id !in state.ocrResults },
+                shape = RoundedCornerShape(8.dp), modifier = Modifier.heightIn(min = 48.dp)) { Text("识别文字") }
             Button(onClick = { callbacks.onReview(selected.map { it.id }) }, enabled = !disabled && selected.isNotEmpty() && selected.size <= remainingSteps,
                 shape = RoundedCornerShape(8.dp), modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
-                Text(if (selected.size > remainingSteps) "最多再加入 $remainingSteps 帧" else "校正所选 ${selected.size} 帧")
+                Text(if (selected.size > remainingSteps) "最多 $remainingSteps 帧" else "校正 ${selected.size} 帧")
             }
         }
     }
     if (showHelp) AlertDialog(onDismissRequest = { showHelp = false }, title = { Text("画面分析建议") },
-        text = { Text("建议来自录屏画面变化，可能漏掉短暂或细微变化；可在校正页调帧，也可手动补充。\n\n这里没有记录原始点击、识别文字或自动确定热点。选择后仍需检查实际输出，再加入步骤。") },
+        text = { Text("候选来自画面变化，可能遗漏；可在校正页调帧，也可手动补充。\n\n选好画面后可批量“识别文字”。文字建议只在本机保留，可能识错；在校正页采用标题或按文字框遮挡后，仍需检查实际输出。采用的标题会进入作品，并在成品交付前再次复核。这里没有记录点击或自动确定热点，也不会自动识别全部敏感内容。") },
         confirmButton = { TextButton(onClick = { showHelp = false }) { Text("知道了") } })
 }
 
