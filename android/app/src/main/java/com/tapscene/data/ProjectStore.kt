@@ -41,6 +41,215 @@ class ProjectStore(context: Context) {
     private val root = context.applicationContext.noBackupFilesDir.canonicalFile
     private val helper = Database(context.applicationContext, File(root, "projects.sqlite").path)
 
+    fun readDraftAiConfig(projectId: String): DraftAiConfig? = access { db ->
+        val project = requireSnapshot(db, projectId)
+        readDraftAiConfig(db, projectId)?.let { it.copy(needsRepair = it.needsRepair || it.boundRevision != project.project.revision) }
+    }
+
+    fun draftAiIssues(projectId: String, config: DraftAiConfig): List<String> = access { db ->
+        DraftAiConfigCodec.encode(config)
+        DraftPlanProjection.issues(requireSnapshot(db, projectId), config)
+    }
+
+    /** Saving a broken plan is allowed, but it remains visibly blocked. No reference is pruned. */
+    fun saveDraftAiConfig(projectId: String, expectedRevision: Long, config: DraftAiConfig): DraftAiConfig = access { db -> transaction(db) {
+        val snapshot = requireSnapshot(db, projectId)
+        check(snapshot.project.revision == expectedRevision) { "草稿已改变；动画输入已保留，请刷新后核对。" }
+        DraftAiConfigCodec.encode(config)
+        check(expectedRevision < Long.MAX_VALUE) { "项目修订已达上限。" }
+        val issues = DraftPlanProjection.issues(snapshot, config)
+        // A fixed candidate includes a plan snapshot. Advancing revision prevents a changed plan
+        // from accidentally reusing an older candidate with the same graph revision.
+        bump(db, projectId)
+        val saved = config.copy(boundRevision = expectedRevision + 1, needsRepair = issues.isNotEmpty())
+        writeDraftAiConfig(db, projectId, saved)
+        saved
+    } }
+
+    private fun readDraftAiConfig(db: SQLiteDatabase, projectId: String): DraftAiConfig? =
+        db.rawQuery("SELECT bound_revision,needs_repair,config_json FROM draft_ai_configs WHERE project_id=?", arrayOf(projectId)).use {
+            if (!it.moveToFirst()) null else DraftAiConfigCodec.decode(it.getString(2), it.getLong(0), it.getInt(1) == 1)
+        }
+
+    private fun writeDraftAiConfig(db: SQLiteDatabase, projectId: String, config: DraftAiConfig) {
+        check(db.insertWithOnConflict("draft_ai_configs", null, ContentValues().apply {
+            put("project_id", projectId); put("bound_revision", config.boundRevision)
+            put("needs_repair", if (config.needsRepair) 1 else 0); put("config_json", DraftAiConfigCodec.encode(config))
+        }, SQLiteDatabase.CONFLICT_REPLACE) != -1L) { "动画配置未保存，请重试。" }
+    }
+
+    internal fun beginAiImport(sessionId: String, projectId: String): AiImportSession = access { db -> transaction(db) {
+        validId(sessionId); validId(projectId)
+        db.insertOrThrow("ai_import_sessions", null, ContentValues().apply {
+            put("session_id", sessionId); put("state", "preparing"); put("project_id", projectId)
+            put("created_at", System.currentTimeMillis())
+        })
+        requireNotNull(readAiImport(db, sessionId))
+    } }
+
+    internal fun readAiImport(sessionId: String): AiImportSession? = access { db -> validId(sessionId); readAiImport(db, sessionId) }
+    internal fun pendingAiImports(): List<AiImportSession> = access { db ->
+        db.rawQuery("SELECT * FROM ai_import_sessions WHERE state IN ('preparing','ready') ORDER BY created_at DESC", null).use { cursor ->
+            buildList { while (cursor.moveToNext()) add(aiImport(cursor)) }
+        }
+    }
+    internal fun finishedAiImports(): List<AiImportSession> = access { db ->
+        db.rawQuery("SELECT * FROM ai_import_sessions WHERE state IN ('committed','cancelled','failed')", null).use { cursor ->
+            buildList { while (cursor.moveToNext()) add(aiImport(cursor)) }
+        }
+    }
+    private fun readAiImport(db: SQLiteDatabase, id: String): AiImportSession? =
+        db.rawQuery("SELECT * FROM ai_import_sessions WHERE session_id=?", arrayOf(id)).use { if (it.moveToFirst()) aiImport(it) else null }
+    private fun aiImport(cursor: Cursor) = AiImportSession(cursor.string("session_id"), cursor.string("state"), cursor.string("project_id"),
+        cursor.nullableString("input_sha"), cursor.nullableString("preview_digest"), cursor.nullableString("prepared_json"))
+
+    internal fun readyAiImport(id: String, inputSha: String, previewDigest: String, prepared: String) = access { db -> transaction(db) {
+        require(SHA.matches(inputSha) && SHA.matches(previewDigest) && prepared.toByteArray(Charsets.UTF_8).size <= 2 * 1024 * 1024)
+        val current = readAiImport(db, id) ?: error("导入会话已不存在。")
+        check(current.status == "preparing" || current.status == "ready") { "此导入已经结束，请重新打开结果。" }
+        db.update("ai_import_sessions", ContentValues().apply {
+            put("state", "ready"); put("input_sha", inputSha); put("preview_digest", previewDigest); put("prepared_json", prepared)
+        }, "session_id=?", arrayOf(id))
+    } }
+
+    internal fun stopAiImport(id: String, status: String): AiDraftImportResult = access { db -> transaction(db) {
+        require(status == "cancelled" || status == "failed")
+        val current = readAiImport(db, id) ?: error("导入会话已不存在。")
+        if (current.status !in setOf("committed", "cancelled")) db.update("ai_import_sessions", ContentValues().apply { put("state", status) }, "session_id=?", arrayOf(id))
+        aiResult(db, requireNotNull(readAiImport(db, id)))
+    } }
+    internal fun aiImportResult(id: String): AiDraftImportResult = access { db -> aiResult(db, readAiImport(db, id) ?: error("导入会话已不存在。")) }
+    private fun aiResult(db: SQLiteDatabase, session: AiImportSession) = AiDraftImportResult(session.id, session.status,
+        session.projectId.takeIf { session.status == "committed" }, count(db, "projects", "project_id=?", session.projectId) == 1)
+
+    /** All imported bytes and the complete graph/config/receipt commit together. No review is inherited. */
+    internal suspend fun installAiDraft(sessionId: String, expectedDigest: String, scene: com.tapscene.packageformat.ViewerScene,
+        plan: com.tapscene.packageformat.RenderPlan, copies: List<AiImportAssetCopy>, packageRoot: File): AiDraftImportResult {
+        check(com.tapscene.packageformat.AiDraftImportPolicy.inspect(scene).isEmpty()) { "包内容无法无损编辑，请先处理导入问题。" }
+        com.tapscene.packageformat.RenderPlan.parse(scene, plan.toBytes())
+        val session = readAiImport(sessionId) ?: error("导入会话已不存在。")
+        if (session.status == "committed") return aiImportResult(sessionId)
+        check(session.status == "ready" && session.previewDigest == expectedDigest) { "待导入内容已变化，请重新核对。" }
+        val projectId = session.projectId
+        val assets = scene.assets.associateBy { it.id }
+        check(copies.size == scene.states.size + scene.regions.size && copies.map { it.assetId }.distinct().size == copies.size)
+        scene.states.forEach { state -> check(copies.single { !it.region && it.ownerId == state.id }.sourceAssetId == state.imageAssetId) }
+        scene.regions.forEach { region -> check(copies.single { it.region && it.ownerId == region.id }.sourceAssetId == region.assetId) }
+        val expanded = copies.sumOf { requireNotNull(assets[it.sourceAssetId]).byteLength }
+        require(expanded <= MAX_PNG_BYTES) { "独立展开后的安全图片超过 50 MiB，无法按当前限制交付。" }
+        require(root.usableSpace > expanded + 8L * 1024 * 1024) { "本机空间不足，需为独立图片副本保留更多空间。" }
+        access { db -> transaction(db) {
+            val current = readAiImport(db, sessionId) ?: error("导入会话已不存在。")
+            check(current.status == "ready" && current.previewDigest == expectedDigest)
+            check(snapshot(db, projectId) == null) { "新项目身份已被占用。" }
+            copies.forEach { copy ->
+                validId(copy.assetId); check(importKey(copy.assetId) !in activeImports) { "此导入仍在保存，请稍候。" }
+                db.insertOrThrow("asset_imports", null, ContentValues().apply { put("project_id", projectId); put("asset_id", copy.assetId) })
+            }
+        }; copies.forEach { activeImports.add(importKey(it.assetId)) } }
+        var committed = false
+        var failure: Throwable? = null
+        try {
+            val stagingRoot = privateDirectory(File(root, "project-staging"), root)
+            copies.forEach { copy ->
+                currentCoroutineContext().ensureActive()
+                val asset = requireNotNull(assets[copy.sourceAssetId])
+                val source = File(packageRoot, asset.path)
+                check(source.canonicalFile == source.absoluteFile && source.isFile && source.length() == asset.byteLength && sha256(source) == asset.sha256) { "待导入图片已改变。" }
+                val operation = File(stagingRoot, copy.assetId)
+                check(operation.mkdir()) { "无法建立导入图片暂存。" }
+                val output = File(operation, "candidate.part")
+                source.inputStream().use { input -> FileOutputStream(output).use { sink ->
+                    var total = 0L; val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val n = input.read(buffer); if (n < 0) break
+                        check(n > 0); total += n; check(total <= asset.byteLength) { "待导入图片在复制时改变。" }; sink.write(buffer, 0, n)
+                    }
+                    check(total == asset.byteLength); sink.fd.sync()
+                } }
+                SafeMediaWriterValidation.verifyPng(output, asset.width, asset.height, emptyList())
+                check(sha256(output) == asset.sha256) { "导入图片副本摘要不一致。" }
+            }
+            currentCoroutineContext().ensureActive()
+            return withContext(NonCancellable) { synchronized(lock) {
+                val db = helper.writableDatabase
+                val result = transaction(db) {
+                    val current = readAiImport(db, sessionId) ?: error("导入会话已不存在。")
+                    if (current.status == "committed") return@transaction aiResult(db, current)
+                    check(current.status == "ready" && current.previewDigest == expectedDigest) { "导入已取消或待确认内容已改变。" }
+                    val now = System.currentTimeMillis()
+                    db.insertOrThrow("projects", null, ContentValues().apply {
+                        put("project_id", projectId); put("title", scene.title); put("goal", scene.goal)
+                        put("created_at", now); put("updated_at", now); put("draft_revision", 1L); put("start_state_id", scene.startStateId)
+                    })
+                    val destination = projectAssetDirectory(projectId)
+                    copies.forEach { copy ->
+                        val asset = requireNotNull(assets[copy.sourceAssetId]); val source = File(root, "project-staging/${copy.assetId}/candidate.part")
+                        check(sha256(source) == asset.sha256) { "图片在提交前改变。" }
+                        val target = File(destination, "${copy.assetId}.png"); check(!target.exists())
+                        Files.move(source.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE)
+                        db.insertOrThrow("local_assets", null, ContentValues().apply {
+                            put("project_id", projectId); put("asset_id", copy.assetId); put("relative_path", assetPath(projectId, copy.assetId))
+                            put("sha256", asset.sha256); put("byte_length", asset.byteLength); put("width", asset.width); put("height", asset.height)
+                        })
+                    }
+                    syncDirectory(destination)
+                    scene.states.forEachIndexed { index, state ->
+                        val copy = copies.single { !it.region && it.ownerId == state.id }; val asset = requireNotNull(assets[state.imageAssetId])
+                        db.insertOrThrow("package_step_origins", null, ContentValues().apply {
+                            put("project_id", projectId); put("state_id", state.id); put("import_id", sessionId)
+                            put("source_state_id", state.id); put("source_asset_id", asset.id); put("source_sha256", asset.sha256); put("declared_kind", state.sourceKind)
+                        })
+                        db.insertOrThrow("states", null, ContentValues().apply {
+                            put("project_id", projectId); put("state_id", state.id); put("capture_id", "$sessionId:${state.id}")
+                            put("sort_order", index); put("title", state.title); put("description", state.description)
+                            put("is_terminal", if (state.terminal) 1 else 0); put("input_asset_id", copy.assetId); put("masks_json", "[]")
+                            putOrigin(StepOrigin.PackageSafeImage(sessionId, state.id, asset.id, asset.sha256, state.sourceKind)); put("evidence_kind", "imported")
+                        })
+                    }
+                    scene.hotspots.forEach { hotspot -> db.insertOrThrow("hotspots", null, ContentValues().apply {
+                        put("project_id", projectId); put("hotspot_id", hotspot.id); put("state_id", hotspot.stateId); put("label", hotspot.label)
+                        put("rect_left", hotspot.rect.x.toFloat()); put("rect_top", hotspot.rect.y.toFloat())
+                        put("rect_right", (hotspot.rect.x + hotspot.rect.width).toFloat()); put("rect_bottom", (hotspot.rect.y + hotspot.rect.height).toFloat())
+                    }) }
+                    scene.edges.forEach { edge ->
+                        if (edge.trigger == "continue") db.insertOrThrow("next_actions", null, ContentValues().apply {
+                            put("project_id", projectId); put("action_id", edge.id); put("from_state_id", edge.fromStateId); put("label", edge.label); put("to_state_id", edge.toStateId)
+                        }) else db.insertOrThrow("edges", null, ContentValues().apply {
+                            put("project_id", projectId); put("edge_id", edge.id); put("hotspot_id", edge.hotspotId); put("from_state_id", edge.fromStateId)
+                            put("to_state_id", edge.toStateId); put("end_label", edge.endLabel)
+                        })
+                    }
+                    scene.regions.forEach { region ->
+                        val base = copies.single { !it.region && it.ownerId == region.stateId }
+                        val crop = copies.single { it.region && it.ownerId == region.id }
+                        db.insertOrThrow("regions", null, ContentValues().apply {
+                            put("project_id", projectId); put("region_id", region.id); put("state_id", region.stateId)
+                            put("base_asset_id", base.assetId); put("base_sha256", requireNotNull(assets[base.sourceAssetId]).sha256)
+                            put("name", region.name); put("group_name", region.group); put("x_px", region.bbox.x); put("y_px", region.bbox.y)
+                            put("width_px", region.bbox.width); put("height_px", region.bbox.height); put("source_width", region.sourceWidth); put("source_height", region.sourceHeight)
+                            put("z_index", region.zIndex); put("anchor_x", region.anchor.x); put("anchor_y", region.anchor.y); put("asset_id", crop.assetId); putNull("reviewed_at")
+                        })
+                    }
+                    val config = DraftAiConfig.imported(plan)
+                    check(DraftPlanProjection.issues(requireSnapshot(db, projectId), config).isEmpty()) { "导入动画计划与新草稿不一致。" }
+                    writeDraftAiConfig(db, projectId, config)
+                    db.update("ai_import_sessions", ContentValues().apply { put("state", "committed") }, "session_id=?", arrayOf(sessionId))
+                    aiResult(db, requireNotNull(readAiImport(db, sessionId)))
+                }
+                committed = true; result
+            } }
+        } catch (error: Throwable) { failure = error; throw error }
+        finally {
+            val cleanup = synchronized(lock) {
+                copies.forEach { activeImports.remove(importKey(it.assetId)) }
+                runCatching { copies.forEach { cleanupImport(helper.writableDatabase, projectId, it.assetId) } }.exceptionOrNull()
+            }
+            if (cleanup != null && !committed) { if (failure != null) failure.addSuppressed(cleanup) else throw cleanup }
+        }
+    }
+
     fun listProjects(): List<ProjectSummary> = access { db ->
         db.rawQuery("$SUMMARY_SQL ORDER BY p.updated_at DESC, p.project_id", null).use { cursor ->
             buildList { while (cursor.moveToNext()) add(summary(cursor)) }
@@ -195,6 +404,7 @@ class ProjectStore(context: Context) {
         newProjectTitle: String? = null): ProjectSnapshot {
         validId(projectId)
         validId(stepId)
+        require(input.origin !is StepOrigin.PackageSafeImage) { "包画面须经独立导入会话保存。" }
         val cleanTitle = text(title, "步骤标题", 120)
         val cleanDescription = text(description, "步骤说明", 4_000, allowEmpty = true)
         val originalImage = (input.origin as? StepOrigin.ImportedImage)?.source
@@ -363,6 +573,7 @@ class ProjectStore(context: Context) {
                                 is StepOrigin.ImportedImage -> "authored"
                                 is StepOrigin.Image -> requireNotNull(previous).evidenceKind
                                 is StepOrigin.VideoFrame -> "recorded"
+                                is StepOrigin.PackageSafeImage -> error("包画面须经独立导入会话保存。")
                             })
                             put("masks_json", masksJson(frozen.masks).toString())
                         }
@@ -875,9 +1086,15 @@ class ProjectStore(context: Context) {
      * Destination is an existing, empty app-private assets directory owned by ReleaseStore.
      * Caller owns partial output on failure; this method never deletes or moves draft/source data.
      */
-    fun copyReleaseInputs(projectId: String, expectedRevision: Long, destination: File): ProjectSnapshot = access { db ->
+    fun copyReleaseInputs(projectId: String, expectedRevision: Long, destination: File, onPlanSnapshot: ((DraftAiConfig?) -> Unit)? = null): ProjectSnapshot = access { db ->
         val current = requireSnapshot(db, projectId)
         check(current.project.revision == expectedRevision) { "草稿修订已改变，请重新检查后生成。" }
+        readDraftAiConfig(db, projectId)?.let { config ->
+            check(!config.needsRepair && config.boundRevision == expectedRevision && DraftPlanProjection.issues(current, config).isEmpty()) {
+                "动画计划仍待核对或修复，请先在项目的动画计划中检查并保存。"
+            }
+        }
+        onPlanSnapshot?.invoke(readDraftAiConfig(db, projectId))
         val target = destination.absoluteFile
         check(target.canonicalFile == target && target.isDirectory &&
             target.path.startsWith(root.path + File.separator) &&
@@ -1130,6 +1347,7 @@ class ProjectStore(context: Context) {
     }
 
     private fun bump(db: SQLiteDatabase, projectId: String) {
+        db.execSQL("UPDATE draft_ai_configs SET needs_repair=1 WHERE project_id=?", arrayOf(projectId))
         db.execSQL("UPDATE projects SET draft_revision=draft_revision+1, updated_at=? WHERE project_id=?",
             arrayOf(System.currentTimeMillis(), projectId))
     }
@@ -1151,10 +1369,11 @@ class ProjectStore(context: Context) {
             if (it.moveToFirst()) summary(it) else null
         } ?: return null
         val steps = db.rawQuery("""
-            SELECT s.*, a.relative_path, a.sha256, a.byte_length, a.width, a.height, src.source_json, img.source_json AS image_source_json
+            SELECT s.*, a.relative_path, a.sha256, a.byte_length, a.width, a.height, src.source_json, img.source_json AS image_source_json, pkg.source_state_id AS package_state_id, pkg.source_asset_id AS package_asset_id, pkg.source_sha256 AS package_sha256, pkg.declared_kind AS package_declared_kind
             FROM states s JOIN local_assets a ON a.project_id=s.project_id AND a.asset_id=s.input_asset_id
             LEFT JOIN sources src ON src.project_id=s.project_id AND src.source_id=s.source_id
             LEFT JOIN image_sources img ON img.project_id=s.project_id AND img.source_id=s.image_source_id
+            LEFT JOIN package_step_origins pkg ON pkg.project_id=s.project_id AND pkg.state_id=s.state_id AND pkg.import_id=s.package_import_id
             WHERE s.project_id=? ORDER BY s.sort_order, s.state_id
         """.trimIndent(), arrayOf(projectId)).use { cursor ->
             buildList {
@@ -1513,6 +1732,7 @@ class ProjectStore(context: Context) {
         }
         require(input.masks.size <= 20) { "每个步骤最多 20 块遮挡。" }
         val sourceFile = when (val origin = input.origin) {
+            is StepOrigin.PackageSafeImage -> error("包画面不能冒充已复核候选。")
             is StepOrigin.VideoFrame -> {
                 val source = origin.source
                 require(origin.timePrecisionUs > 0 && origin.frameTimeUs in 0..source.metadata.durationUs) {
@@ -1577,8 +1797,9 @@ class ProjectStore(context: Context) {
 
     private fun ContentValues.putOrigin(origin: StepOrigin) {
         listOf("source_id", "frame_pts_us", "time_precision_us", "base_asset_id", "base_sha256",
-            "base_revision", "base_width", "base_height", "image_source_id").forEach { putNull(it) }
+            "base_revision", "base_width", "base_height", "image_source_id", "package_import_id").forEach { putNull(it) }
         when (origin) {
+            is StepOrigin.PackageSafeImage -> { put("origin_kind", "packageImage"); put("package_import_id", origin.importId) }
             is StepOrigin.VideoFrame -> {
                 put("origin_kind", "videoFrame"); put("source_id", origin.source.sourceId)
                 put("frame_pts_us", origin.frameTimeUs); put("time_precision_us", origin.timePrecisionUs)
@@ -1595,6 +1816,8 @@ class ProjectStore(context: Context) {
     }
 
     private fun readOrigin(cursor: Cursor): StepOrigin = when (cursor.string("origin_kind")) {
+        "packageImage" -> StepOrigin.PackageSafeImage(cursor.string("package_import_id"), cursor.string("package_state_id"),
+            cursor.string("package_asset_id"), cursor.string("package_sha256"), cursor.string("package_declared_kind"))
         "videoFrame" -> StepOrigin.VideoFrame(parseSource(JSONObject(cursor.string("source_json"))),
             cursor.long("frame_pts_us"), cursor.long("time_precision_us"))
         "image" -> if (!cursor.isNull(cursor.getColumnIndexOrThrow("image_source_id")))
@@ -1708,11 +1931,14 @@ class ProjectStore(context: Context) {
         } }
     }
 
-    internal class Database(context: Context, path: String) : SQLiteOpenHelper(context, path, null, 7) {
+    internal class Database(
+        context: Context, path: String,
+        private val migrationCheckpoint: ((String) -> Unit)? = null,
+    ) : SQLiteOpenHelper(context, path, null, 8) {
         override fun onConfigure(db: SQLiteDatabase) {
             // SQLiteOpenHelper calls this BEFORE its upgrade transaction. Changing a PRAGMA
             // inside onUpgrade is ineffective and dropping states would cascade child rows.
-            db.setForeignKeyConstraintsEnabled(db.version !in 1..6)
+            db.setForeignKeyConstraintsEnabled(db.version !in 1..7)
         }
         override fun onOpen(db: SQLiteDatabase) {
             // Runs after successful upgrade commit, but before the helper exposes the handle.
@@ -1739,6 +1965,7 @@ class ProjectStore(context: Context) {
             )""")
             createImageSources(db)
             createStates(db, "states")
+            createAiImportTables(db)
             db.execSQL("""CREATE TABLE hotspots (
                 project_id TEXT NOT NULL, hotspot_id TEXT NOT NULL, state_id TEXT NOT NULL, label TEXT NOT NULL,
                 rect_left REAL NOT NULL CHECK(rect_left>=0 AND rect_left<1),
@@ -1837,14 +2064,15 @@ class ProjectStore(context: Context) {
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            check(oldVersion in 1..6 && newVersion == 7 && foreignKeys(db) == 0) {
+            check(oldVersion in 1..7 && newVersion == 8 && foreignKeys(db) == 0) {
                 "项目数据库需要安全迁移；请保留现有本机数据。"
             }
             if (oldVersion < 2) createNextActions(db)
             if (oldVersion < 3) createTransitions(db)
             if (oldVersion < 4) createRegions(db)
             if (oldVersion < 5) createEditorDrafts(db)
-            createImageSources(db)
+            if (oldVersion < 7) createImageSources(db)
+            createAiImportTables(db)
             migrateOrigins(db, oldVersion)
         }
 
@@ -1858,12 +2086,43 @@ class ProjectStore(context: Context) {
             db.execSQL("CREATE TABLE image_source_cleanup(project_id TEXT NOT NULL, source_id TEXT PRIMARY KEY NOT NULL, mime TEXT NOT NULL)")
         }
 
+        private fun createAiImportTables(db: SQLiteDatabase) {
+            // The deferred circular relationship makes a package state and its exact import
+            // provenance atomic. Provenance remains after a later safe-image replacement.
+            db.execSQL("""CREATE TABLE package_step_origins (
+                project_id TEXT NOT NULL, state_id TEXT NOT NULL, import_id TEXT NOT NULL CHECK(length(import_id)>0),
+                source_state_id TEXT NOT NULL CHECK(length(source_state_id)>0),
+                source_asset_id TEXT NOT NULL CHECK(length(source_asset_id)>0),
+                source_sha256 TEXT NOT NULL CHECK(length(source_sha256)=64 AND length(CAST(source_sha256 AS BLOB))=64 AND source_sha256 NOT GLOB '*[^0-9a-f]*'),
+                declared_kind TEXT NOT NULL CHECK(declared_kind IN ('recorded','authored','imported')),
+                PRIMARY KEY(project_id,state_id), UNIQUE(project_id,state_id,import_id),
+                FOREIGN KEY(project_id,state_id) REFERENCES states(project_id,state_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
+            )""")
+            // The receipt outlives project deletion, preventing retry from recreating it.
+            db.execSQL("""CREATE TABLE ai_import_sessions (
+                session_id TEXT PRIMARY KEY NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('preparing','ready','committed','cancelled','failed')),
+                project_id TEXT NOT NULL UNIQUE,
+                input_sha TEXT CHECK(input_sha IS NULL OR (length(input_sha)=64 AND length(CAST(input_sha AS BLOB))=64 AND input_sha NOT GLOB '*[^0-9a-f]*')),
+                preview_digest TEXT CHECK(preview_digest IS NULL OR (length(preview_digest)=64 AND length(CAST(preview_digest AS BLOB))=64 AND preview_digest NOT GLOB '*[^0-9a-f]*')),
+                prepared_json TEXT CHECK(prepared_json IS NULL OR length(CAST(prepared_json AS BLOB)) BETWEEN 1 AND 2097152),
+                created_at INTEGER NOT NULL,
+                CHECK(state NOT IN ('ready','committed') OR (input_sha IS NOT NULL AND preview_digest IS NOT NULL AND prepared_json IS NOT NULL))
+            )""")
+            db.execSQL("""CREATE TABLE draft_ai_configs (
+                project_id TEXT PRIMARY KEY NOT NULL, bound_revision INTEGER NOT NULL CHECK(bound_revision>0),
+                needs_repair INTEGER NOT NULL CHECK(needs_repair IN (0,1)),
+                config_json TEXT NOT NULL CHECK(length(CAST(config_json AS BLOB)) BETWEEN 1 AND 524288),
+                FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+            )""")
+        }
+
         private fun foreignKeys(db: SQLiteDatabase): Int = db.rawQuery("PRAGMA foreign_keys", null).use {
             check(it.moveToFirst()); it.getInt(0)
         }
 
         private fun createStates(db: SQLiteDatabase, table: String) {
-            check(table == "states" || table == "states_v7")
+            check(table == "states" || table == "states_v8")
             db.execSQL(STATES_SQL.replace("CREATE TABLE states (", "CREATE TABLE $table ("))
         }
 
@@ -1884,16 +2143,24 @@ class ProjectStore(context: Context) {
             }
             val unchanged = names.filter { it != "states" }.associateWith { fingerprint(db, it) }
             val schema = unaffectedSchema(db)
-            val preservedColumns = if (oldVersion < 6) LEGACY_STATE_COLUMNS else V6_STATE_COLUMNS
+            val preservedColumns = when {
+                oldVersion < 6 -> LEGACY_STATE_COLUMNS
+                oldVersion < 7 -> V6_STATE_COLUMNS
+                else -> V7_STATE_COLUMNS
+            }
             val states = fingerprint(db, "states", preservedColumns)
-            createStates(db, "states_v7")
-            if (oldVersion < 6) db.execSQL("INSERT INTO states_v7 ($LEGACY_STATE_COLUMNS,origin_kind) SELECT $LEGACY_STATE_COLUMNS,'videoFrame' FROM states")
-            else db.execSQL("INSERT INTO states_v7 ($V6_STATE_COLUMNS) SELECT $V6_STATE_COLUMNS FROM states")
-            check(fingerprint(db, "states_v7", preservedColumns) == states) { "步骤迁移核对失败。" }
+            createStates(db, "states_v8")
+            if (oldVersion < 6) db.execSQL("INSERT INTO states_v8 ($LEGACY_STATE_COLUMNS,origin_kind) SELECT $LEGACY_STATE_COLUMNS,'videoFrame' FROM states")
+            else db.execSQL("INSERT INTO states_v8 ($preservedColumns) SELECT $preservedColumns FROM states")
+            migrationCheckpoint?.invoke("copy")
+            check(fingerprint(db, "states_v8", preservedColumns) == states) { "步骤迁移核对失败。" }
             db.execSQL("DROP TABLE states")
-            db.execSQL("ALTER TABLE states_v7 RENAME TO states")
+            migrationCheckpoint?.invoke("drop")
+            db.execSQL("ALTER TABLE states_v8 RENAME TO states")
+            migrationCheckpoint?.invoke("rename")
             db.execSQL("CREATE INDEX states_order ON states(project_id,sort_order)")
             db.execSQL("CREATE INDEX states_source ON states(source_id)")
+            migrationCheckpoint?.invoke("indexes")
             check(fingerprint(db, "states", preservedColumns) == states &&
                 unchanged.all { (table, before) -> fingerprint(db, table) == before } && unaffectedSchema(db) == schema) {
                 "项目关系迁移核对失败，原数据将保留。"
@@ -1941,30 +2208,36 @@ class ProjectStore(context: Context) {
         companion object {
             private const val LEGACY_STATE_COLUMNS = "project_id,state_id,capture_id,sort_order,title,description,is_terminal,source_id,input_asset_id,frame_pts_us,time_precision_us,masks_json"
             private const val V6_STATE_COLUMNS = "$LEGACY_STATE_COLUMNS,origin_kind,base_asset_id,base_sha256,base_revision,base_width,base_height"
+            private const val V7_STATE_COLUMNS = "$V6_STATE_COLUMNS,image_source_id,evidence_kind"
             internal val STATES_SQL = """CREATE TABLE states (
                 project_id TEXT NOT NULL, state_id TEXT NOT NULL, capture_id TEXT NOT NULL,
                 sort_order INTEGER NOT NULL CHECK(sort_order>=0),
                 title TEXT NOT NULL, description TEXT NOT NULL, is_terminal INTEGER NOT NULL CHECK(is_terminal IN (0,1)),
                 source_id TEXT, input_asset_id TEXT NOT NULL, frame_pts_us INTEGER CHECK(frame_pts_us>=0),
                 time_precision_us INTEGER CHECK(time_precision_us>0), masks_json TEXT NOT NULL,
-                origin_kind TEXT NOT NULL CHECK(origin_kind IN ('videoFrame','image')),
+                origin_kind TEXT NOT NULL CHECK(origin_kind IN ('videoFrame','image','packageImage')),
                 base_asset_id TEXT, base_sha256 TEXT, base_revision INTEGER, base_width INTEGER, base_height INTEGER,
                 image_source_id TEXT, evidence_kind TEXT NOT NULL DEFAULT 'recorded' CHECK(evidence_kind IN ('recorded','authored','imported')),
-                CHECK((origin_kind='videoFrame' AND image_source_id IS NULL AND evidence_kind='recorded' AND source_id IS NOT NULL AND frame_pts_us IS NOT NULL AND time_precision_us IS NOT NULL
+                package_import_id TEXT,
+                CHECK((origin_kind='videoFrame' AND package_import_id IS NULL AND image_source_id IS NULL AND evidence_kind='recorded' AND source_id IS NOT NULL AND frame_pts_us IS NOT NULL AND time_precision_us IS NOT NULL
                     AND base_asset_id IS NULL AND base_sha256 IS NULL AND base_revision IS NULL AND base_width IS NULL AND base_height IS NULL)
-                    OR (origin_kind='image' AND image_source_id IS NULL AND source_id IS NULL AND frame_pts_us IS NULL AND time_precision_us IS NULL
+                    OR (origin_kind='image' AND package_import_id IS NULL AND image_source_id IS NULL AND source_id IS NULL AND frame_pts_us IS NULL AND time_precision_us IS NULL
                     AND base_asset_id IS NOT NULL AND length(base_asset_id)>0 AND base_sha256 IS NOT NULL
                     AND length(base_sha256)=64 AND base_sha256 NOT GLOB '*[^0-9a-f]*'
                     AND base_revision IS NOT NULL AND base_revision>0 AND base_width IS NOT NULL AND base_width>0
                     AND base_height IS NOT NULL AND base_height>0 AND base_width*base_height<=12000000)
-                    OR (origin_kind='image' AND image_source_id IS NOT NULL AND length(image_source_id)>0 AND evidence_kind='authored'
+                    OR (origin_kind='image' AND package_import_id IS NULL AND image_source_id IS NOT NULL AND length(image_source_id)>0 AND evidence_kind='authored'
                     AND source_id IS NULL AND frame_pts_us IS NULL AND time_precision_us IS NULL
+                    AND base_asset_id IS NULL AND base_sha256 IS NULL AND base_revision IS NULL AND base_width IS NULL AND base_height IS NULL)
+                    OR (origin_kind='packageImage' AND package_import_id IS NOT NULL AND length(package_import_id)>0 AND evidence_kind='imported'
+                    AND source_id IS NULL AND frame_pts_us IS NULL AND time_precision_us IS NULL AND image_source_id IS NULL
                     AND base_asset_id IS NULL AND base_sha256 IS NULL AND base_revision IS NULL AND base_width IS NULL AND base_height IS NULL)),
                 PRIMARY KEY(project_id,state_id), UNIQUE(project_id,input_asset_id), UNIQUE(project_id,capture_id),
                 FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE,
                 FOREIGN KEY(project_id,source_id) REFERENCES sources(project_id,source_id) DEFERRABLE INITIALLY DEFERRED,
                 FOREIGN KEY(project_id,input_asset_id) REFERENCES local_assets(project_id,asset_id) DEFERRABLE INITIALLY DEFERRED,
-                FOREIGN KEY(project_id,image_source_id) REFERENCES image_sources(project_id,source_id) DEFERRABLE INITIALLY DEFERRED
+                FOREIGN KEY(project_id,image_source_id) REFERENCES image_sources(project_id,source_id) DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(project_id,state_id,package_import_id) REFERENCES package_step_origins(project_id,state_id,import_id) DEFERRABLE INITIALLY DEFERRED
             )"""
         }
 

@@ -50,7 +50,8 @@ class ReleaseStore(context: Context) {
             val payload = directory(File(operation, "package"), operation)
             val assets = directory(File(payload, "assets"), payload)
             // ProjectStore holds its deletion/edit lock through snapshot AND copy.
-            val snapshot = ProjectStore(app).copyReleaseInputs(projectId, expectedRevision, assets)
+            var draftPlan: DraftAiConfig? = null
+            val snapshot = ProjectStore(app).copyReleaseInputs(projectId, expectedRevision, assets) { draftPlan = it }
             currentCoroutineContext().ensureActive()
             val id = newId()
             val scene = ReleaseCompiler.scene(snapshot, id,
@@ -61,6 +62,7 @@ class ReleaseStore(context: Context) {
             val result = ReleaseCandidate(id, projectId, expectedRevision, scene,
                 ViewerPackageCodec.contentDigest(scene))
             writeCandidate(operation, result)
+            draftPlan?.let { writeSynced(File(operation, "draft-plan.json"), it.resolve(scene).toBytes()) }
             syncDirectory(payload)
             syncDirectory(operation)
             currentCoroutineContext().ensureActive()
@@ -208,6 +210,10 @@ class ReleaseStore(context: Context) {
         check(candidate.reviewedRegionIds == candidate.scene.regions.map { it.id }.toSet()) { "请逐项查看并确认固定候选的实际区域裁片。" }
         val source = child(candidates, candidateId)
         verifyPackage(candidate.scene, File(source, "package"), decode = true)
+        File(source, "draft-plan.json").takeIf { it.exists() }?.let { file ->
+            check(file.canonicalFile == file.absoluteFile && file.isFile && file.length() in 1..RenderPlan.MAX_BYTES.toLong()) { "固定动画计划无效。" }
+            RenderPlan.parse(candidate.scene, file.readBytes())
+        }
         val summary = summary(candidate.scene, "local", System.currentTimeMillis())
         writeSummary(source, summary)
         syncDirectory(source)
@@ -277,10 +283,16 @@ class ReleaseStore(context: Context) {
         }
     }
 
+    suspend fun hasDraftAiPlan(releaseId: String): Boolean = locked {
+        readReleaseDirectory(child(releases, releaseId), verifyAssets = false)
+        File(child(releases, releaseId), "draft-plan.json").exists()
+    }
+
     /** A render plan is separate local metadata; the sealed package and scene are never rewritten. */
     suspend fun readAiPlan(releaseId: String): RenderPlan? = locked {
         val scene = readScene(File(child(releases, releaseId), "package"))
-        val file = File(aiConfigs, "$releaseId.json")
+        val saved = File(aiConfigs, "$releaseId.json")
+        val file = if (saved.exists()) saved else File(child(releases, releaseId), "draft-plan.json")
         if (!file.exists()) return@locked null
         check(file.canonicalFile == file.absoluteFile && file.isFile && file.length() in 1..RenderPlan.MAX_BYTES.toLong()) { "动画配置无效，请重新配置。" }
         RenderPlan.parse(scene, file.readBytes())

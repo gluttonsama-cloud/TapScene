@@ -3,20 +3,17 @@ from pathlib import Path
 import re
 import sqlite3
 s=(Path(__file__).resolve().parents[2] / 'android/app/src/main/java/com/tapscene/data/ProjectStore.kt').read_text()
-# The original schema is an explicit fixture; current v6 rebuild is checked separately.
-legacy_states = (Path(__file__).with_name('legacy-states-v5.sql')).read_text().strip().rstrip(';')
-s += '\ndb.execSQL(\"\"\"' + legacy_states + '\"\"\")'
-# State indexes appear in create and migration; run the same definitions once.
-s = s.replace('db.execSQL(\"CREATE INDEX states_order ON states(project_id,sort_order)\")', '', 1).replace('db.execSQL(\"CREATE INDEX states_source ON states(source_id)\")', '', 1)
+state_sql = re.search(r'internal val STATES_SQL = """(.*?)"""', s, re.S).group(1)
+production_tables = re.findall(r'db.execSQL\("""(CREATE TABLE.*?)"""\)', s, re.S) + [state_sql]
+production_single = list(dict.fromkeys(re.findall(r'db.execSQL\("(CREATE (?:INDEX|TABLE).*?)"\)', s)))
 c=sqlite3.connect(':memory:'); c.execute('PRAGMA foreign_keys=ON')
-for sql in re.findall(r'db.execSQL\("""(CREATE TABLE.*?)"""\)',s,re.S): c.execute(sql)
-for sql in re.findall(r'db.execSQL\("(CREATE (?:INDEX|TABLE).*?)"\)',s): c.execute(sql)
+for sql in production_tables + production_single: c.execute(sql)
 def project(p):
  c.execute('INSERT INTO projects VALUES(?,?,?,?,?,?,?)',(p,p,'goal',1,1,1,None))
  c.execute('INSERT INTO sources VALUES(?,?,?)',(p,'source','{}'))
 def step(p,s):
  c.execute('INSERT INTO local_assets VALUES(?,?,?,?,?,?,?)',(s,p,p+'/'+s+'.png','sha',4,1,1))
- c.execute('INSERT INTO states VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(p,s,s,0,s,'desc',0,'source',s,123456,1000,'[]'))
+ c.execute("INSERT INTO states (project_id,state_id,capture_id,sort_order,title,description,is_terminal,source_id,input_asset_id,frame_pts_us,time_precision_us,masks_json,origin_kind) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'videoFrame')",(p,s,s,0,s,'desc',0,'source',s,123456,1000,'[]'))
 def hotspot(p,h,frm,to=None,end=None):
  c.execute('INSERT INTO hotspots VALUES(?,?,?,?,?,?,?,?)',(p,h,frm,h,0,0,1,1))
  c.execute('INSERT INTO edges VALUES(?,?,?,?,?,?)',(p,h,h,frm,to,end))
@@ -75,8 +72,10 @@ print('PASS step deletion removes incoming/outgoing/self links, keeps independen
 
 # Next actions are independent authored buttons. Migration is additive and leaves every old
 # table byte-for-byte equivalent at the row level; no hotspots or assets are synthesized.
-tables = re.findall(r'db.execSQL\("""(CREATE TABLE.*?)"""\)', s, re.S)
-single_line = re.findall(r'db.execSQL\("(CREATE (?:INDEX|TABLE).*?)"\)', s)
+legacy_text = '\n'.join(line for line in Path(__file__).with_name('legacy-schema-v5.sql').read_text().splitlines() if not line.startswith('--'))
+legacy_statements = [sql.strip() for sql in legacy_text.split(';') if sql.strip()]
+tables = [sql for sql in legacy_statements if sql.startswith('CREATE TABLE')]
+single_line = [sql for sql in legacy_statements if sql.startswith('CREATE INDEX')]
 next_sql = [sql for sql in tables + single_line if re.match(r'CREATE (?:TABLE|INDEX) next_actions', sql)]
 transition_sql = [sql for sql in tables + single_line if re.match(r'CREATE (?:TABLE|INDEX) (?:edge_transitions|transition_imports)', sql)]
 region_sql = [sql for sql in tables + single_line if re.match(r'CREATE (?:TABLE|INDEX) regions', sql)]
