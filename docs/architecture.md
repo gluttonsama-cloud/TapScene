@@ -1,0 +1,741 @@
+# 架构设计
+
+[基础设施](#基础设施层) · [数据](#数据层) · [业务逻辑](#业务层) · [API / SDK](#应用接口层) · [页面](../README.md#页面与流转) · [任务与开发规则](tasks.md)
+
+本文定义待实现的数据、接口和模块；具体版本组合与兼容范围在实现时验证。
+
+```mermaid
+flowchart TB
+  subgraph interaction["交互层：用户入口"]
+    app["Android App：创作、复核、离线观看"]
+    web["Web：持链观看"]
+  end
+  subgraph application["应用接口层：调用契约"]
+    localApi["Android 本地用例"]
+    http["云端 HTTP API / 访问网关"]
+    adapter["独立 Remotion 消费接口"]
+  end
+  subgraph business["业务层：核心逻辑"]
+    author["Android：编辑、脱敏、复核、封存"]
+    player["Android / Web：图与播放状态机"]
+    publish["云端：上传校验、发布、到期与撤销"]
+    render["电脑 / 所选云环境：有限时间轴渲染"]
+  end
+  subgraph data["数据层：保存内容"]
+    draft[("Android 私有域：原素材、草稿、OCR、任务")]
+    release[("本机：固定 scene 与安全资产")]
+    package["离线包 / AI 包：纯数据与安全媒体"]
+    hosted[("云端：账号、发布记录、私有安全资产")]
+  end
+  subgraph infrastructure["基础设施层：支撑技术"]
+    androidTech["Android SDK / Room / Media3"]
+    webTech["React / 浏览器"]
+    cloudTech["Fastify / PostgreSQL / 私有 S3"]
+    renderTech["Remotion / Node.js"]
+  end
+  app --> localApi --> author
+  localApi --> player
+  author <--> draft
+  author -->|"复核后封存"| release
+  release -->|"安全媒体"| player
+  release -->|"导出"| package
+  package -->|"校验后离线导入"| release
+  package -->|"AI 回流：校验后新建草稿"| localApi
+  release -->|"主动上传安全 release"| http
+  web -->|"页面、manifest、每次媒体请求"| http
+  web --> player
+  http --> publish --> hosted
+  package -->|"AI 包及独立 render-plan"| adapter --> render
+  author -.-> androidTech
+  web -.-> webTech
+  publish -.-> cloudTech
+  render -.-> renderTech
+```
+
+箭头表示调用或数据流，虚线指向所用技术。原素材留在 Android 私有域；网页媒体始终经过访问网关。Remotion 在电脑或作者选择的云环境独立运行。
+
+| 层级 | 职责 | 模块 | 技术 |
+|---|---|---|---|
+| 基础设施层 | 提供设备、运行环境、存储与调度 | Android、浏览器、托管服务、渲染环境 | Kotlin、Compose、Room、Media3、WorkManager；React、Vite；Node.js、Fastify、PostgreSQL、S3；Remotion |
+| 数据层 | 定义存什么、怎么存、怎样关联 | 本机 11 张表、服务端 9 张表、版本化数据包 | SQLite / Room、PostgreSQL、私有文件、JSON Schema、SHA-256 |
+| 业务层 | 执行编辑、脱敏、复核、播放、交付与发布规则 | Android 业务用例、`runtime-ts/`、`server/`、`remotion-adapter/` | 事务、固定快照、图校验、媒体编译、播放 reducer |
+| 应用接口层 | 连接业务与调用方 | 本地用例、18 条 HTTP API、包消费接口、第三方库接入 | Kotlin 接口、HTTP / JSON、TypeScript 契约 |
+| 交互层 | 提供创作和观看页面 | `android/`、`web-player/` | Compose 原生 App、React 观看网页 |
+
+## 基础设施层
+
+| 运行位置 | 模块 | 支撑能力 |
+|---|---|---|
+| Android 手机 | `android/` | Compose 页面；Room 私有持久化；系统媒体与 Media3 解码、脱敏、播放；WorkManager 调度可恢复任务 |
+| 浏览器 | `web-player/` | React / Vite 观看页面；原生图片与 video；HTTP 网关读取安全资产 |
+| 托管服务 | `server/` | TypeScript / Fastify 模块化单体；API 与校验 worker 共用代码；PostgreSQL 事务；私有 S3 兼容对象存储 |
+| 共享契约与规则 | `contracts/`、`runtime-ts/` | schema、HTTP DTO、纯图校验和播放规则；Android 实现等价规则 |
+| 电脑或所选云环境 | `remotion-adapter/` | 独立受信 React / Remotion 模板，消费 AI 数据包并输出视频 |
+
+Android 初期按包分区，按实际需要拆 Gradle 模块。依赖版本、最低系统、编码配置、服务商与许可在接入时锁定；付费服务按确认后的方案开通。
+
+## 数据层
+
+### 存储约定
+
+| 存储域 | 内容 | 类型与保护 |
+|---|---|---|
+| Android 私有域 | 原素材、原 OCR、活动草稿、候选、复核、任务、固定版本 | SQLite `TEXT` 存 UUID、枚举、SHA-256 十六进制串及 JSON；`INTEGER` 存整数和 0/1；`REAL` 存有限数 |
+| 托管服务 | 账号、上传状态、主动发布的安全内容、分享与撤销 | PostgreSQL `uuid`、32 字节摘要 `bytea`、`timestamptz`、`jsonb`；对象始终私有 |
+| 交付文件 | 版本化 scene、安全媒体、包清单；AI 包另有渲染计划 | UTF-8 JSON、固定字节资产、受控包内相对路径 |
+
+本机 `*_at` 用 UTC epoch 毫秒；`*_pts_us` 直接使用解码所得真实 presentation timestamp，避免按名义帧率推算。文件列只存受控私有目录相对路径。原素材、DB、原 OCR、预览缓存、撤销历史及凭据排除系统云备份和设备迁移。账号只恢复发布管理。本机原素材与草稿随设备保存。服务端 `owner_id` 从管理会话取得。
+
+### 本机表
+
+每个项目有一份活动草稿，`projects` 同时承载项目与草稿信息。编辑事务递增 `draft_revision`；长任务使用固定输入快照。复制项目、脱敏包复制及 AI 回流创建新 `project_id`，保留来源对象 ID 用于差异比较。
+
+#### projects：本地项目与活动草稿
+
+| 字段 | 类型 | 必填 | 用途 |
+|---|---|---|---|
+| `project_id` | `TEXT` | 是 | 本地项目/活动草稿的主键 |
+| `title` | `TEXT` | 是 | 显示标题 |
+| `goal` | `TEXT` | 是 | 一句演示目标 |
+| `created_at` | `INTEGER` | 是 | 创建时间 |
+| `updated_at` | `INTEGER` | 是 | 最后修改时间 |
+| `draft_revision` | `INTEGER` | 是 | 当前草稿版本，编辑事务递增；默认 1 |
+| `start_state_id` | `TEXT` | 否 | 起点状态，可暂缺但不能交付 |
+| `origin_release_id` | `TEXT` | 否 | 复制/回流所依据的版本标识 |
+| `draft_config_json` | `TEXT` | 是 | 纳入子图、关键路径、AI 配置，结构见“本机 JSON 列” |
+| `undo_json` | `TEXT` | 否 | 最近一次编辑的逆操作，结构见“本机 JSON 列” |
+
+- PK：`project_id`。FK：`(project_id,start_state_id)` 延迟引用 `states`。索引：`updated_at`。
+- 起点可暂缺，封存前补齐。`origin_release_id` 仅记录外部来源。保存状态由待提交编辑与 revision 计算。
+
+#### sources：私有源素材
+
+| 字段 | 类型 | 必填 | 用途 |
+|---|---|---|---|
+| `project_id` | `TEXT` | 是 | 所属本地项目 |
+| `source_id` | `TEXT` | 是 | 私有源素材标识 |
+| `kind` | `TEXT` | 是 | `video/image` |
+| `private_relpath` | `TEXT` | 否 | 私有源副本路径；缺失时可空 |
+| `display_name` | `TEXT` | 是 | 原文件名，只在本机显示 |
+| `mime` | `TEXT` | 是 | 检测并允许的真实媒体类型 |
+| `byte_length` | `INTEGER` | 是 | 文件实际字节数 |
+| `sha256` | `TEXT` | 是 | 实际文件字节摘要 |
+| `width` | `INTEGER` | 是 | 图像/视频内容宽度（像素） |
+| `height` | `INTEGER` | 是 | 图像/视频内容高度（像素） |
+| `rotation_deg` | `INTEGER` | 是 | 源素材旋转元数据 |
+| `duration_ms` | `INTEGER` | 否 | 媒体时长毫秒；静态图为空 |
+| `trim_start_ms` | `INTEGER` | 否 | 引用区间起点，包含 |
+| `trim_end_ms` | `INTEGER` | 否 | 引用区间终点，不包含 |
+| `analysis_json` | `TEXT` | 否 | 原 OCR 与候选结果，只在本机 |
+| `imported_at` | `INTEGER` | 是 | 导入完成时间 |
+| `availability` | `TEXT` | 是 | 是否还有可用源文件；`present/missing` |
+
+- PK：`(project_id,source_id)`。FK：`project_id` → `projects`。
+- 视频须有时长及有效裁剪区间；截图对应列为空。源文件缺失保留记录，重新取帧前须恢复来源。原文件名、原 OCR 留在本机。
+
+#### states：画面状态
+
+| 字段 | 类型 | 必填 | 用途 |
+|---|---|---|---|
+| `project_id` | `TEXT` | 是 | 所属本地项目 |
+| `state_id` | `TEXT` | 是 | 画面状态的稳定标识 |
+| `sort_order` | `INTEGER` | 是 | 显示顺序，不是身份 |
+| `title` | `TEXT` | 是 | 显示标题 |
+| `description` | `TEXT` | 是 | 步骤说明，纯文本 |
+| `source_kind` | `TEXT` | 是 | 录制、作者编排、导入或待补录依据；`recorded/authored/imported/missing` |
+| `source_id` | `TEXT` | 否 | 私有源素材标识 |
+| `frame_pts_us` | `INTEGER` | 否 | 实际选中代表帧的源时间戳 |
+| `input_asset_id` | `TEXT` | 否 | 从脱敏包导入时的安全底图 |
+| `canvas_width` | `INTEGER` | 是 | 规范化内容画布宽度 |
+| `canvas_height` | `INTEGER` | 是 | 规范化内容画布高度 |
+| `is_terminal` | `INTEGER` | 是 | 是否明确结束状态；默认 0 |
+| `confirmed_at` | `INTEGER` | 否 | 作者确认该对象/复核的时间 |
+| `content_revision` | `INTEGER` | 是 | 本对象内容版本，用于关联失效 |
+
+- PK：`(project_id,state_id)`。FK：项目；`(project_id,source_id)` → `sources`；`input_asset_id` → `local_assets`。索引：`(project_id,sort_order)`、`(project_id,source_id)`。
+- 录制状态使用 source + PTS；作者截图使用 source；安全包导入使用 input_asset；待补录使用 `missing`。排序保留 ID。确认或素材变化更新 content_revision；依据、目标、热点坐标变化清空受影响对象的 confirmed_at。
+
+#### hotspots：点击区域
+
+| 字段 | 类型 | 必填 | 用途 |
+|---|---|---|---|
+| `project_id` | `TEXT` | 是 | 所属本地项目 |
+| `hotspot_id` | `TEXT` | 是 | 热点标识；边可以只通过文字选择 |
+| `state_id` | `TEXT` | 是 | 画面状态的稳定标识 |
+| `label` | `TEXT` | 是 | 可读操作标签 |
+| `x` | `REAL` | 是 | 归一化矩形左上角横坐标 |
+| `y` | `REAL` | 是 | 归一化矩形左上角纵坐标 |
+| `width` | `REAL` | 是 | 热点矩形归一化宽度 |
+| `height` | `REAL` | 是 | 热点矩形归一化高度 |
+| `confirmed_at` | `INTEGER` | 否 | 作者确认该对象/复核的时间 |
+| `content_revision` | `INTEGER` | 是 | 本对象内容版本，用于关联失效 |
+
+- PK：`(project_id,hotspot_id)`。FK 及索引：`(project_id,state_id)` → `states`。
+- 矩形相对内容画布，范围 0–1、正面积且在画布内。对应动作从 `edges.hotspot_id` 查询。
+
+#### edges：动作、分支与录制过渡
+
+| 字段 | 类型 | 必填 | 用途 |
+|---|---|---|---|
+| `project_id` | `TEXT` | 是 | 所属本地项目 |
+| `edge_id` | `TEXT` | 是 | 稳定动作/边标识 |
+| `from_state_id` | `TEXT` | 是 | 源状态 |
+| `to_state_id` | `TEXT` | 否 | 目标状态，与 end_label 二选一 |
+| `end_label` | `TEXT` | 否 | 直接结束结果，与 to_state_id 二选一 |
+| `hotspot_id` | `TEXT` | 否 | 热点标识；边可以只通过文字选择 |
+| `label` | `TEXT` | 是 | 可读操作标签 |
+| `trigger` | `TEXT` | 是 | 显式触发形式，无任意条件表达式；`tap/choice/continue` |
+| `source_kind` | `TEXT` | 是 | 录制、作者编排、导入或待补录依据；`recorded/authored/imported` |
+| `source_id` | `TEXT` | 否 | 私有源素材标识 |
+| `source_start_pts_us` | `INTEGER` | 否 | 录制证据/过渡的真实起点 |
+| `source_end_pts_us` | `INTEGER` | 否 | 录制证据/过渡的真实终点，不包含 |
+| `transition_input_asset_id` | `TEXT` | 否 | 安全包中已存在的过渡资产 |
+| `use_transition` | `INTEGER` | 是 | 是否播放绑定短视频；默认 0 |
+| `confirmed_at` | `INTEGER` | 否 | 作者确认该对象/复核的时间 |
+| `content_revision` | `INTEGER` | 是 | 本对象内容版本，用于关联失效 |
+
+- PK：`(project_id,edge_id)`。FK：本项目 from/to state、hotspot、source；`transition_input_asset_id` → `local_assets`。索引：`(project_id,from_state_id)`、`(project_id,to_state_id)`、`(project_id,hotspot_id)`、`(project_id,source_id)`。
+- to_state_id 与 end_label 恰有一个。hotspot 必须属于 from_state。同热点多结果打开选择面板。录制边保留证据区间，use_transition 仅决定是否播放该短片。
+
+#### redactions：固定不透明遮挡
+
+| 字段 | 类型 | 必填 | 用途 |
+|---|---|---|---|
+| `project_id` | `TEXT` | 是 | 所属本地项目 |
+| `redaction_id` | `TEXT` | 是 | 一块固定遮挡的标识 |
+| `state_id` | `TEXT` | 否 | 画面状态的稳定标识 |
+| `edge_id` | `TEXT` | 否 | 稳定动作/边标识 |
+| `x` | `REAL` | 是 | 归一化矩形左上角横坐标 |
+| `y` | `REAL` | 是 | 归一化矩形左上角纵坐标 |
+| `width` | `REAL` | 是 | 遮挡矩形的归一化宽度 |
+| `height` | `REAL` | 是 | 遮挡矩形的归一化高度 |
+| `color_argb` | `INTEGER` | 是 | 遮挡颜色，alpha 必须 255 |
+| `content_revision` | `INTEGER` | 是 | 本对象内容版本，用于关联失效 |
+
+- PK：`(project_id,redaction_id)`。FK：`(project_id,state_id)` → `states`；`(project_id,edge_id)` → `edges`；索引覆盖两个 FK。
+- state_id、edge_id 恰有一个。每行一块固定遮挡；坐标相对目标内容画布，alpha 为 255。视频遮挡覆盖所选整段及敏感内容的完整运动范围。
+
+#### regions：安全画面的可见区域
+
+| 字段 | 类型 | 必填 | 用途 |
+|---|---|---|---|
+| `project_id` | `TEXT` | 是 | 所属本地项目 |
+| `region_id` | `TEXT` | 是 | 可见区域标识 |
+| `state_id` | `TEXT` | 是 | 画面状态的稳定标识 |
+| `base_asset_id` | `TEXT` | 是 | 已经脱敏的底图 |
+| `base_sha256` | `TEXT` | 是 | 区域所依赖底图的字节摘要 |
+| `name` | `TEXT` | 是 | 区域名称，纯文本 |
+| `group_name` | `TEXT` | 否 | 可选的区域分组 |
+| `x_px` | `INTEGER` | 是 | 源安全底图中的像素左坐标 |
+| `y_px` | `INTEGER` | 是 | 源安全底图中的像素上坐标 |
+| `width_px` | `INTEGER` | 是 | 裁片像素宽度 |
+| `height_px` | `INTEGER` | 是 | 裁片像素高度 |
+| `source_width` | `INTEGER` | 是 | 安全底图真实宽度 |
+| `source_height` | `INTEGER` | 是 | 安全底图真实高度 |
+| `z_index` | `INTEGER` | 是 | 展示层级次序 |
+| `anchor_x` | `REAL` | 是 | 裁片局部 0–1 横向锚点 |
+| `anchor_y` | `REAL` | 是 | 裁片局部 0–1 纵向锚点 |
+| `content_revision` | `INTEGER` | 是 | 本对象内容版本，用于关联失效 |
+
+- PK：`(project_id,region_id)`。FK：本项目 state；`base_asset_id` → `local_assets`。索引：`(project_id,state_id)`。
+- 类型固定 `screenshotCrop`。bbox 使用安全底图像素，anchor 使用裁片局部 0–1。底图摘要和实际尺寸须匹配；底图改变后重新生成区域。
+
+#### local_assets：固定安全派生文件
+
+| 字段 | 类型 | 必填 | 用途 |
+|---|---|---|---|
+| `asset_id` | `TEXT` | 是 | 安全派生资产标识 |
+| `relative_path` | `TEXT` | 是 | 受控相对路径，不接受外链 |
+| `role` | `TEXT` | 是 | 安全资产用途；`state_image/transition/thumbnail/cover/region_crop` |
+| `mime` | `TEXT` | 是 | 检测并允许的真实媒体类型 |
+| `byte_length` | `INTEGER` | 是 | 文件实际字节数 |
+| `sha256` | `TEXT` | 是 | 实际文件字节摘要 |
+| `width` | `INTEGER` | 是 | 图像/视频内容宽度（像素） |
+| `height` | `INTEGER` | 是 | 图像/视频内容高度（像素） |
+| `duration_ms` | `INTEGER` | 否 | 媒体时长毫秒；静态图为空 |
+| `input_fingerprint` | `TEXT` | 是 | 输入与配置依赖指纹，不能替代输出摘要 |
+| `created_at` | `INTEGER` | 是 | 创建时间 |
+| `verified_at` | `INTEGER` | 是 | 实际文件重检成功时间 |
+
+- PK：`asset_id`。唯一：`relative_path`。索引：`sha256`。
+- 完整输出并重检后入表；临时文件留在任务工作区。每行对应固定字节，重新编码产生不同字节时创建新资产。input_fingerprint 仅判断依赖，实际输出使用 sha256。
+
+#### reviews：实际输出的复核记录
+
+| 字段 | 类型 | 必填 | 用途 |
+|---|---|---|---|
+| `review_id` | `TEXT` | 是 | 本机复核记录标识 |
+| `project_id` | `TEXT` | 否 | 所属本地项目；独立成品导出复核可空 |
+| `job_id` | `TEXT` | 是 | 固定快照任务标识 |
+| `kind` | `TEXT` | 是 | `state/transition/graph/delivery` |
+| `subject_id` | `TEXT` | 是 | 对应快照内的复核对象 |
+| `input_fingerprint` | `TEXT` | 是 | 输入与配置依赖指纹，不能替代输出摘要 |
+| `output_digest` | `TEXT` | 是 | 实际派生文件、文字及范围的组合摘要 |
+| `policy_version` | `TEXT` | 是 | 使用的安全/容量政策版本 |
+| `compiler_version` | `TEXT` | 是 | 生成派生资产的编译器版本 |
+| `scope_json` | `TEXT` | 是 | 复核的实际资产、文字与图覆盖 |
+| `confirmed_at` | `INTEGER` | 是 | 作者确认该对象/复核的时间 |
+| `invalidated_at` | `INTEGER` | 否 | 已知失效时间；仍须实时比较摘要 |
+| `invalidated_reason` | `TEXT` | 否 | 用于定位的失效原因 |
+
+- PK：`review_id`。FK：可空 project；必填 job。索引：`(project_id,kind,subject_id)`、`job_id`。
+- subject_id 按 kind 指向固定快照中的 state、edge、图或交付。output_digest 对按 assetId 排序的实际资产、textDigest、configDigest 和该 kind 的范围字段做规范化摘要；确认后范围固定。有效性实时比较依赖、实际输出及策略版本。
+
+#### local_jobs：固定快照与可恢复任务
+
+| 字段 | 类型 | 必填 | 用途 |
+|---|---|---|---|
+| `job_id` | `TEXT` | 是 | 固定快照任务标识 |
+| `project_id` | `TEXT` | 否 | 所属本地项目 |
+| `kind` | `TEXT` | 是 | `analyze/compile/export/upload/import` |
+| `draft_revision` | `INTEGER` | 否 | 本任务绑定的草稿修订 |
+| `release_id` | `TEXT` | 否 | 不可变成品版本标识 |
+| `owner_account_id` | `TEXT` | 否 | 该上传任务绑定的账号，无凭据 |
+| `input_fingerprint` | `TEXT` | 是 | 输入与配置依赖指纹，不能替代输出摘要 |
+| `input_snapshot_json` | `TEXT` | 是 | 固定输入快照，不能读取正在变动的草稿代替 |
+| `status` | `TEXT` | 是 | `queued/running/paused/waiting_review/succeeded/failed/cancelled` |
+| `stage` | `TEXT` | 是 | 当前任务步骤 |
+| `completed_units` | `INTEGER` | 是 | 已实际完成的资产/步骤数 |
+| `total_units` | `INTEGER` | 否 | 已知的总单位数；未知时空 |
+| `attempt` | `INTEGER` | 是 | 尝试次数 |
+| `checkpoint_json` | `TEXT` | 是 | 已完成资产、临时文件和服务器回执 |
+| `idempotency_key` | `TEXT` | 否 | 上传创建的稳定重试键 |
+| `error_code` | `TEXT` | 否 | 机器可读失败原因 |
+| `retryable` | `INTEGER` | 是 | 是否可在当前输入下重试 |
+| `created_at` | `INTEGER` | 是 | 创建时间 |
+| `updated_at` | `INTEGER` | 是 | 最后修改时间 |
+
+- PK：`job_id`。FK：project。release_id 是输入或预分配输出标识，封存前仅作引用值。索引：`(status,updated_at)`、`(project_id,created_at)`；上传 idempotency_key 按账号唯一。
+- stage 使用对应 kind 的阶段；completed_units 记录实际完成资产或步骤。恢复先检查鉴权、输入指纹和已完成文件。
+
+#### local_releases：不可变版本与离线库
+
+| 字段 | 类型 | 必填 | 用途 |
+|---|---|---|---|
+| `release_id` | `TEXT` | 是 | 不可变成品版本标识 |
+| `project_id` | `TEXT` | 否 | 所属本地项目 |
+| `source_draft_revision` | `INTEGER` | 否 | 成品所依据的本机草稿版本 |
+| `origin` | `TEXT` | 是 | 本机生成或包导入；`local/imported` |
+| `schema_version` | `TEXT` | 是 | 支持的交换格式版本 |
+| `policy_version` | `TEXT` | 是 | 使用的安全/容量政策版本 |
+| `content_digest` | `TEXT` | 是 | 规范化 scene 的摘要，含资产摘要 |
+| `scene_json` | `TEXT` | 是 | 安全 Scene，结构见下方交付格式 |
+| `asset_ids_json` | `TEXT` | 是 | 版本引用的完整安全资产 ID 清单 |
+| `sealed_at` | `INTEGER` | 是 | 固定版本封存时间 |
+| `last_opened_at` | `INTEGER` | 否 | 演示库最近打开时间，不属于成品内容 |
+| `playback_checkpoint_json` | `TEXT` | 否 | 播放断点，不属于成品内容 |
+
+- PK：`release_id`。FK：project，`ON DELETE SET NULL`。索引：`(project_id,sealed_at)`、`last_opened_at`。
+- 仅保存已封存或已验证导入版本。内容、摘要、资产引用和标识只写一次；列表与播放断点可更新。导入同 ID 不同摘要返回冲突。
+
+草稿对象通过项目内复合键关联。安全资源池 `local_assets` 可被复制项目共享；清理前扫描草稿、版本、任务及撤销快照的全部引用。删除节点在同一编辑事务处理关联，或保留 `missing` 位置供补录。删除整个项目按引用顺序处理；已独立保存的版本及托管分享继续存在。
+
+| 任务 kind | stage |
+|---|---|
+| `analyze` | `inspect → extract → ocr → suggest` |
+| `compile` | `snapshot → media → derived_assets → recheck → review → seal` |
+| `export` | `assemble → verify → write` |
+| `upload` | `create → transfer → commit` |
+| `import` | `unpack → validate → install` |
+
+### 本机 JSON 列
+
+| JSON 列 | 结构与字段 |
+|---|---|
+| `projects.draft_config_json` | `{includedStateIds:[id], excludedStates:[{stateId,reason}], criticalPaths:[{pathId,edgeIds:[id]}], ai:{canvasPreset:"portrait1080"\|"landscape1080", fps:30, visits:[{visitId,stateId,selectedEdgeId:null\|id,holdFrames}], effects:[Effect]}}`；ai 可空。显示被排除节点，由作者明确排除。Effect 结构见下方交付格式。 |
+| `projects.undo_json` | `{beforeRevision,afterRevision,changes:[{table,key,previousRow}]}`。table 只允许本节可编辑的 projects/sources/states/edges/hotspots/redactions/regions；key 是该表完整 PK，previousRow 是对应字段表完整行或 null（表示原先不存在）。保留最近一次可撤销编辑；其中 projects 行不递归保存 undo_json。只由本地代码产生。文件延迟清理到撤销引用释放后。 |
+| `sources.analysis_json` | `{engine,modelVersion,samples:[{ptsUs,changeScore,blocks:[{text,bboxPx:{x,y,width,height},confidence:null\|number}]}], suggestions:[{kind:"state"\|"hotspot"\|"merge", sourcePtsUs, otherStateId:null\|id, rect:null\|{x,y,width,height}, label}]}`。仅分析采样点，不存整片每帧；原 OCR、原建议留本地。候选写入编辑对象后仍须人工确认。 |
+| `reviews.scope_json` | 通用 `{assets:[{assetId,sha256,byteLength}],textDigest,configDigest}`；state 包含底图/缩略图/区域与对应文案；transition 另有 `{durationMs,fullClipReviewed:true,audioTracks:0}`；graph 另有 `{graphDigest,visitedEdgeIds:[id],completedCriticalPathIds:[id]}`；delivery 另有 `{sceneDigest,packageFileListDigest,coverAssetId:null\|id}`。这些是本机确认记录，仅由本机复核产生。 |
+| `local_jobs.input_snapshot_json` | 编译/分析：`{project:{projectId,revision,title,goal,startStateId,config},sources:[SourceRow（不复制 analysis_json）],states:[StateRow],edges:[EdgeRow],hotspots:[HotspotRow],redactions:[RedactionRow],regions:[RegionRow]}`，Row 对应各字段表；导出/上传：`{releaseId,contentDigest,exportKind,renderConfig,expiryDays,serverProjectId}`（只保留该任务需要的字段）；导入：`{inputRelativePath,inputSha256,importAs:"library"\|"draft"}`。 |
+| `local_jobs.checkpoint_json` | `{completedAssets:[{assetId,sha256}],tempFiles:[relativePath],candidateReleaseId:null\|id,sceneDigest:null\|hash,uploadId:null\|id,receivedAssetIds:[id],serverReceipt:null\|{publicationId,releaseId,shareUrl,expiresAt},outputFile:null\|{relativePath,sha256,byteLength}}`。账号 token 不进此列；shareUrl 在私有 DB 内保护且不写日志。 |
+| `local_releases.asset_ids_json` | `[assetId]`，必须与 scene 资产清单一一对应；引用只能指向完整 `local_assets`。Room 无法给 JSON 元素加 FK，由封存/导入事务及清理前引用扫描保证。 |
+| `local_releases.playback_checkpoint_json` | `{contentDigest,currentStateId,visits:[{stateId,selectedEdgeId:null\|id}],phase:"ready"\|"ended"}`。不持久化半段视频播放回调；恢复从明确状态开始。在线恢复先重验 share，不能仅凭断点继续取媒体。 |
+
+### 服务端表
+
+服务端存账号、上传及安全发布数据。scene_json 使用下方交付 Scene；资产索引列与 scene.assets 保持一致。
+
+#### accounts：发布管理账号
+
+| 字段 | 类型 | 必填 | 用途 |
+|---|---|---|---|
+| `account_id` | `uuid` | 是 | 发布管理账号标识 |
+| `email` | `text` | 是 | 账号邮箱，仅用于账号服务 |
+| `email_normalized` | `text` | 是 | 按约定规则规范化的邮箱 |
+| `created_at` | `timestamptz` | 是 | 创建时间 |
+| `disabled_at` | `timestamptz` | 否 | 账号禁用时间，空表示未禁用 |
+
+- PK：`account_id`。唯一：`email_normalized`。
+- 邮箱按固定规则规范化，保留点号和 + 别名差异；仅用于账号服务。
+
+#### auth_challenges：一次性验证码
+
+| 字段 | 类型 | 必填 | 用途 |
+|---|---|---|---|
+| `challenge_id` | `uuid` | 是 | 一次邮箱验证码挑战标识 |
+| `email_normalized` | `text` | 是 | 按约定规则规范化的邮箱 |
+| `code_mac` | `bytea` | 是 | 服务端密钥和挑战上下文生成的验证码摘要 |
+| `attempt_count` | `smallint` | 是 | 已尝试验证码次数 |
+| `max_attempts` | `smallint` | 是 | 本挑战允许的尝试上限 |
+| `expires_at` | `timestamptz` | 是 | 绝对到期时间，服务器判定 |
+| `consumed_at` | `timestamptz` | 否 | 验证码成功消费时间 |
+| `created_at` | `timestamptz` | 是 | 创建时间 |
+
+- PK：`challenge_id`。索引：`(email_normalized,created_at)`、`expires_at`。
+- code_mac 使用服务器密钥与 challenge 上下文。验证时锁行、限制尝试并一次消费；到期和限速参数由服务配置返回。
+
+#### sessions：可撤销管理会话
+
+| 字段 | 类型 | 必填 | 用途 |
+|---|---|---|---|
+| `session_id` | `uuid` | 是 | 管理会话标识 |
+| `account_id` | `uuid` | 是 | 发布管理账号标识 |
+| `token_hash` | `bytea` | 是 | 查找/验证 bearer token 的摘要 |
+| `created_at` | `timestamptz` | 是 | 创建时间 |
+| `expires_at` | `timestamptz` | 是 | 绝对到期时间，服务器判定 |
+| `revoked_at` | `timestamptz` | 否 | 首次撤销生效时间，不能恢复为空 |
+
+- PK：`session_id`。FK：`account_id` → `accounts`。唯一：`token_hash`。索引：`account_id`、`expires_at`。
+- bearer 会话可到期、可撤销；到期后重新验证码登录。
+
+#### hosted_projects：本人托管项目归组
+
+| 字段 | 类型 | 必填 | 用途 |
+|---|---|---|---|
+| `project_id` | `uuid` | 是 | 服务端项目主键，即 API serverProjectId |
+| `owner_id` | `uuid` | 是 | 由管理会话确定的账号 |
+| `client_project_id` | `uuid` | 是 | 本机 project_id，仅用于归组映射 |
+| `title` | `text` | 是 | 显示标题 |
+| `next_version` | `integer` | 是 | 下一次服务器发布序号；默认 1 |
+| `created_at` | `timestamptz` | 是 | 创建时间 |
+
+- PK：`project_id`。FK：`owner_id` → `accounts`。唯一：`(owner_id,client_project_id)`、`(project_id,owner_id)`。
+- 用于发布归组；异机通过 owner 列表管理已发布内容。next_version 在发布事务中递增。
+
+#### publication_uploads：上传、配额预留与校验
+
+| 字段 | 类型 | 必填 | 用途 |
+|---|---|---|---|
+| `upload_id` | `uuid` | 是 | 本次安全资产上传/校验标识 |
+| `project_id` | `uuid` | 是 | 所属托管项目 |
+| `owner_id` | `uuid` | 是 | 由管理会话确定的账号 |
+| `release_id` | `uuid` | 是 | 不可变成品版本标识 |
+| `scene_json` | `jsonb` | 是 | 安全 Scene，结构见下方交付格式 |
+| `content_digest` | `bytea` | 是 | 规范化 scene 的摘要，含资产摘要 |
+| `expiry_days` | `smallint` | 是 | 1、7、30 天之一 |
+| `state` | `text` | 是 | `receiving/validating/committed/cancelled/rejected/expired` |
+| `idempotency_key` | `uuid` | 是 | 上传创建的稳定重试键 |
+| `request_digest` | `bytea` | 是 | 创建请求摘要，防同键换请求 |
+| `commit_key` | `uuid` | 否 | commit 独立幂等键 |
+| `commit_request_digest` | `bytea` | 否 | commit 请求摘要 |
+| `reserved_until` | `timestamptz` | 是 | 上传截止与额度预留到期时间 |
+| `created_at` | `timestamptz` | 是 | 创建时间 |
+| `commit_requested_at` | `timestamptz` | 否 | 已接受发布意图的时间 |
+| `committed_at` | `timestamptz` | 否 | 正式发布事务完成时间 |
+| `lease_token` | `uuid` | 否 | worker 当前租约身份 |
+| `lease_until` | `timestamptz` | 否 | worker 租约有效期 |
+| `attempt` | `integer` | 是 | 尝试次数 |
+| `next_attempt_at` | `timestamptz` | 否 | 恢复/重试调度时间 |
+| `error_code` | `text` | 否 | 机器可读失败原因 |
+
+- PK：`upload_id`。复合 FK：`(project_id,owner_id)` → `hosted_projects`。唯一：`(owner_id,idempotency_key)`。
+- 部分唯一索引：`(owner_id,release_id) WHERE state IN ('receiving','validating')`。其他索引：`(project_id,state,reserved_until)`、`(state,next_attempt_at,lease_until)`。
+- 项目行锁下先关闭过期预留再创建；expiry_days 为 1/7/30。校验 worker 的租约、尝试和恢复状态保存在本行。
+
+#### publication_assets：每次上传的安全资产
+
+| 字段 | 类型 | 必填 | 用途 |
+|---|---|---|---|
+| `upload_id` | `uuid` | 是 | 本次安全资产上传/校验标识 |
+| `asset_id` | `uuid` | 是 | 安全派生资产标识 |
+| `relative_path` | `text` | 是 | 受控相对路径，不接受外链 |
+| `role` | `text` | 是 | 安全资产用途 |
+| `mime` | `text` | 是 | 检测并允许的真实媒体类型 |
+| `byte_length` | `bigint` | 是 | 文件实际字节数 |
+| `sha256` | `bytea` | 是 | 实际文件字节摘要 |
+| `width` | `integer` | 是 | 图像/视频内容宽度（像素） |
+| `height` | `integer` | 是 | 图像/视频内容高度（像素） |
+| `duration_ms` | `integer` | 否 | 媒体时长毫秒；静态图为空 |
+| `staging_key` | `text` | 否 | 私有暂存对象 key，不对外暴露 |
+| `final_key` | `text` | 否 | 固定成品对象 key，不对外暴露 |
+| `state` | `text` | 是 | `declared/received/verified` |
+| `received_at` | `timestamptz` | 否 | 实际字节接收完成时间 |
+| `verified_at` | `timestamptz` | 否 | 实际文件重检成功时间 |
+
+- PK：`(upload_id,asset_id)`。FK：upload_id → `publication_uploads`。唯一：`(upload_id,relative_path)`、非空 `final_key`。
+- 声明取自 scene.assets，实际字节须匹配。release 经 upload_id 定位整组资产。commit 后行和对象固定；存储 key 仅供服务端使用。
+
+#### releases：服务端不可变版本
+
+| 字段 | 类型 | 必填 | 用途 |
+|---|---|---|---|
+| `release_id` | `uuid` | 是 | 不可变成品版本标识 |
+| `project_id` | `uuid` | 是 | 所属托管项目 |
+| `owner_id` | `uuid` | 是 | 由管理会话确定的账号 |
+| `upload_id` | `uuid` | 是 | 本次安全资产上传/校验标识 |
+| `version_ordinal` | `integer` | 是 | 同托管项目的服务端显示序号 |
+| `schema_version` | `text` | 是 | 支持的交换格式版本 |
+| `policy_version` | `text` | 是 | 使用的安全/容量政策版本 |
+| `scene_json` | `jsonb` | 是 | 安全 Scene，结构见下方交付格式 |
+| `content_digest` | `bytea` | 是 | 规范化 scene 的摘要，含资产摘要 |
+| `created_at` | `timestamptz` | 是 | 创建时间 |
+
+- PK：`release_id`。FK：upload_id → `publication_uploads`；`(project_id,owner_id)` → `hosted_projects`。唯一：upload_id、`(project_id,version_ordinal)`。
+- 发布成功事务插入，内容列只写一次。同 ID 不同摘要返回冲突。
+
+#### shares：观看链接、到期与撤销
+
+| 字段 | 类型 | 必填 | 用途 |
+|---|---|---|---|
+| `share_id` | `uuid` | 是 | 分享/Publication 标识 |
+| `release_id` | `uuid` | 是 | 不可变成品版本标识 |
+| `token_hash` | `bytea` | 是 | 查找/验证 bearer token 的摘要 |
+| `token_ciphertext` | `bytea` | 是 | 供本人重取链接的加密 token |
+| `token_key_version` | `text` | 是 | 解密所用密钥版本 |
+| `created_at` | `timestamptz` | 是 | 创建时间 |
+| `expires_at` | `timestamptz` | 是 | commit 时间加 expiry_days，创建后不延期 |
+| `revoked_at` | `timestamptz` | 否 | 首次撤销生效时间，不能恢复为空 |
+
+- PK：`share_id`。FK：release_id → `releases`。唯一：release_id、token_hash。索引：expires_at。
+- 一个 release 对应一条分享。状态由 revoked_at 和服务器时间推导为 active / revoked / expired。到期时间在 commit 时固定。加密 token 供本人异机重取链接；解密密钥存于数据库外。
+
+#### share_revocations：持久撤销事实
+
+| 字段 | 类型 | 必填 | 用途 |
+|---|---|---|---|
+| `sequence` | `bigint` | 是 | 追加式撤销记录序号；自增 |
+| `share_id` | `uuid` | 是 | 分享/Publication 标识 |
+| `revoked_at` | `timestamptz` | 是 | 首次撤销生效时间，不能恢复为空 |
+
+- PK：`sequence`。唯一：share_id。shares 撤销事务同时追加本表。
+- 撤销事实独立保留，业务行删除保留该记录。灾备使用独立 WAL / 撤销归档及恢复水位；无法证明水位完整时，旧链接保持禁用。
+
+### 版本化交付格式
+
+`releaseId + contentDigest` 标识固定 scene 及资产。contentDigest 为 SHA-256（[RFC 8785 JCS](https://www.rfc-editor.org/rfc/rfc8785) 规范化 scene 的 UTF-8 字节）。scene 包含全部资产摘要，contentDigest 本身存于外层。图摘要同样按明确字段的规范化结构计算。
+
+| 文件 | 内容与关系 |
+|---|---|
+| `manifest.json` | `{schemaVersion,exportKind:"viewer"\|"ai",releaseId,contentDigest,files:[{path,byteLength,sha256}]}`；files 枚举除 manifest 自身外的全部文件 |
+| `scene.json` | 不可变版本内容；观看包与 AI 包共用。必有全部被引用的安全媒体 |
+| `render-plan.json` | AI 包独立渲染配置；与 scene 的 releaseId、contentDigest 绑定 |
+| AI 包说明文件 | schema 与 README，解释数据结构和消费方式；执行模板单独分发 |
+
+包可另算 packageDigest。只调整有限路径、画布、停留或效果时保留原 release，生成新的 AI 包并复核最终 render-plan / 文件清单。修改图、文案、区域底图或媒体时重新封存 release。
+
+| 对象 | 字段 |
+|---|---|
+| `scene` | `schemaVersion, policyVersion, compilerVersion, releaseId, title, goal, createdAt, startStateId, states[], edges[], hotspots[], regions[], assets[]`；regions 可以空。 |
+| `states[]` | `{id,imageAssetId,width,height,title,description,sourceKind:"recorded"\|"authored"\|"imported",terminal}`。仅含安全展示内容。 |
+| `edges[]` | `{id,fromStateId,to:{stateId}\|{endLabel},hotspotId:null\|id,label,trigger:"tap"\|"choice"\|"continue",transitionAssetId:null\|id,sourceKind}`。仅输出已确认边；动作按枚举触发。 |
+| `hotspots[]` | `{id,stateId,label,coordinateSpace:"state-normalized",rect:{x,y,width,height}}`，0–1 坐标仅相对画面，不含播放器留白。 |
+| `regions[]` | `{id,stateId,baseAssetId,assetId,name,kind:"screenshotCrop",coordinateSpace:"source-pixels",sourceWidth,sourceHeight,bbox:{x,y,width,height},group:null\|string,zIndex,anchor:{coordinateSpace:"layer-normalized",x,y}}`；底图和裁片都必须在 assets 中。 |
+| `assets[]` | `{id,path,role,mime,byteLength,sha256,width,height,durationMs:null\|integer}`。path 只允许包内安全相对路径；图像 PNG/JPEG、视频受限 H.264/SDR MP4，无原音轨、字幕或任意数据轨。 |
+| `render-plan.json` | `{schemaVersion,adapterVersion,compositionId,releaseId,contentDigest,fps:30,canvas:{width,height},visits:[{visitId,stateId,selectedEdgeId:null\|id,holdFrames}],effects:[Effect],timeline:[{visitId,startFrame,durationFrames,transitionFrames,overlapFrames}],totalFrames}`。两个画布预设为 1080×1920、1920×1080；末次访问明确结束，回访有不同 visitId。 |
+| `Effect` | `{type:"click"\|"focus"\|"transition"\|"highlight"\|"annotation",visitId,startFrame,durationFrames,hotspotId:null\|id,regionId:null\|id,text:null\|string,rect:null\|{x,y,width,height}}`。rect 如存在统一为 state-normalized；不同 type 只接受其必需字段，拒绝未知效果、表达式与动态组件。 |
+
+所有时间区间左闭右开。毫秒转输出帧统一 `floor(ms*fps/1000+0.5)`，转换一次，零帧区间拒绝。timeline 从已验证的 visits、视频长度、overlapFrames 推导并比对：切换重叠帧从总长扣除，普通标注保留总长。图可显式回访；动画以有限 visits 明确结束。
+
+导入限额沿用 [素材与容量](../README.md#素材容量与使用范围)：40 状态、80 边、每状态 6 热点、单过渡 10 秒、过渡合计 60 秒、包及解压资产各 50 MiB。解析深度、文件数、AI visits 与动画总长由同一 policyVersion 在实现导入器时定额。
+
+## 业务层
+
+### 编辑与播放
+
+| 规则 | 实现 |
+|---|---|
+| 稳定身份 | 状态、边、热点保留 ID；排序和标题单独编辑。来源保留真实 PTS 或作者编排标记 |
+| 正式图 | 候选由作者确认；纳入图的每个分支都有终点或明确出口。缺素材、未确认对象、断边、未说明的不可达内容阻断交付；被排除内容显式列出 |
+| 动作 | 热点只连接枚举动作；多结果由观看者选择。显式点击可回访，自动循环阻断交付 |
+| 播放历史 | 上一步沿实际访问记录，画面内返回热点沿作者连线。重来清空历史；过渡期间锁定重复操作 |
+| 媒体回调 | 以 mediaRunId 区分每次播放。关闭、重来或切步使旧回调失效；失败可重试或跳到该边已选目标 |
+| 覆盖 | 逐边试走并完成指定关键路径，记录绑定 graphDigest；图变更重新检查相关覆盖 |
+
+### 安全候选、复核与固定版本
+
+| 阶段 | 输入 → 处理 → 产物 |
+|---|---|
+| `BuildCandidate` | 固定 draft_revision → 确认图、逐帧烧录遮挡、重新编码、移除原音频及未允许轨道 → job 工作区候选 |
+| 派生与重检 | 安全媒体 → 生成封面/缩略图/区域裁片、重解码检查 → 固定 `local_assets` |
+| `PreviewDraft` | 当前草稿的安全候选或局部安全快照 → 同一播放状态机试走 → 标明“未复核”的预览及覆盖记录 |
+| `ReviewCandidate` | 实际像素、完整过渡视频、文字、派生物和范围 → 作者逐项确认 → 绑定实际 output_digest 的 reviews |
+| `SealRelease` | 有效复核、全部边与关键路径覆盖、匹配摘要 → 封存事务 → 不可变 local_releases |
+
+预览可在最终复核前进行；缺失目标阻断对应动作。候选绑定固定 revision，草稿后续编辑保留旧候选并显示版本差异。输入指纹相同仍须比较实际输出摘要；重新编码产生不同字节时重新判定复核。相同实际字节、范围和有效依赖可复用复核。
+
+真正脱敏由重新解码、烧录、编码产生；媒体管线须禁用原样本透传、仅改容器索引或编辑列表的捷径。交付使用已复核安全资产，原片回看与遮挡编辑保持本机私有入口。安全封面未就绪显示中性占位。
+
+### 包与信任边界
+
+| 边界 | 校验与处理 |
+|---|---|
+| 私有素材 → 安全成品 | 只输出公开 Scene 字段与安全媒体；原文件名、原路径、原 OCR、编辑历史和源片留在私有域 |
+| 外部包 → 消费方 | 隔离解包；校验版本、受信 schema、引用、真实类型、字节数、摘要、图和坐标；拒绝路径穿越、重复路径、符号链接、嵌套归档、未声明文件、缺文件及异常膨胀 |
+| 数据 → 运行代码 | 包为 JSON 与安全媒体；拒绝 HTML、JS、package.json、脚本、表达式、动态组件、动态依赖、外链媒体和远程 schema 引用。消费方使用自己固定的 schema 和受信模板 |
+| 校验 → 安装 | 全部通过才原子加入演示库；未知不兼容版本明确报错。哈希验证字节一致性，身份与隐私仍需分别判断 |
+| AI 回流 → 草稿 | 兼容白名单字段生成新项目、新 revision；展示文字、连线、路径、区域差异；所有外部复核结论重新由本机复核 |
+| UI / 日志 | 文案按纯文本显示；日志仅记排障所需代码和 traceId，排除画面、OCR、路径、凭据和含 token 的链接 |
+
+### 上传与发布事务
+
+1. 创建 upload 时锁 hosted_projects，计算“未撤销且未到期的 shares + 未到期未完成预留”，同项目最多 5 个。每次上传占一个有截止时间的槽位；服务器时间到期立即失效。
+2. 资产写入 private staging，按声明长度流式限流并计算摘要，校验总容量。失败重传单资产；创建及 commit 各保存独立幂等键与请求摘要。
+3. commit 接受发布意图后，worker 持上传行租约，使用无外网、资源受限的解码进程校验 scene 和全部实际媒体。先将已验证字节写入不可变 private final key，并确认可读。
+4. 短事务锁项目与 upload，重验预留、取消状态、lease_token、全部资产和摘要；分配版本号、插入 release/share、标记 committed。事务提交时链接才可见，到期时间从此刻计算。
+5. 取消与提交争同一上传行锁。取消先完成则停止发布；提交先完成则取消返回已发布回执，由用户另行撤销。临时/孤儿对象在引用释放并超过保留窗后清理。
+6. 同键同请求返回原结果；同键不同摘要冲突。未曾发布的过期 upload 可重新预留并上传相同 release。已发布内容、到期时间和撤销状态固定；再次发布创建新的 release/share。
+
+服务端校验格式、图、摘要、轨道和容量。客户端复核记录只用于本机交付判断，服务端仍独立检查实际文件。
+
+### 访问与撤销
+
+每次 HTML、manifest、封面、缩略图、图片、视频、HEAD、Range 或条件请求都经网关读取强一致数据库，先确认 `revoked_at IS NULL AND now() < expires_at`，再核对资产属于该 release。对象存储保持私有；网关直接响应受保护内容，使用 `Cache-Control: private, no-store`。程序 JS / CSS 可独立缓存。
+
+页面再可见、退出历史缓存及恢复断点时重新验证分享。保护内容仅按需请求，观看端禁用整包预缓存和离线 service worker。数据库或授权服务不可用时失败关闭。
+
+撤销事务同时更新 shares 与持久撤销记录，提交后才返回成功。其后才开始授权检查的新请求均拒绝；之前已获准的传输、已下载包和截图仍可能保留。token 表示持链访问权；观看页阻止 token 经 Referer / 日志外泄，使用本地字体且不加载第三方统计。
+
+### 中断恢复与清理
+
+文件和 DB 分步提交：临时文件完整输出后原子迁移，记录检查点，恢复时对账。进程中断重做未完成单资产；取消仅清本次临时文件。空间不足、过热及后台中断保留已保存内容和可恢复状态。数据库升级保留用户数据并验证迁移、中断恢复；SDK 流量与平台备份行为实测确认。
+
+## 应用接口层
+
+### HTTP API
+
+以下 18 条为待实现接口。capabilities、验证码入口与持链接口无需管理会话。管理请求带 `Authorization: Bearer <sessionToken>`，每次检查会话与 owner；不存在和无权管理均返回 404。请求 / 返回使用 camelCase，数据库使用 snake_case。创建 upload 与 commit 带 `Idempotency-Key`，重试保留原键和请求。
+
+| 方法路径 | 用途 | 请求字段 | 返回字段 |
+|---|---|---|---|
+| `GET /api/v1/capabilities` | 读取兼容版本和限制 | 无 | `schemaVersions,policyVersions,limits,expiryDays:[1,7,30],defaultExpiryDays:7` |
+| `POST /api/v1/auth/challenges` | 发起邮箱验证 | `{email}` | 202 `{challengeId,expiresAt,resendAfterSeconds}`；新旧账号外观一致 |
+| `POST /api/v1/auth/sessions` | 消费验证码并登录 | `{challengeId,code}` | 201 `{sessionToken,expiresAt,account:{accountId,email}}`；首次成功可建账号 |
+| `GET /api/v1/me` | 查询当前账号 | 管理会话 | 200 `{accountId,email,sessionExpiresAt}` |
+| `DELETE /api/v1/auth/sessions/current` | 退出当前会话 | 管理会话 | 204；撤销成功后本机清 token，本地项目保留 |
+| `POST /api/v1/projects` | 建立托管归组 | 管理会话；`{clientProjectId,title}` | 201 新建 / 200 已有 `{serverProjectId,clientProjectId,title}` |
+| `GET /api/v1/projects?cursor=&limit=` | 列出本人托管项目 | 管理会话；`cursor,limit` | 200 `{items:[{serverProjectId,clientProjectId,title,activePublicationCount,latestVersionOrdinal}],nextCursor}` |
+| `POST /api/v1/publication-uploads` | 预留额度并声明安全版本 | 管理会话、幂等键；`{serverProjectId,releaseId,contentDigest,expiryDays,scene:Scene}` | 201 `{uploadId,state:"receiving",reservedUntil,missingAssetIds}`；重试返回原 upload |
+| `PUT /api/v1/publication-uploads/{uploadId}/assets/{assetId}` | 上传一项声明资产 | 管理会话；原始媒体 bytes；`Content-Type,Content-Length,X-Content-SHA256` | 200 `{assetId,state:"received",byteLength,sha256}`；相同内容可重放 |
+| `GET /api/v1/publication-uploads/{uploadId}` | 查询上传、校验及发布结果 | 管理会话；uploadId | 200 `{uploadId,releaseId,state,stage,reservedUntil,assets:[{assetId,state}],missingAssetIds,error:null\|Error,publication:null\|Publication}` |
+| `DELETE /api/v1/publication-uploads/{uploadId}` | 取消未完成上传 | 管理会话；uploadId | 200 `{uploadId,state:"cancelled"}`；重复取消同样成功 |
+| `POST /api/v1/publication-uploads/{uploadId}/commit` | 接受发布意图并校验提交 | 管理会话、幂等键；`{releaseId,contentDigest}` | 202 `{uploadId,state:"validating",statusUrl,retryAfterSeconds}`；完成后 200 / 首次同步完成 201 `Publication` |
+| `GET /api/v1/projects/{serverProjectId}/publications?cursor=&limit=` | 列出有效、到期及撤销版本 | 管理会话；serverProjectId、cursor、limit | 200 `{items:[Publication],nextCursor}` |
+| `GET /api/v1/publications/{publicationId}` | 恢复回执并重新复制链接 | 管理会话；publicationId | 200 `Publication` |
+| `POST /api/v1/publications/{publicationId}/revoke` | 撤销指定版本 | 管理会话；publicationId，无 body | 200 `{publicationId,status:"revoked",revokedAt,serverConfirmedAt}`；重复返回首次 revokedAt |
+| `GET /s/{shareToken}` | 打开持链观看页 | shareToken | 200 播放器页面；展示内容前检查 share / release |
+| `GET /s/{shareToken}/manifest` | 读取固定观看内容 | shareToken | 200 `{releaseId,contentDigest,versionOrdinal,expiresAt,scene:Scene}` |
+| `GET/HEAD /s/{shareToken}/assets/{assetId}` | 读取该版本安全媒体 | shareToken、assetId；可选 Range | 200 / 206 媒体，或 HEAD 元数据 |
+
+`Publication = {publicationId,serverProjectId,releaseId,versionOrdinal,contentDigest,title,createdAt,expiresAt,status:"active"|"revoked"|"expired",shareUrl,revokedAt:null|timestamp}`。publicationId 即 shares.share_id。观看 `/manifest` 返回 Scene；离线包 manifest.json 另有文件清单。
+
+托管项目首建幂等键为 `(owner_id,client_project_id)`：相同 clientProjectId 返回原 serverProjectId 和已存 title。title 只在首次创建使用，本机重命名可继续发布。
+
+#### 发布请求与响应
+
+客户端上传完全部声明资产后提交；服务端接受 commit 即继续校验与发布。以下为结构示例：
+
+```http
+POST /api/v1/publication-uploads/41efba86-9bb0-4ee5-a057-a94494933fa9/commit
+Authorization: Bearer <session-token>
+Idempotency-Key: 948d087f-c975-4e24-87f6-4b73b2343d2e
+Content-Type: application/json
+
+{"releaseId":"33360065-5837-4355-83df-4e595c9cd38d","contentDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+```
+
+```json
+{
+  "uploadId": "41efba86-9bb0-4ee5-a057-a94494933fa9",
+  "state": "validating",
+  "statusUrl": "/api/v1/publication-uploads/41efba86-9bb0-4ee5-a057-a94494933fa9",
+  "retryAfterSeconds": 2
+}
+```
+
+202 后按 statusUrl 查询。发布完成返回同一 Publication；回执丢失可 GET upload 或同键重发 commit。示例 ID 仅作说明。7 天有效期从服务器 commit 事务提交时起算。
+
+#### 失败约定
+
+统一响应：`{error:{code,message,subjectId:null|string,pointer:null|string,retryable,traceId}}`。
+
+| 场景 | 错误码与处理 |
+|---|---|
+| 验证码与会话 | `INVALID_EMAIL`、`INVALID_CODE`、`CHALLENGE_EXPIRED`、`CHALLENGE_LOCKED`、`RATE_LIMITED`、`UNAUTHENTICATED` |
+| 项目与分页 | `VALIDATION_FAILED`、`INVALID_CURSOR`；资源不存在或属于其他 owner 返回 404 |
+| 创建上传 | `QUOTA_EXCEEDED`、`RELEASE_CONFLICT`、`SCHEMA_UNSUPPORTED`、`ASSET_MISMATCH` |
+| 上传资产 | `ASSET_NOT_DECLARED`、`ASSET_MISMATCH`、`UPLOAD_CLOSED` |
+| commit | `UPLOAD_INCOMPLETE`、`UPLOAD_EXPIRED`、`ASSET_MISMATCH`、`VALIDATION_FAILED`、`IDEMPOTENCY_CONFLICT` |
+| 取消与撤销 | 已提交的取消返回 `ALREADY_COMMITTED` 及本人的发布回执；撤销遇 `SERVICE_UNAVAILABLE` 保持尚未撤销 |
+| 观看 | `SHARE_EXPIRED`、`SHARE_REVOKED`、`NOT_FOUND`；媒体另有 `ASSET_NOT_FOUND`、`RANGE_NOT_SATISFIABLE`；缺失成品失败关闭 |
+| 本地交付 | `REVIEW_STALE` 定位过期复核，重新生成或复核后继续 |
+
+HTTP 映射：400 输入错误；401 会话失效；404 不存在或无权；409 幂等、上传完整性、状态或额度冲突；410 分享到期 / 撤销或上传到期；413 超大小；416 Range 无法满足；422 schema / 图 / 媒体校验失败；429 限速并给 Retry-After；503 依赖不可用。
+
+### SDK 与库接入
+
+| 名称 | 用途 | 调用位置 |
+|---|---|---|
+| Kotlin、Compose、Navigation、ViewModel、Coroutines / Flow | 原生 UI、导航、并发和状态观察 | `android/` 页面及本地用例 |
+| [Room](https://developer.android.com/training/data-storage/room/defining-data)、kotlinx.serialization | Entity / DAO / 事务 / 迁移；DTO 编解码，后续独立做语义校验 | `android/` 数据访问与包读取 |
+| MediaExtractor / MediaCodec、Bitmap / Canvas、[Media3 ExoPlayer / Transformer](https://developer.android.com/media/media3/transformer/transformations) | 真 PTS 解码、图片重编码、视频烧录遮挡与去音轨、播放 | Android 媒体管线；Transformer 须禁用 transmux 和裁剪原样本保留优化，无法保证时使用显式 codec 管线 |
+| [ML Kit Text Recognition bundled Latin / 中文模型](https://developers.google.com/ml-kit/vision/text-recognition/v2/android)（候选） | 首次使用即可端侧 OCR；[官方隐私说明](https://developers.google.com/ml-kit/terms)包含性能 / 使用指标发送 | 本机素材分析；只有能受支持地禁用非必要外传并实测通过才接入，否则采用可控端侧 OCR |
+| [WorkManager](https://developer.android.com/develop/background-work/background-tasks/persistent/how-to/long-running) | 按系统约束调度恢复任务；恢复事实来自 local_jobs | Android 任务调度；force-stop 后由应用恢复流程重新检查 |
+| OkHttp（拟用）、浏览器 fetch | 管理 API 上传与观看请求 | Android 托管用例；`web-player/` |
+| Node.js / Fastify、PostgreSQL、Ajv | HTTP 路由、事务和受信 schema 校验 | `server/` API 与校验 worker |
+| React / Vite、原生图片 / video | 网页渲染及安全媒体播放 | `web-player/` |
+| [Remotion Composition / calculateMetadata](https://www.remotion.dev/docs/calculate-metadata)、[staticFile](https://www.remotion.dev/docs/staticfile)、[renderMedia](https://www.remotion.dev/docs/renderer/render-media) | 固定 Composition、本地资产和确定性视频渲染 | 独立 `remotion-adapter/`，与数据包、Android 安装包分别分发 |
+
+以上是拟接入组合。精确版本、设备 / 浏览器范围、编码配置及 Remotion 许可在实现时核对。
+
+### 自研消费接口
+
+这些接口是待实现设计，当前尚无已发布 npm / Maven SDK。
+
+| 名称 | 用途 | 调用位置 |
+|---|---|---|
+| `loadPackage` | 隔离读取包与受控资产句柄 | Android 导入；独立 Remotion 适配器 |
+| `validatePackage` | 验证格式、资产、图及渲染配置 | 导入器；渲染前校验 |
+| `buildRenderPlan` | 将有限路径和效果解析为确定时间轴 | Android AI 包导出；Remotion 渲染准备 |
+| `render` | 使用受信模板输出并核验视频 | 电脑或所选云环境的 Remotion 适配器 |
+| `importAsDraft` | 将兼容安全包转为独立可编辑草稿 | Android 外部包导入页 |
+
+| 方法 | 参数 | 返回 | 实现规则 |
+|---|---|---|---|
+| `loadPackage(input, limits)` | 本机文件 / 受控文件流；容量限制 | `LoadedPackage{manifest,scene,assets,renderPlan?}`；失败为路径 / 容量 / 清单问题 | 在隔离区读取；assets 返回受控句柄 |
+| `validatePackage(loaded, supportedVersions)` | 已读取包；消费方固定版本与策略 | `ValidatedScene` 或 `issues[{code,subjectId,pointer,message}]` | 使用消费方内置受信 schema，校验引用、资产、坐标、有限 visits、效果白名单 |
+| `buildRenderPlan(validatedScene, config)` | 固定 scene；visits、画布、节奏、效果 | `RenderPlan{timeline,totalFrames,...}` 或路径 / 时长问题 | 固定 30 fps、adapterVersion 和 Composition ID；严格使用所选路径与可见资产 |
+| `render(validatedScene, resolvedPlan, outputPath)` | 已验证 scene、计划、受控输出路径 | `RenderResult{outputPath,byteLength,sha256,fps,width,height,totalFrames}`；缺媒体 / 字体 / 渲染失败 | 核实资产并复制到适配器 public 目录；staticFile 读取，calculateMetadata 使用固定计划，renderMedia 完成后重检输出 |
+| `importAsDraft(validatedPackage)` | 兼容 scene / renderPlan 与安全资源 | `{newProjectId,sourceReleaseId,diff:{texts,edges,path,regions},issues}` | 新项目、新 revision；来源 ID 用于比对；重新复核 |
+
+首份适配器契约拟固定 Composition ID 为 `TapSceneDemo`。两种画布只改变布局；选定路径保持一致。AI 包先在本地导出，外部 AI 或云渲染由作者另行选择。
+
+### App 本地调用
+
+本地用例连接页面与业务。编辑上下文 `ctx = {projectId,expectedRevision}`；编辑事务先比对修订，再更新对象、revision 和受影响复核。异步任务返回 jobId，以 ObserveJob 读取真实阶段。
+
+| 名称与参数 | 返回 | 调用位置 |
+|---|---|---|
+| `ListProjects()`；`CreateProject(title,goal,sources)`；`CopyProject(projectId)`；`DeleteProject(ctx)` | 项目列表；projectId / revision；删除结果及影响 | 项目首页；新建仅在文件确认后登记 |
+| `InspectSource(file)`；`ImportSource(ctx,file,trim)`；`TrimSource(ctx,sourceId,range)`；`AnalyzeSources(projectId,sourceIds)` | 媒体属性 / issues；sourceId / revision；分析 jobId | 导入与裁剪 |
+| `ConfirmCandidates(ctx,candidateIds,decisions)`；`CompareStates(projectId,stateIds)`；`MergeStates(ctx,stateIds,resolution)` | revision、对象 / 差异、受影响引用与 issues | 候选确认、步骤编辑 |
+| `UpdateState/UpdateHotspot/UpdateEdge/UpdateRedaction/UpdateRegion(ctx,id,patch)`；`ReplaceSource(ctx,sourceId,file)`；`UndoEdit(ctx)` | revision、affectedSubjectIds、失效复核及 issues | 步骤、单步与过渡编辑 |
+| `PreviewDraft(projectId,startStateId?)`；`ValidateDraft(projectId)` | 安全预览快照及 revision；`issues[{code,subjectId,pointer,message}]`、图覆盖 | 创作预览、检查清单 |
+| `BuildCandidate(projectId,revision)`；`ReviewCandidate(jobId,subjectId,outputDigest,decision)`；`SealRelease(jobId)` | jobId / 候选 revision；reviewId / issues；releaseId / contentDigest | 检查清单、成品复核 |
+| `ExportOfflinePackage(releaseId)`；`ExportAiPackage(releaseId,renderConfig)` | jobId，完成后受控文件、摘要与 byteLength | 交付、AI 配置；AI 配置保存在导出 job |
+| `ImportPackageAsLibrary(file)`；`ImportPackageAsDraft(file)` | jobId，完成后 releaseId 或 newProjectId、diff、issues | 包导入、演示库 |
+| `ListHostedProjects(cursor?)`；`ListPublications(serverProjectId,cursor?)` | 本人项目 / 版本、nextCursor | 托管版本管理 |
+| `StartPublication(releaseId,serverProjectId,expiryDays)`；`GetPublicationUpload(uploadId)`；`ResumePublication(jobId)`；`CancelPublication(uploadId)` | jobId / uploadId、真实状态、Publication 或 issues | 交付、任务详情 |
+| `RevokePublication(publicationId)` | revokedAt、serverConfirmedAt | 托管版本管理；离线显示待提交，确认后才显示成功 |
+| `ListLibrary()`；`DeleteLibraryItem(releaseId)`；`GetStorageUsage()`；`CleanTemporaryFiles(selection)` | 版本列表、删除结果、分类字节占用 / 清理结果 | 演示库、设置；只清选定库项或无引用临时文件 |
+| `BuildRenderPlan(releaseId,config)` | 已校验 RenderPlan 或 issues | AI 配置；对应 buildRenderPlan 契约 |
+| `ObserveJob(jobId)`；`RetryJob(jobId)`；`CancelJob(jobId)` | 任务阶段、实际完成量、错误 / 重试结果 | 任务详情及页面进度 |
+| `PlayRelease(scene,assets,checkpoint?)` | 当前 state、可选动作、phase、访问历史 | Android 离线、草稿安全预览、Web 观看；过渡事件携带 mediaRunId |
+
+## 交互层
+
+| 入口 | 页面职责 | 页面设计 |
+|---|---|---|
+| Android App | 项目、素材、候选、步骤 / 过渡编辑、预览、复核、交付、账号、导入、演示库与设置 | [README：页面与流转](../README.md#页面与流转) |
+| Web `/s/{shareToken}` | 开场、状态播放、分支选择、过渡、完成及访问错误 | [README：页面与流转](../README.md#页面与流转)中的正式播放器 |
+
+页面按业务返回结果展示已保存、已复核和已发布；安全预览与正式播放器共用播放规则。
