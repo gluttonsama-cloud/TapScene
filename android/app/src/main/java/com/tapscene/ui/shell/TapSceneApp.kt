@@ -116,7 +116,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
             } else if (queuedCandidate?.usedStepId != null) { reviewIndex++; preparedCandidate = null }
             else if (queuedCandidate != null && preparedCandidate != queuedCandidate.id) {
                 preparedCandidate = queuedCandidate.id
-                media.prepareCandidateImage(queuedCandidate.sourceId, queuedCandidate.actualTimeUs)
+                media.prepareCandidateImage(queuedCandidate.sourceId, queuedCandidate.actualTimeUs, queuedCandidate.id)
             }
         }
     }
@@ -257,15 +257,19 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 val targetProject = projectId
                                 if (item != null && scopeReady && targetProject != null) Column(Modifier.fillMaxSize()) {
                                     if (!mediaState.busy && mediaState.candidate == null && preparedCandidate == item.id) {
-                                        TextButton(onClick = { media.prepareCandidateImage(item.sourceId, item.actualTimeUs) }) { Text("重试准备画面") }
+                                        TextButton(onClick = { media.prepareCandidateImage(item.sourceId, item.actualTimeUs, item.id) }) { Text("重试准备画面") }
                                     }
                                     Box(Modifier.weight(1f)) {
-                                        MediaScreen(media, onBack = { reviewQueue = arrayListOf(); preparedCandidate = null; pop(); candidates.refresh() },
+                                        MediaScreen(media, onBack = { media.invalidateCandidate(); reviewQueue = arrayListOf(); preparedCandidate = null; pop(); candidates.refresh() },
                                             headerTitle = "校正 ${reviewIndex + 1}/${reviewQueue.size}",
                                             confirmLabel = if (reviewIndex == reviewQueue.lastIndex) "确认画面并完成" else "确认画面并下一张",
-                                            batchReview = true, onSkip = { media.invalidateCandidate(); reviewIndex++; preparedCandidate = null },
+                                            batchReview = true, reviewItemId = item.id, onSkip = { media.invalidateCandidate(); reviewIndex++; preparedCandidate = null },
                                             onReviewedImage = { input ->
-                                                check(input.source.sourceId == item.sourceId) { "候选来源已变化，请返回重新选择。" }
+                                                check(reviewQueue.getOrNull(reviewIndex) == item.id && preparedCandidate == item.id &&
+                                                    media.state.value.frameReviewId == item.id && input.source.sourceId == item.sourceId &&
+                                                    input.frameTimeUs == media.state.value.frame?.presentationTimeUs) {
+                                                    "候选画面已变化，请返回重新选择。"
+                                                }
                                                 val stepId = projects.saveReviewedStep(targetProject, input.copy(captureId = "candidate-${item.id}"), openEditor = false)
                                                 candidates.markUsed(item.id, stepId)
                                                 reviewIndex++; preparedCandidate = null

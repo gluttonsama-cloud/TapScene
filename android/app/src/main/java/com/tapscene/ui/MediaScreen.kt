@@ -91,6 +91,7 @@ fun MediaScreen(
     headerTitle: String = "手动校正",
     confirmLabel: String = "确认画面并加入步骤",
     batchReview: Boolean = false,
+    reviewItemId: String? = null,
     onSkip: (() -> Unit)? = null,
     onReviewedImage: (suspend (ReviewedStepInput) -> Unit)? = null,
 ) {
@@ -236,7 +237,7 @@ fun MediaScreen(
                             modifier = Modifier.semantics { contentDescription = "录屏取帧时间" })
                         OutlinedButton(onClick = {
                             val time = (requestedSeconds * 1_000_000).toLong()
-                            if (batchReview) workspace.prepareCandidateImage(selected.source.sourceId, time) else workspace.takeFrame(time)
+                            if (batchReview) workspace.prepareCandidateImage(selected.source.sourceId, time, requireNotNull(reviewItemId)) else workspace.takeFrame(time)
                         },
                             enabled = canEdit, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("手动取这一帧") }
                         if (state.frame != null && !batchReview) {
@@ -315,7 +316,7 @@ fun MediaScreen(
                                         workspace.review(true)
                                         workspace.saveReviewedImage(onReviewedImage)
                                     }
-                                }, enabled = canEdit && state.candidateImage != null,
+                                }, enabled = canEdit && state.candidateImage != null && (!batchReview || state.frameReviewId == reviewItemId),
                                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(confirmLabel) }
                                 HorizontalDivider()
                             }

@@ -39,6 +39,8 @@ data class WorkspaceUiState(
     val drafts: List<SourceDraft> = emptyList(),
     val selectedId: String? = null,
     val frame: DecodedFrame? = null,
+    /** Queue item whose actual decoded frame is currently editable; never inferred from source ID. */
+    val frameReviewId: String? = null,
     val candidate: SafeMediaWriter.CandidateMedia? = null,
     val candidateImage: Bitmap? = null,
     val watchedDigest: String? = null,
@@ -121,7 +123,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
             store.read()
         }
         mutableState.update { it.copy(drafts = drafts, selectedId = drafts.lastOrNull()?.source?.sourceId,
-            frame = null, loadFailed = false) }
+            frame = null, frameReviewId = null, loadFailed = false) }
     }
 
     fun importVideo(uri: Uri) {
@@ -137,7 +139,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
             }
             val drafts = withContext(Dispatchers.IO) { store.read() }
             mutableState.update {
-                it.copy(drafts = drafts, selectedId = source.sourceId, frame = null,
+                it.copy(drafts = drafts, selectedId = source.sourceId, frame = null, frameReviewId = null,
                     candidate = null, candidateImage = null, reviewedDigest = null, watchedDigest = null)
             }
             message("录屏已保存到本机")
@@ -148,7 +150,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
         if (!requireSavedEdits()) return
         if (state.value.busy || savePickerPending || state.value.selectedId == id) return
         invalidateCandidate()
-        mutableState.update { it.copy(selectedId = id, frame = null, candidate = null,
+        mutableState.update { it.copy(selectedId = id, frame = null, frameReviewId = null, candidate = null,
             candidateImage = null, watchedDigest = null, reviewedDigest = null, message = null) }
     }
 
@@ -161,26 +163,30 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
             val drafts = withContext(Dispatchers.IO) {
                 store.updateSource(selected.source.sourceId) { it.copy(frameTimeUs = decoded.presentationTimeUs) }
             }
-            mutableState.update { it.copy(drafts = drafts, frame = decoded, candidate = null,
+            mutableState.update { it.copy(drafts = drafts, frame = decoded, frameReviewId = null, candidate = null,
                 candidateImage = null, reviewedDigest = null, watchedDigest = null) }
         }
     }
 
     /** Prepare one queue item through the same actual-frame/privacy pipeline as manual editing. */
-    fun prepareCandidateImage(sourceId: String, timeUs: Long) {
-        if (!requireSavedEdits() || state.value.loadFailed) return
+    fun prepareCandidateImage(sourceId: String, timeUs: Long, reviewId: String) {
+        if (state.value.busy || savePickerPending || !requireSavedEdits() || state.value.loadFailed) return
+        // Close the previous output and its frame BEFORE the first suspension. Cancellation
+        // or a failed metadata read must never leave item A approvable as queue item B.
+        invalidateCandidate()
+        mutableState.update { it.copy(frame = null, frameReviewId = null) }
         execute("准备候选图片") {
             val current = withContext(Dispatchers.IO) { store.read() }
             val selected = current.firstOrNull { it.source.sourceId == sourceId }
                 ?: error("素材已移除，请重新读取")
             invalidateCandidate()
-            mutableState.update { it.copy(drafts = current, selectedId = sourceId, frame = null) }
+            mutableState.update { it.copy(drafts = current, selectedId = sourceId, frame = null, frameReviewId = null) }
             val decoded = decoder.decode(selected.source, timeUs)
             val drafts = withContext(Dispatchers.IO) {
                 store.updateSource(sourceId) { it.copy(frameTimeUs = decoded.presentationTimeUs) }
             }
             val saved = drafts.first { it.source.sourceId == sourceId }
-            mutableState.update { it.copy(drafts = drafts, frame = decoded, candidate = null,
+            mutableState.update { it.copy(drafts = drafts, frame = decoded, frameReviewId = reviewId, candidate = null,
                 candidateImage = null, reviewedDigest = null, watchedDigest = null) }
             val candidate = writer.writePng(decoded.bitmap, saved.masks, outputDirectory(), ::onStage)
             val image = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(candidate.file.path) }
@@ -376,7 +382,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
                 return@execute
             }
             invalidateCandidate()
-            mutableState.update { it.copy(frame = null) }
+            mutableState.update { it.copy(frame = null, frameReviewId = null) }
             val drafts = withContext(Dispatchers.IO) {
                 store.update { current ->
                     val latest = current.firstOrNull { it.source.sourceId == selected.source.sourceId }
@@ -391,7 +397,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
                 }
             }
             mutableState.update { it.copy(drafts = drafts, selectedId = drafts.lastOrNull()?.source?.sourceId,
-                frame = null, candidate = null, candidateImage = null, reviewedDigest = null, watchedDigest = null) }
+                frame = null, frameReviewId = null, candidate = null, candidateImage = null, reviewedDigest = null, watchedDigest = null) }
         }
     }
 
@@ -438,7 +444,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
                                 // A write may commit just before cancellation. Never pair newly loaded
                                 // edits or a different source with an old frame or old privacy review.
                                 if (old.selected != selected) old.copy(drafts = drafts, selectedId = selectedId,
-                                    frame = null, candidate = null, candidateImage = null,
+                                    frame = null, frameReviewId = null, candidate = null, candidateImage = null,
                                     watchedDigest = null, reviewedDigest = null)
                                 else old.copy(drafts = drafts, selectedId = selectedId)
                             }

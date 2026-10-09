@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
@@ -32,6 +33,7 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -53,12 +55,13 @@ fun RecordingCaptureRoute(
     var waitingProject by rememberSaveable { mutableStateOf(false) }
     var pendingProject by rememberSaveable { mutableStateOf<String?>(null) }
     var checkingBudget by remember { mutableStateOf(false) }
+    var budgetJob by remember { mutableStateOf<Job?>(null) }
     var localMessage by rememberSaveable { mutableStateOf<String?>(null) }
     var organizeAfterStop by rememberSaveable { mutableStateOf(false) }
     val consent = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val id = pendingProject
         pendingProject = null
-        if (result.resultCode == Activity.RESULT_OK && result.data != null && id != null) {
+        if (result.resultCode == Activity.RESULT_OK && result.data != null && id != null && projects.state.value.project?.project?.id == id) {
             localMessage = null
             RecordingCoordinator.start(app, id, result.resultCode, requireNotNull(result.data))
         } else localMessage = "已取消录制授权。"
@@ -79,10 +82,12 @@ fun RecordingCaptureRoute(
     val requestConsent: (String) -> Unit = { id ->
         if (!recording.isBusy && !recording.canRetry && !checkingBudget && pendingProject == null) {
             checkingBudget = true
-            scope.launch {
+            budgetJob = scope.launch {
                 try {
                     val budget = withContext(Dispatchers.IO) { SourceRepository(app).budget(id) }
-                    if (budget.sourceCount >= 3 || budget.remainingBytes <= 0 || budget.remainingDurationUs <= 0) {
+                    if (projects.state.value.project?.project?.id != id) {
+                        localMessage = "项目已切换，请重新开始录制授权。"
+                    } else if (budget.sourceCount >= 3 || budget.remainingBytes <= 0 || budget.remainingDurationUs <= 0) {
                         localMessage = "此项目的素材已满，请管理素材或录到新项目。"
                     } else {
                         pendingProject = id
@@ -122,13 +127,21 @@ fun RecordingCaptureRoute(
         }
         if (recording.phase == RecordingPhase.Failed || recording.phase == RecordingPhase.Interrupted) organizeAfterStop = false
     }
+    val leave: () -> Unit = {
+        budgetJob?.cancel()
+        pendingProject = null
+        waitingProject = false
+        organizeAfterStop = false
+        onBack()
+    }
+    BackHandler(onBack = leave)
     RecordingCaptureContent(
         projectState = projectState,
         recording = recording,
         localMessage = localMessage,
         preparingConsent = checkingBudget || pendingProject != null || waitingProject,
         callbacks = RecordingCaptureCallbacks(
-            onBack = onBack,
+            onBack = leave,
             onNewProject = projects::back,
             onStart = { if (preferences.getBoolean("notice-v1", false)) start() else showNotice = true },
             onStopAndOrganize = { organizeAfterStop = true; RecordingCoordinator.stop(app) },
@@ -178,7 +191,7 @@ fun RecordingCaptureContent(
                     Text(projectState.project?.project?.title ?: "新项目", style = MaterialTheme.typography.titleMedium)
                     Text("原片只保存在本机", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                 }
-                if (!recording.isBusy && projectState.route == ProjectRoute.STEPS) TextButton(onClick = callbacks.onNewProject, enabled = !projectState.busy) { Text("录到新项目") }
+                if (!recording.isBusy && projectState.route == ProjectRoute.STEPS) TextButton(onClick = callbacks.onNewProject, enabled = !projectState.busy && !preparingConsent && !recording.canRetry) { Text("录到新项目") }
             }
             ShellDivider()
             Text(when (recording.phase) {

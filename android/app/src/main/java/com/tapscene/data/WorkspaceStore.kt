@@ -198,7 +198,7 @@ class WorkspaceStore(context: Context, projectId: String? = null) {
 
     private fun confirmDirectoryDurability() {
         try {
-            val descriptor = Os.open(root.absolutePath, OsConstants.O_RDONLY or OsConstants.O_DIRECTORY, 0)
+            val descriptor = Os.open(root.absolutePath, OsConstants.O_RDONLY, 0)
             try { Os.fsync(descriptor) } finally { Os.close(descriptor) }
         } catch (cause: Exception) {
             throw WorkspaceDurabilityException(cause)

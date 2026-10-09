@@ -49,7 +49,7 @@ class SourceImporter(context: Context) {
                 val ownerContext = currentCoroutineContext()
                 val copied = runInterruptible { copy(uri, file, ownerContext) }
                 // Sync the private copy's directory entry before metadata can claim ownership.
-                val descriptor = Os.open(directory.absolutePath, OsConstants.O_RDONLY or OsConstants.O_DIRECTORY, 0)
+                val descriptor = Os.open(directory.absolutePath, OsConstants.O_RDONLY, 0)
                 try { Os.fsync(descriptor) } finally { Os.close(descriptor) }
                 ownerContext.ensureActive()
                 val metadata = runInterruptible { inspect(file, copied.first, copied.second) }
