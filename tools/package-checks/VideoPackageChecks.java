@@ -182,7 +182,7 @@ public final class VideoPackageChecks {
         }
         ViewerScene max = new ViewerScene(2, ViewerPackageCodec.VIDEO_POLICY_VERSION, ViewerPackageCodec.COMPILER_VERSION,
                 RELEASE, "Maximum synthetic package", "No personal data", 1, states.get(0).id, states, edges, hotspots, items);
-        ViewerPackageCodec.validateScene(max); require(ViewerPackageCodec.MAX_FILES == 122, "ZIP file cap differs");
+        ViewerPackageCodec.validateScene(max); require(ViewerPackageCodec.MAX_FILES >= 122, "ZIP file cap differs");
         // All 80 files have identical verified bytes and media declarations. Cache ONLY
         // after a real full decode, and independently hash each file before cache reuse.
         Set<String> decoded = new HashSet<>();

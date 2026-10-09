@@ -29,10 +29,11 @@ import java.util.regex.Pattern;
 /** Fail-closed, offline-only versioned viewer package. This is not a general-purpose ZIP/JSON loader. */
 public final class ViewerPackageCodec {
     public static final long MAX_PACKAGE_BYTES = 50L * 1024 * 1024;
-    public static final int MAX_SCENE_BYTES = 512 * 1024, MAX_MANIFEST_BYTES = 64 * 1024, MAX_FILES = 122;
-    public static final int MAX_ASSETS = 120;
+    public static final int MAX_SCENE_BYTES = 512 * 1024, MAX_MANIFEST_BYTES = 64 * 1024, MAX_FILES = 202;
+    public static final int MAX_ASSETS = 200, MAX_REGIONS = 80;
     public static final long MAX_TRANSITION_MS = 10_000, MAX_TOTAL_TRANSITION_MS = 60_000;
     public static final String POLICY_VERSION = "static-viewer-1", COMPILER_VERSION = "tapscene-android-1";
+    public static final String REGION_POLICY_VERSION = "scene-regions-3";
     public static final String VIDEO_POLICY_VERSION = "video-viewer-2";
     private static final Pattern UUID = Pattern.compile("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
     private static final Pattern HASH = Pattern.compile("[0-9a-f]{64}");
@@ -83,7 +84,20 @@ public final class ViewerPackageCodec {
         int schemaVersion = smallInt(root.get("schemaVersion"));
         String policyVersion = string(root.get("policyVersion")), compilerVersion = string(root.get("compilerVersion"));
         version(schemaVersion, policyVersion, compilerVersion);
-        require(array(root.get("regions")).isEmpty(), "Regions are not supported by this viewer profile");
+        List<ViewerScene.Region> regions = new ArrayList<>();
+        for (Object raw : array(root.get("regions"))) {
+            Map<String, Object> r = object(raw, "id", "stateId", "baseAssetId", "assetId", "name", "kind",
+                    "coordinateSpace", "sourceWidth", "sourceHeight", "bbox", "group", "zIndex", "anchor");
+            require("screenshotCrop".equals(string(r.get("kind"))) && "source-pixels".equals(string(r.get("coordinateSpace"))),
+                    "Unsupported region kind or coordinate space");
+            Map<String, Object> b = object(r.get("bbox"), "x", "y", "width", "height");
+            Map<String, Object> a = object(r.get("anchor"), "coordinateSpace", "x", "y");
+            require("layer-normalized".equals(string(a.get("coordinateSpace"))), "Unsupported anchor coordinates");
+            regions.add(new ViewerScene.Region(string(r.get("id")), string(r.get("stateId")), string(r.get("baseAssetId")),
+                    string(r.get("assetId")), string(r.get("name")), smallInt(r.get("sourceWidth")), smallInt(r.get("sourceHeight")),
+                    new ViewerScene.PixelRect(smallInt(b.get("x")), smallInt(b.get("y")), smallInt(b.get("width")), smallInt(b.get("height"))),
+                    nullableString(r.get("group")), signedInt(r.get("zIndex")), new ViewerScene.Anchor(decimal(a.get("x")), decimal(a.get("y")))));
+        }
         List<ViewerScene.State> states = new ArrayList<>();
         for (Object raw : array(root.get("states"))) {
             Map<String, Object> s = object(raw, "id", "imageAssetId", "width", "height", "title", "description", "sourceKind", "terminal");
@@ -120,7 +134,7 @@ public final class ViewerPackageCodec {
         }
         ViewerScene scene = new ViewerScene(schemaVersion, policyVersion, compilerVersion,
                 string(root.get("releaseId")), string(root.get("title")),
-                string(root.get("goal")), integer(root.get("createdAt")), string(root.get("startStateId")), states, edges, hotspots, assets);
+                string(root.get("goal")), integer(root.get("createdAt")), string(root.get("startStateId")), states, edges, hotspots, regions, assets);
         validateScene(scene); return scene;
     }
     public static String contentDigest(ViewerScene scene) { return digest(writeScene(scene)); }
@@ -141,18 +155,19 @@ public final class ViewerPackageCodec {
         require(scene != null, "Missing scene"); version(scene.schemaVersion, scene.policyVersion, scene.compilerVersion); id(scene.releaseId); text(scene.title, 240, true); text(scene.goal, 8192, false);
         require(scene.createdAt >= 0 && scene.createdAt <= StrictJson.MAX_SAFE_INTEGER, "Invalid creation time"); id(scene.startStateId);
         require(!scene.states.isEmpty() && scene.states.size() <= 40 && scene.edges.size() <= 80
-                && scene.hotspots.size() <= 240 && !scene.assets.isEmpty() && scene.assets.size() <= (scene.schemaVersion == 1 ? 40 : MAX_ASSETS), "Scene exceeds object budget");
+                && scene.hotspots.size() <= 240 && scene.regions.size() <= MAX_REGIONS && !scene.assets.isEmpty() && scene.assets.size() <= (scene.schemaVersion == 1 ? 40 : MAX_ASSETS), "Scene exceeds object budget");
+        require(scene.schemaVersion == 3 || scene.regions.isEmpty(), "Regions require scene schema 3");
         Set<String> allIds = new HashSet<>();
         Map<String, ViewerScene.State> states = new HashMap<>(); Map<String, ViewerScene.Asset> assets = new HashMap<>();
         Map<String, ViewerScene.Hotspot> hotspots = new HashMap<>();
         long total = 0;
         for (ViewerScene.Asset a : scene.assets) {
             require(a != null, "Missing asset"); unique(allIds, a.id); safePath(a.path);
-            if (ViewerScene.Asset.ROLE_IMAGE.equals(a.role)) {
+            if (ViewerScene.Asset.ROLE_IMAGE.equals(a.role) || scene.schemaVersion == 3 && ViewerScene.Asset.ROLE_REGION_CROP.equals(a.role)) {
                 require(a.path.equals("assets/" + a.id + ".png") && "image/png".equals(a.mime)
                         && a.durationMs == null, "Invalid package-local PNG asset");
             } else {
-                require(scene.schemaVersion == 2 && ViewerScene.Asset.ROLE_TRANSITION.equals(a.role)
+                require(scene.schemaVersion >= 2 && ViewerScene.Asset.ROLE_TRANSITION.equals(a.role)
                         && a.path.equals("assets/" + a.id + ".mp4") && "video/mp4".equals(a.mime)
                         && a.durationMs != null && a.durationMs > 0 && a.durationMs <= MAX_TRANSITION_MS,
                         "Unsupported transition asset or duration");
@@ -204,12 +219,35 @@ public final class ViewerPackageCodec {
             }
             if (e.transitionAssetId != null) {
                 ViewerScene.Asset transition = assets.get(e.transitionAssetId);
-                require(scene.schemaVersion == 2 && transition != null
+                require(scene.schemaVersion >= 2 && transition != null
                         && ViewerScene.Asset.ROLE_TRANSITION.equals(transition.role), "Missing transition video or invalid role");
                 usedAssets.add(transition.id); boundTransitionMs += transition.durationMs;
                 require(boundTransitionMs <= MAX_TOTAL_TRANSITION_MS, "Bound transitions exceed 60 seconds");
             }
             hasExit.add(e.fromStateId);
+        }
+        Set<String> cropAssets = new HashSet<>();
+        Map<String, Integer> regionCounts = new HashMap<>();
+        for (ViewerScene.Region r : scene.regions) {
+            require(r != null, "Missing region");
+            int regionCount = regionCounts.getOrDefault(r.stateId, 0) + 1;
+            require(regionCount <= 12, "More than twelve regions in one state"); regionCounts.put(r.stateId, regionCount);
+            unique(allIds, r.id); text(r.name, 240, true);
+            if (r.group != null) text(r.group, 120, true);
+            ViewerScene.State state = states.get(r.stateId);
+            ViewerScene.Asset base = assets.get(r.baseAssetId), crop = assets.get(r.assetId);
+            require(state != null && state.imageAssetId.equals(r.baseAssetId) && base != null
+                    && ViewerScene.Asset.ROLE_IMAGE.equals(base.role), "Region base must be its state image");
+            require(r.sourceWidth == base.width && r.sourceHeight == base.height, "Region source dimensions mismatch");
+            require(r.bbox != null && r.bbox.x >= 0 && r.bbox.y >= 0 && r.bbox.width > 0 && r.bbox.height > 0
+                    && (long)r.bbox.x + r.bbox.width <= base.width && (long)r.bbox.y + r.bbox.height <= base.height,
+                    "Region bounds are empty or outside its base");
+            require(crop != null && ViewerScene.Asset.ROLE_REGION_CROP.equals(crop.role)
+                    && crop.width == r.bbox.width && crop.height == r.bbox.height && cropAssets.add(crop.id),
+                    "Region crop missing, reused or wrong size");
+            require(r.anchor != null, "Missing region anchor"); coord(r.anchor.x); coord(r.anchor.y);
+            require(r.zIndex >= -10000 && r.zIndex <= 10000, "Region layer exceeds limit");
+            usedAssets.add(crop.id);
         }
         require(usedAssets.size() == assets.size(), "Unreferenced asset");
         require(usedHotspots.size() == hotspots.size(), "Hotspot has no action");
@@ -230,13 +268,14 @@ public final class ViewerPackageCodec {
             check(cancel); expected.add(asset.path); File file = resolve(root, asset.path);
             require(Files.isRegularFile(file.toPath(), LinkOption.NOFOLLOW_LINKS) && file.length() == asset.byteLength, "Missing or wrong-sized asset");
             require(hash(file, cancel).equals(asset.sha256), "Asset digest mismatch");
-            if (ViewerScene.Asset.ROLE_IMAGE.equals(asset.role)) SafePng.validate(file, asset.width, asset.height, cancel);
+            if (!ViewerScene.Asset.ROLE_TRANSITION.equals(asset.role)) SafePng.validate(file, asset.width, asset.height, cancel);
             else {
                 require(validator != null, "Video assets require a platform full-decode validator");
                 validator.validate(file, asset, cancel); check(cancel);
-                require(file.length() == asset.byteLength && hash(file, cancel).equals(asset.sha256), "Video changed during validation");
             }
+            require(file.length() == asset.byteLength && hash(file, cancel).equals(asset.sha256), "Media changed during validation");
         }
+        validateRegionPixels(scene, root, cancel);
         // Authoring roots may also contain the canonical scene/manifest; no arbitrary payloads.
         expected.add("scene.json"); expected.add("manifest.json");
         listDirectory(root.toPath(), root.toPath(), expected, cancel);
@@ -244,6 +283,27 @@ public final class ViewerPackageCodec {
         long total = sceneBytes.length + manifest.length;
         for (ViewerScene.Asset a : scene.assets) total += a.byteLength;
         require(total <= MAX_PACKAGE_BYTES, "Package exceeds unpacked byte budget"); check(cancel);
+    }
+    /** Shared viewer/AI boundary. A matching manifest hash cannot disguise invented crop pixels. */
+    public static void validateRegionPixels(ViewerScene scene, File root, CancelCheck cancel) throws IOException {
+        validateRegionPixels(scene, root, null, cancel);
+    }
+    public static void validateRegionPixels(ViewerScene scene, File root, String regionId, CancelCheck cancel) throws IOException {
+        check(cancel); validateScene(scene); secureRoot(root);
+        require(regionId == null || scene.regions.stream().anyMatch(r -> r.id.equals(regionId)), "Missing requested region");
+        Map<String, ViewerScene.Asset> assets = new HashMap<>();
+        for (ViewerScene.Asset a : scene.assets) assets.put(a.id, a);
+        for (ViewerScene.Region region : scene.regions) {
+            if (regionId != null && !region.id.equals(regionId)) continue;
+            check(cancel);
+            ViewerScene.Asset base = assets.get(region.baseAssetId), crop = assets.get(region.assetId);
+            File baseFile = resolve(root, base.path), cropFile = resolve(root, crop.path);
+            require(baseFile.isFile() && cropFile.isFile() && baseFile.length() == base.byteLength && cropFile.length() == crop.byteLength
+                    && hash(baseFile, cancel).equals(base.sha256) && hash(cropFile, cancel).equals(crop.sha256), "Region media digest mismatch");
+            SafePng.validateCrop(baseFile, base.width, base.height, cropFile, region.bbox, cancel);
+            require(baseFile.length() == base.byteLength && cropFile.length() == crop.byteLength
+                    && hash(baseFile, cancel).equals(base.sha256) && hash(cropFile, cancel).equals(crop.sha256), "Region media changed during pixel comparison");
+        }
     }
     public static void writePackage(ViewerScene scene, File assetRoot, File outputZip, CancelCheck cancel) throws IOException {
         writePackage(scene, assetRoot, outputZip, cancel, null);
@@ -364,7 +424,8 @@ public final class ViewerPackageCodec {
     }
     private static void version(int schemaVersion, String policyVersion, String compilerVersion) {
         require((schemaVersion == 1 && POLICY_VERSION.equals(policyVersion)
-                || schemaVersion == 2 && VIDEO_POLICY_VERSION.equals(policyVersion))
+                || schemaVersion == 2 && VIDEO_POLICY_VERSION.equals(policyVersion)
+                || schemaVersion == 3 && REGION_POLICY_VERSION.equals(policyVersion))
                 && COMPILER_VERSION.equals(compilerVersion), "Unsupported viewer schema, policy or compiler version");
     }
     private static void dimensions(int w, int h) { require(w > 0 && h > 0 && Math.min(w, h) <= 1080 && Math.max(w, h) <= 2400, "Media dimensions exceed profile"); }
@@ -377,7 +438,7 @@ public final class ViewerPackageCodec {
         return BigDecimal.valueOf(value).setScale(6, RoundingMode.HALF_UP).stripTrailingZeros();
     }
     private static Map<String, Object> sceneObject(ViewerScene s) {
-        List<Object> states = new ArrayList<>(), edges = new ArrayList<>(), hotspots = new ArrayList<>(), assets = new ArrayList<>();
+        List<Object> states = new ArrayList<>(), edges = new ArrayList<>(), hotspots = new ArrayList<>(), regions = new ArrayList<>(), assets = new ArrayList<>();
         for (ViewerScene.State a : s.states) states.add(obj("id", a.id, "imageAssetId", a.imageAssetId, "width", a.width, "height", a.height,
                 "title", a.title, "description", a.description, "sourceKind", a.sourceKind, "terminal", a.terminal));
         for (ViewerScene.Edge a : s.edges) edges.add(obj("id", a.id, "fromStateId", a.fromStateId,
@@ -385,11 +446,17 @@ public final class ViewerPackageCodec {
                 "label", a.label, "trigger", a.trigger, "transitionAssetId", a.transitionAssetId, "sourceKind", a.sourceKind));
         for (ViewerScene.Hotspot a : s.hotspots) hotspots.add(obj("id", a.id, "stateId", a.stateId, "label", a.label,
                 "coordinateSpace", "state-normalized", "rect", obj("x", coord(a.rect.x), "y", coord(a.rect.y), "width", coord(a.rect.width), "height", coord(a.rect.height))));
+        for (ViewerScene.Region r : s.regions) regions.add(obj("id", r.id, "stateId", r.stateId,
+                "baseAssetId", r.baseAssetId, "assetId", r.assetId, "name", r.name, "kind", "screenshotCrop",
+                "coordinateSpace", "source-pixels", "sourceWidth", r.sourceWidth, "sourceHeight", r.sourceHeight,
+                "bbox", obj("x", r.bbox.x, "y", r.bbox.y, "width", r.bbox.width, "height", r.bbox.height),
+                "group", r.group, "zIndex", r.zIndex,
+                "anchor", obj("coordinateSpace", "layer-normalized", "x", coord(r.anchor.x), "y", coord(r.anchor.y))));
         for (ViewerScene.Asset a : s.assets) assets.add(obj("id", a.id, "path", a.path, "role", a.role, "mime", a.mime,
                 "byteLength", a.byteLength, "sha256", a.sha256, "width", a.width, "height", a.height, "durationMs", a.durationMs));
         return obj("schemaVersion", s.schemaVersion, "policyVersion", s.policyVersion, "compilerVersion", s.compilerVersion,
                 "releaseId", s.releaseId, "title", s.title, "goal", s.goal, "createdAt", s.createdAt, "startStateId", s.startStateId,
-                "states", states, "edges", edges, "hotspots", hotspots, "regions", Collections.emptyList(), "assets", assets);
+                "states", states, "edges", edges, "hotspots", hotspots, "regions", regions, "assets", assets);
     }
     private static Map<String, Object> obj(Object... values) { Map<String, Object> r = new LinkedHashMap<>(); for (int i=0;i<values.length;i+=2) r.put((String)values[i], values[i+1]); return r; }
     @SuppressWarnings("unchecked") private static Map<String, Object> map(Object raw) { require(raw instanceof Map, "Expected JSON object"); return (Map<String,Object>) raw; }
@@ -398,6 +465,7 @@ public final class ViewerPackageCodec {
     private static String string(Object raw) { require(raw instanceof String, "Expected JSON string"); return (String) raw; }
     private static String nullableString(Object raw) { return raw == null ? null : string(raw); }
     private static long integer(Object raw) { require(raw instanceof BigDecimal && ((BigDecimal)raw).scale() <= 0, "Expected JSON integer"); return ((BigDecimal)raw).longValueExact(); }
+    private static int signedInt(Object raw) { long n = integer(raw); require(n >= Integer.MIN_VALUE && n <= Integer.MAX_VALUE, "Invalid signed integer"); return (int)n; }
     private static int smallInt(Object raw) { long n = integer(raw); require(n >= 0 && n <= Integer.MAX_VALUE, "Invalid integer dimension"); return (int)n; }
     private static double decimal(Object raw) { require(raw instanceof BigDecimal, "Expected coordinate number"); BigDecimal n = (BigDecimal)raw; require(n.signum() >= 0 && n.compareTo(BigDecimal.ONE) <= 0, "Coordinate out of range"); return n.doubleValue(); }
 }

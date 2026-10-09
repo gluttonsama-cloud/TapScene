@@ -142,6 +142,7 @@ public final class PackageSecurityChecks {
         pngCorpus();
         directoryAndCancellationCorpus();
         run("restricted-video-package-and-traversal-corpus", () -> VideoPackageChecks.run(root.resolve("video")));
+        run("region-schema3-package-corpus", () -> RegionPackageChecks.run(root.resolve("regions")));
         String summary = "TAPSCENE_PACKAGE_CHECKS_" + (failed == 0 ? "OK" : "FAILED")
                 + ": passed=" + passed + " failed=" + failed;
         System.out.println(summary);

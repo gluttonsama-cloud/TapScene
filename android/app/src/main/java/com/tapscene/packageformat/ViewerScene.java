@@ -15,6 +15,7 @@ public final class ViewerScene {
     public final List<Edge> edges;
     public final List<Hotspot> hotspots;
     public final List<Asset> assets;
+    public final List<Region> regions;
 
     public ViewerScene(String releaseId, String title, String goal, long createdAt,
             String startStateId, List<State> states, List<Edge> edges,
@@ -26,6 +27,13 @@ public final class ViewerScene {
             String releaseId, String title, String goal, long createdAt,
             String startStateId, List<State> states, List<Edge> edges,
             List<Hotspot> hotspots, List<Asset> assets) {
+        this(schemaVersion, policyVersion, compilerVersion, releaseId, title, goal, createdAt, startStateId,
+                states, edges, hotspots, Collections.emptyList(), assets);
+    }
+    public ViewerScene(int schemaVersion, String policyVersion, String compilerVersion,
+            String releaseId, String title, String goal, long createdAt, String startStateId,
+            List<State> states, List<Edge> edges, List<Hotspot> hotspots, List<Region> regions, List<Asset> assets) {
+        this.regions = frozen(regions);
         this.schemaVersion = schemaVersion; this.policyVersion = policyVersion; this.compilerVersion = compilerVersion;
         this.releaseId = releaseId; this.title = title; this.goal = goal;
         this.createdAt = createdAt; this.startStateId = startStateId;
@@ -72,8 +80,31 @@ public final class ViewerScene {
             this.x = x; this.y = y; this.width = width; this.height = height;
         }
     }
+    /** A visible rectangle copied from a reviewed state image, never a reconstructed component. */
+    public static final class Region {
+        public final String id, stateId, baseAssetId, assetId, name, group;
+        public final int sourceWidth, sourceHeight, zIndex;
+        public final PixelRect bbox;
+        public final Anchor anchor;
+        public Region(String id, String stateId, String baseAssetId, String assetId, String name,
+                int sourceWidth, int sourceHeight, PixelRect bbox, String group, int zIndex, Anchor anchor) {
+            this.id = id; this.stateId = stateId; this.baseAssetId = baseAssetId; this.assetId = assetId;
+            this.name = name; this.sourceWidth = sourceWidth; this.sourceHeight = sourceHeight;
+            this.bbox = bbox; this.group = group; this.zIndex = zIndex; this.anchor = anchor;
+        }
+    }
+    public static final class PixelRect {
+        public final int x, y, width, height;
+        public PixelRect(int x, int y, int width, int height) {
+            this.x = x; this.y = y; this.width = width; this.height = height;
+        }
+    }
+    public static final class Anchor {
+        public final double x, y;
+        public Anchor(double x, double y) { this.x = x; this.y = y; }
+    }
     public static final class Asset {
-        public static final String ROLE_IMAGE = "state-image", ROLE_TRANSITION = "transition";
+        public static final String ROLE_IMAGE = "state-image", ROLE_TRANSITION = "transition", ROLE_REGION_CROP = "region-crop";
         public final String id, path, mime, sha256, role;
         public final Long durationMs;
         public final long byteLength;

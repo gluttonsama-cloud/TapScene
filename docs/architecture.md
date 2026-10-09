@@ -101,6 +101,8 @@ Android 初期按包分区，按实际需要拆 Gradle 模块。依赖版本、�
 
 当前 Android 项目编辑增量以私有 SQLite 实现项目、步骤、来源引用、派生 PNG、热点和边的子集；复核后的图片复制、摘要核对与事务提交完成才进入步骤。文件复制前登记恢复记录，中断后按记录清理未提交文件，保留已提交资产。原素材工作台记录保持独立，项目媒体草稿按项目隔离；删除项目清理自己的派生图，原素材副本可从首页“本机保留素材”继续管理。观看包与封存使用独立私有目录；视频过渡以稳定 edge ID 绑定单独派生 MP4，SQLite v3 只增加过渡与恢复记录。源片引用计入过渡，换目标/删边清理旧绑定，普通重排保留；文件复制、完整解码及摘要核对后原子替换，提交前取消保留原绑定；提交后取消重新读取真实绑定与修订。固定候选另复制实际 MP4，整段观看确认绑定候选摘要及资产 hash；旧版本不随草稿修改。无视频沿用 schema 1，有视频使用 schema 2/video-viewer-2；Java 包边界必须提供全解码验证器，旧重载遇视频拒绝。完整撤销表尚未接入。
 
+区域增量以 SQLite v4 增加 regions 和裁片恢复记录；保留 v1–v3 项目，不重建已有表。区域只依赖当前已复核安全底图的 ID、SHA 和尺寸；真实生成与人工复核分开。替换底图原子清除相关裁片/复核并保留失效定义，重新校正生成后复核。schema 3 / scene-regions-3 封存区域及 PNG，Java 与独立消费者都逐像素比对 bbox 裁片和底图；候选对真实裁片另行确认。
+
 当前 SQLite v2 在 v1 基础上只新增 `next_actions`（作者编排），旧项目、资产、热点与边不重建。每个来源步骤最多一条下一步动作，`action_id`、标签、来源/目标步骤与项目绑定；目标删掉后置空并保留待修复动作，删除来源才级联移除。它没有画面矩形或点击证据；与热点边一起计入 80 条动作限额，终点不得有动作。显式顺序生成一次事务更新相邻动作并核对草稿修订，保留手动热点、未选步骤及末步原动作；普通分镜排序不重连。预览按动作读取真实安全图后记入访问历史。
 
 每个项目有一份活动草稿，`projects` 同时承载项目与草稿信息。编辑事务递增 `draft_revision`；长任务使用固定输入快照。复制项目、脱敏包复制及 AI 回流创建新 `project_id`，保留来源对象 ID 用于差异比较。
@@ -542,7 +544,7 @@ Android 静态包固定 `schemaVersion=1`、`policyVersion=static-viewer-1`、`c
 | `render-plan.json` | AI 包独立渲染配置；与 scene 的 releaseId、contentDigest 绑定 |
 | AI 包说明文件 | schema 与 README，解释数据结构和消费方式；执行模板单独分发 |
 
-包可另算 packageDigest。只调整有限路径、画布、停留或效果时保留原 release，生成新的 AI 包并复核最终 render-plan / 文件清单。修改图、文案、区域底图或媒体时重新封存 release。
+当前 AI 导出已实现 `tapscene-remotion-1` / `TapSceneDemo`：完整固定 scene 原样复用，配置保存在独立目录，导出为 `.tapscene-ai`。受信消费者及依赖单独在 `remotion-adapter/`。固定 30 fps、256 visits、256 effects、单次 hold 1–1800 帧、总长 ≤18000 帧、计划 ≤256 KiB；region 总量 80/每步 12、资产总量 200。包内 schema 仅说明，不授权执行；消费者使用内置严格结构和语义规则。包可另算 packageDigest。只调整有限路径、画布、停留或效果时保留原 release，生成新的 AI 包并复核最终 render-plan / 文件清单。修改图、文案、区域底图或媒体时重新封存 release。
 
 | 对象 | 字段 |
 |---|---|
@@ -555,7 +557,7 @@ Android 静态包固定 `schemaVersion=1`、`policyVersion=static-viewer-1`、`c
 | `render-plan.json` | `{schemaVersion,adapterVersion,compositionId,releaseId,contentDigest,fps:30,canvas:{width,height},visits:[{visitId,stateId,selectedEdgeId:null\|id,holdFrames}],effects:[Effect],timeline:[{visitId,startFrame,durationFrames,transitionFrames,overlapFrames}],totalFrames}`。两个画布预设为 1080×1920、1920×1080；末次访问明确结束，回访有不同 visitId。 |
 | `Effect` | `{type:"click"\|"focus"\|"transition"\|"highlight"\|"annotation",visitId,startFrame,durationFrames,hotspotId:null\|id,regionId:null\|id,text:null\|string,rect:null\|{x,y,width,height}}`。rect 如存在统一为 state-normalized；不同 type 只接受其必需字段，拒绝未知效果、表达式与动态组件。 |
 
-所有时间区间左闭右开。毫秒转输出帧统一 `floor(ms*fps/1000+0.5)`，转换一次，零帧区间拒绝。timeline 从已验证的 visits、视频长度、overlapFrames 推导并比对：切换重叠帧从总长扣除，普通标注保留总长。图可显式回访；动画以有限 visits 明确结束。
+所有时间区间左闭右开。毫秒转输出帧统一 `floor(ms*fps/1000+0.5)`，转换一次，零帧区间拒绝。timeline 从已验证的 visits、视频长度、overlapFrames 推导并比对：切换重叠帧从总长扣除，普通标注保留总长。每次访问的入场加退场重叠帧必须小于 holdFrames，保证独立停留及最多两个访问同时显示。图可显式回访；动画以有限 visits 明确结束。
 
 导入限额沿用 [素材与容量](../README.md#素材容量与使用范围)：40 状态、80 边、每状态 6 热点、单过渡 10 秒、过渡合计 60 秒、包及解压资产各 50 MiB。解析深度、文件数、AI visits 与动画总长由同一 policyVersion 在实现导入器时定额。
 

@@ -1,0 +1,32 @@
+{
+  "name": "tapscene-remotion-adapter",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "tsc --noEmit && node --import tsx --test test/*.test.ts",
+    "render": "node --import tsx src/render.ts"
+  },
+  "dependencies": {
+    "@remotion/bundler": "4.0.534",
+    "@remotion/renderer": "4.0.534",
+    "pngjs": "7.0.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "remotion": "4.0.534",
+    "yauzl": "3.4.0",
+    "zod": "4.1.13"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "@types/pngjs": "6.0.5",
+    "@types/react": "19.2.7",
+    "@types/react-dom": "19.2.3",
+    "@types/yauzl": "2.10.3",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
+  }
+}

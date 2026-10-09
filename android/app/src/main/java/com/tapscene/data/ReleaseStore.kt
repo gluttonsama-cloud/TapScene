@@ -3,6 +3,8 @@ package com.tapscene.data
 import android.content.Context
 import android.system.Os
 import android.system.OsConstants
+import com.tapscene.packageformat.AiPackageCodec
+import com.tapscene.packageformat.RenderPlan
 import com.tapscene.packageformat.ViewerPackageCodec
 import com.tapscene.packageformat.ViewerScene
 import java.io.File
@@ -34,6 +36,7 @@ class ReleaseStore(context: Context) {
     private val releases = File(root, "releases")
     private val staging = File(root, "staging")
     private val exports = File(root, "exports")
+    private val aiConfigs = File(root, "ai-configs")
 
     suspend fun createCandidate(projectId: String, expectedRevision: Long,
         replaceExisting: Boolean = false): ReleaseCandidate = locked {
@@ -106,6 +109,26 @@ class ReleaseStore(context: Context) {
         check(asset.sha256 == assetSha256) { "完整观看记录对应另一份视频，请重新播放。" }
         ReleaseCompiler.verifyAsset(app, asset, File(child(candidates, candidateId), "package"))
         update(candidate.copy(reviewedTransitionAssetIds = candidate.reviewedTransitionAssetIds + assetId))
+    }
+
+    suspend fun reviewRegion(candidateId: String, digest: String, regionId: String): ReleaseCandidate = locked {
+        val candidate = boundCandidate(candidateId, digest)
+        val region = candidate.scene.regions.singleOrNull { it.id == regionId } ?: error("区域不属于当前固定候选。")
+        val asset = candidate.scene.assets.single { it.id == region.assetId }
+        val payload = File(child(candidates, candidateId), "package")
+        ViewerPackageCodec.validateRegionPixels(candidate.scene, payload, regionId, cancelCheck())
+        ReleaseCompiler.verifyAsset(app, asset, payload)
+        update(candidate.copy(reviewedRegionIds = candidate.reviewedRegionIds + regionId))
+    }
+
+    suspend fun candidateRegionFile(candidateId: String, regionId: String): File = locked {
+        val candidate = readCandidateDirectory(child(candidates, candidateId), verifyAssets = false)
+        val region = candidate.scene.regions.singleOrNull { it.id == regionId } ?: error("区域不属于当前固定候选。")
+        val asset = candidate.scene.assets.single { it.id == region.assetId }
+        val payload = File(child(candidates, candidateId), "package")
+        ViewerPackageCodec.validateRegionPixels(candidate.scene, payload, regionId, cancelCheck())
+        ReleaseCompiler.verifyAsset(app, asset, payload)
+        File(payload, asset.path)
     }
 
     suspend fun reviewSummary(candidateId: String, digest: String): ReleaseCandidate = locked {
@@ -182,6 +205,7 @@ class ReleaseStore(context: Context) {
             .filter { it.role == ViewerScene.Asset.ROLE_TRANSITION }.map { it.id }.toSet()) {
             "请从头完整观看并逐段确认固定候选的全部实际过渡视频。"
         }
+        check(candidate.reviewedRegionIds == candidate.scene.regions.map { it.id }.toSet()) { "请逐项查看并确认固定候选的实际区域裁片。" }
         val source = child(candidates, candidateId)
         verifyPackage(candidate.scene, File(source, "package"), decode = true)
         val summary = summary(candidate.scene, "local", System.currentTimeMillis())
@@ -253,6 +277,46 @@ class ReleaseStore(context: Context) {
         }
     }
 
+    /** A render plan is separate local metadata; the sealed package and scene are never rewritten. */
+    suspend fun readAiPlan(releaseId: String): RenderPlan? = locked {
+        val scene = readScene(File(child(releases, releaseId), "package"))
+        val file = File(aiConfigs, "$releaseId.json")
+        if (!file.exists()) return@locked null
+        check(file.canonicalFile == file.absoluteFile && file.isFile && file.length() in 1..RenderPlan.MAX_BYTES.toLong()) { "动画配置无效，请重新配置。" }
+        RenderPlan.parse(scene, file.readBytes())
+    }
+
+    /** The caller has reviewed the resolved plan and complete AI file list. */
+    suspend fun exportAiRelease(releaseId: String, plan: RenderPlan): File = locked {
+        val location = child(releases, releaseId)
+        val stored = readReleaseDirectory(location)
+        val payload = File(location, "package")
+        val scene = readScene(payload)
+        val checked = RenderPlan.parse(scene, plan.toBytes())
+        check(checked.releaseId == releaseId && checked.contentDigest == stored.contentDigest) { "动画配置不属于这个固定版本。" }
+        verifyPackage(scene, payload, decode = true)
+        stage { operation ->
+            val output = File(operation, "animation.tapscene-ai")
+            AiPackageCodec.writePackage(scene, checked, payload, output, cancelCheck(), videoValidator())
+            val verify = directory(File(operation, "verified"), operation)
+            val loaded = AiPackageCodec.readPackage(output, verify, cancelCheck(), videoValidator())
+            check(loaded.contentDigest == stored.contentDigest && loaded.renderPlan.toBytes().contentEquals(checked.toBytes())) { "动画包回读校验失败。" }
+            syncFile(output)
+            currentCoroutineContext().ensureActive()
+            val final = File(exports, "$releaseId.tapscene-ai")
+            check(final.canonicalFile == final.absoluteFile) { "动画导出路径无效。" }
+            Files.move(output.toPath(), final.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            runCatching { syncDirectory(exports) }
+            // A valid plan can be recovered independently of the immutable release.
+            val config = File(aiConfigs, "$releaseId.json")
+            val temporary = File(operation, "plan.json")
+            writeSynced(temporary, checked.toBytes())
+            Files.move(temporary.toPath(), config.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            runCatching { syncDirectory(aiConfigs) }
+            final
+        }
+    }
+
     /** Bounded streaming, isolated verification, then one atomic install. The caller owns input. */
     suspend fun importPackage(input: InputStream): ReleaseSummary = locked {
         stage { operation ->
@@ -307,7 +371,7 @@ class ReleaseStore(context: Context) {
         check(source.isDirectory) { "这个本机版本已不存在。" }
         stage { operation ->
             Files.move(source.toPath(), File(operation, "deleted-release").toPath(), StandardCopyOption.ATOMIC_MOVE)
-            runCatching { syncDirectory(releases); File(exports, "$releaseId.tapscene").delete(); syncDirectory(exports) }
+            runCatching { syncDirectory(releases); File(exports, "$releaseId.tapscene").delete(); File(exports, "$releaseId.tapscene-ai").delete(); File(aiConfigs, "$releaseId.json").delete(); syncDirectory(exports); syncDirectory(aiConfigs) }
         }
     }
 
@@ -366,10 +430,11 @@ class ReleaseStore(context: Context) {
             "候选或复核所绑定的实际内容已改变。"
         }
         val reviewed = strings(json.getJSONArray("reviewedStates")).toSet()
+        val reviewedRegions = json.optJSONArray("reviewedRegions")?.let { strings(it).toSet() } ?: emptySet()
         val reviewedTransitions = json.optJSONArray("reviewedTransitions")?.let { strings(it).toSet() } ?: emptySet()
         val visited = strings(json.getJSONArray("visitedEdges")).toSet()
         val history = strings(json.getJSONArray("history"))
-        check(reviewedTransitions.all { id -> scene.assets.any { it.id == id && it.role == ViewerScene.Asset.ROLE_TRANSITION } } &&
+        check(reviewedRegions.all { id -> scene.regions.any { it.id == id } } && reviewedTransitions.all { id -> scene.assets.any { it.id == id && it.role == ViewerScene.Asset.ROLE_TRANSITION } } &&
             reviewed.all { id -> scene.states.any { it.id == id } } &&
             visited.all { id -> scene.edges.any { it.id == id } } && history.size <= MAX_HISTORY &&
             history.all { id -> scene.states.any { it.id == id } }) { "候选复核记录无效。" }
@@ -379,7 +444,7 @@ class ReleaseStore(context: Context) {
             json.getBoolean("summaryReviewed"), json.getBoolean("fileListReviewed"), visited,
             json.getBoolean("completedPath"), optional(json, "traversalStateId"),
             json.getBoolean("traversalStarted"), json.getBoolean("traversalEnded"), history,
-            optional(json, "traversalEndEdgeId"), reviewedTransitions)
+            optional(json, "traversalEndEdgeId"), reviewedTransitions, reviewedRegions)
     }
 
     private fun writeCandidate(location: File, candidate: ReleaseCandidate) {
@@ -388,6 +453,7 @@ class ReleaseStore(context: Context) {
             put("contentDigest", candidate.contentDigest); put("fileListDigest", fileListDigest(candidate.scene))
             put("reviewedStates", JSONArray(candidate.reviewedStateIds.sorted()))
             put("reviewedTransitions", JSONArray(candidate.reviewedTransitionAssetIds.sorted()))
+            put("reviewedRegions", JSONArray(candidate.reviewedRegionIds.sorted()))
             put("summaryReviewed", candidate.summaryReviewed); put("fileListReviewed", candidate.fileListReviewed)
             put("visitedEdges", JSONArray(candidate.visitedEdgeIds.sorted())); put("completedPath", candidate.completedPath)
             put("traversalStateId", candidate.traversalStateId ?: JSONObject.NULL)
@@ -459,7 +525,7 @@ class ReleaseStore(context: Context) {
 
     private suspend fun <T> locked(action: suspend () -> T): T = mutex.withLock {
         directory(root, privateRoot)
-        listOf(candidates, releases, staging, exports).forEach { directory(it, root) }
+        listOf(candidates, releases, staging, exports, aiConfigs).forEach { directory(it, root) }
         recoverStages()
         recoverMetadataParts()
         action()

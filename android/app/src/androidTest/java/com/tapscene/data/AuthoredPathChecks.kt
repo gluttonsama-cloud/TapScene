@@ -34,12 +34,12 @@ object AuthoredPathChecks {
             check(migrated == legacy) { "Migration changed legacy IDs, graph, text, source or asset metadata" }
             legacy.steps.forEach { check(digest(store.resolveAsset(legacy.project.id, it.id)) == input.sha256) }
             SQLiteDatabase.openDatabase(File(root, "projects.sqlite").path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
-                check(db.version == 3)
+                check(db.version == 4)
                 db.rawQuery("SELECT COUNT(*) FROM next_actions", null).use { check(it.moveToFirst() && it.getInt(0) == 0) }
                 db.rawQuery("SELECT COUNT(*) FROM edge_transitions", null).use { check(it.moveToFirst() && it.getInt(0) == 0) }
                 db.rawQuery("PRAGMA foreign_key_check", null).use { check(!it.moveToFirst()) }
             }
-            status("PASS authored path migration: real v1 SQLite upgrades to v3 without changing manual hotspots, stable IDs, revision or PNG bytes")
+            status("PASS authored path migration: real v1 SQLite upgrades to v4 without changing manual hotspots, stable IDs, revision or PNG bytes")
             checkGraph(store, isolated, legacy, input, status)
             checkCapacity(store, input, status)
             check(input.file.isFile && digest(input.file) == input.sha256)

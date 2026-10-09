@@ -74,12 +74,14 @@ tables = re.findall(r'db.execSQL\("""(CREATE TABLE.*?)"""\)', s, re.S)
 single_line = re.findall(r'db.execSQL\("(CREATE (?:INDEX|TABLE).*?)"\)', s)
 next_sql = [sql for sql in tables + single_line if re.match(r'CREATE (?:TABLE|INDEX) next_actions', sql)]
 transition_sql = [sql for sql in tables + single_line if re.match(r'CREATE (?:TABLE|INDEX) (?:edge_transitions|transition_imports)', sql)]
+region_sql = [sql for sql in tables + single_line if re.match(r'CREATE (?:TABLE|INDEX) regions', sql)]
+assert len(region_sql) == 2
 assert len(transition_sql) == 3
 assert len(next_sql) == 2
 legacy = sqlite3.connect(':memory:')
 legacy.execute('PRAGMA foreign_keys=ON')
 for sql in tables + single_line:
- if sql not in next_sql + transition_sql: legacy.execute(sql)
+ if sql not in next_sql + transition_sql + region_sql: legacy.execute(sql)
 legacy.execute('PRAGMA user_version=1')
 legacy.execute("INSERT INTO projects VALUES('legacy','Title','Goal',11,12,9,'a')")
 legacy.execute("INSERT INTO sources VALUES('legacy','source','{\"kept\":true}')")
@@ -156,7 +158,7 @@ for previous_version in (1, 2):
  migrated = sqlite3.connect(':memory:')
  migrated.execute('PRAGMA foreign_keys=ON')
  for sql in tables + single_line:
-  if sql not in transition_sql and (previous_version == 2 or sql not in next_sql): migrated.execute(sql)
+  if sql not in transition_sql + region_sql and (previous_version == 2 or sql not in next_sql): migrated.execute(sql)
  migrated.execute('PRAGMA user_version=' + str(previous_version))
  migrated.execute("INSERT INTO projects VALUES('migration','Kept','Goal',11,12,7,'a')")
  migrated.execute("INSERT INTO sources VALUES('migration','source','source-private-json')")
@@ -216,3 +218,39 @@ for previous_version in (1, 2):
  assert migrated.execute('SELECT COUNT(*) FROM asset_cleanup').fetchone()[0] == 4
  assert not list(migrated.execute('PRAGMA foreign_key_check'))
  print('PASS v%d-to-v3 preserved rows/journals, exact duration limits, transition source FK, atomic replacement rollback and video cascade' % previous_version)
+
+# v4 regions are wholly additive. The dependency ID/hash intentionally survive base replacement;
+# nullable crop/review is cleared by the production transaction before old files are queued.
+for previous_version in (1, 2, 3):
+ m = sqlite3.connect(':memory:'); m.execute('PRAGMA foreign_keys=ON')
+ for sql in tables + single_line:
+  if sql in region_sql or (previous_version < 2 and sql in next_sql) or (previous_version < 3 and sql in transition_sql): continue
+  m.execute(sql)
+ m.execute("INSERT INTO projects VALUES('p','Kept','Goal',1,2,7,'s')")
+ m.execute("INSERT INTO sources VALUES('p','src','private')")
+ m.execute("INSERT INTO local_assets VALUES('base','p','base.png','base-sha',50,20,30)")
+ m.execute("INSERT INTO states VALUES('p','s','capture',0,'Step','Text',1,'src','base',0,1000,'[]')")
+ m.execute("INSERT INTO asset_imports VALUES('p','pending')"); m.commit()
+ old_tables=[r[0] for r in m.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+ old={t:list(m.execute('SELECT * FROM '+t)) for t in old_tables}
+ with m:
+  for sql in (next_sql if previous_version < 2 else []) + (transition_sql if previous_version < 3 else []) + region_sql: m.execute(sql)
+  m.execute('PRAGMA user_version=4')
+ assert old == {t:list(m.execute('SELECT * FROM '+t)) for t in old_tables}
+ m.execute("INSERT INTO local_assets VALUES('crop','p','crop.png','crop-sha',30,4,5)")
+ row=('p','r','s','base','base-sha','Visible','Group',2,3,4,5,20,30,-1,.25,.75,'crop',123)
+ m.execute('INSERT INTO regions VALUES('+','.join('?'*18)+')',row);m.commit()
+ for sql in ("UPDATE regions SET x_px=19", "UPDATE regions SET anchor_x=1.1", "UPDATE regions SET width_px=0", "UPDATE regions SET z_index=10001", "UPDATE regions SET state_id='foreign'", "UPDATE regions SET asset_id='missing'"):
+  try: m.execute(sql);m.commit();raise AssertionError('invalid region row accepted')
+  except sqlite3.IntegrityError:m.rollback()
+ with m:
+  m.execute("INSERT INTO asset_cleanup VALUES('p','crop.png')")
+  m.execute("UPDATE regions SET asset_id=NULL,reviewed_at=NULL")
+  m.execute("DELETE FROM local_assets WHERE asset_id='crop'")
+ assert m.execute('SELECT base_asset_id,base_sha256,asset_id,reviewed_at FROM regions').fetchone()==('base','base-sha',None,None)
+ m.execute("UPDATE projects SET start_state_id=NULL")
+ m.execute("DELETE FROM states WHERE state_id='s'");m.commit()
+ assert m.execute('SELECT COUNT(*) FROM regions').fetchone()[0]==0
+ assert m.execute('SELECT COUNT(*) FROM asset_cleanup').fetchone()[0]==1
+ assert not list(m.execute('PRAGMA foreign_key_check'))
+ print('PASS v%d-to-v4 additive region migration, pixel/anchor/layer/FK constraints, stale dependency and cascade' % previous_version)

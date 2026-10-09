@@ -32,13 +32,16 @@ final class StrictZip {
         long crc, compressed, size, offset, dataOffset;
     }
     static void extract(File zip, File destination, CancelCheck cancel) throws IOException {
+        extract(zip, destination, cancel, false);
+    }
+    static void extract(File zip, File destination, CancelCheck cancel, boolean ai) throws IOException {
         require(Files.isRegularFile(zip.toPath(), LinkOption.NOFOLLOW_LINKS)
                 && zip.length() >= 22 && zip.length() <= MAX_PACKAGE_BYTES, "ZIP missing or exceeds byte budget");
         try (RandomAccessFile input = new RandomAccessFile(zip, "r")) {
-            List<Entry> entries = inspect(input, cancel);
+            List<Entry> entries = inspect(input, cancel, ai);
             long all = 0;
             for (Entry e : entries) {
-                check(cancel); File output = resolve(destination, e.path);
+                check(cancel); File output = resolvePackage(destination, e.path, ai);
                 if (e.path.startsWith("assets/")) {
                     File assets = new File(destination, "assets");
                     if (!assets.exists()) require(assets.mkdir(), "Cannot create isolated assets directory");
@@ -53,12 +56,12 @@ final class StrictZip {
             }
         }
     }
-    private static List<Entry> inspect(RandomAccessFile in, CancelCheck cancel) throws IOException {
+    private static List<Entry> inspect(RandomAccessFile in, CancelCheck cancel, boolean ai) throws IOException {
         long fileLength = in.length(); in.seek(fileLength - 22);
         require(u32(in) == END, "ZIP must end with a single comment-free end record");
         require(u16(in) == 0 && u16(in) == 0, "Multi-disk ZIP is unsupported");
         int diskCount = u16(in), count = u16(in); long cdSize = u32(in), cdOffset = u32(in); int comment = u16(in);
-        require(count >= 2 && count <= MAX_FILES && diskCount == count && comment == 0
+        require(count >= 2 && count <= (ai ? MAX_ASSETS + 5 : MAX_FILES) && diskCount == count && comment == 0
                 && cdOffset != 0xffffffffL && cdSize != 0xffffffffL && cdOffset + cdSize == fileLength - 22,
                 "Invalid central directory or ZIP64 archive");
         List<Entry> entries = new ArrayList<>(); Set<String> paths = new HashSet<>(); long total = 0;
@@ -77,8 +80,8 @@ final class StrictZip {
             require(nameLength >= 10 && nameLength <= 47 && in.getFilePointer() + nameLength <= fileLength - 22, "Invalid ZIP filename length");
             e.name = new byte[nameLength]; in.readFully(e.name);
             for (byte b : e.name) require(b >= 0x20 && b <= 0x7e, "Only ASCII package paths supported");
-            e.path = new String(e.name, StandardCharsets.US_ASCII); safePath(e.path); require(paths.add(e.path), "Duplicate ZIP entry");
-            long entryLimit = e.path.equals("manifest.json") ? MAX_MANIFEST_BYTES : e.path.equals("scene.json") ? MAX_SCENE_BYTES : MAX_PACKAGE_BYTES;
+            e.path = new String(e.name, StandardCharsets.US_ASCII); if (ai) AiPackageCodec.safePath(e.path); else safePath(e.path); require(paths.add(e.path), "Duplicate ZIP entry");
+            long entryLimit = e.path.equals("manifest.json") ? MAX_MANIFEST_BYTES : e.path.equals("scene.json") ? MAX_SCENE_BYTES : ai && !e.path.startsWith("assets/") ? RenderPlan.MAX_BYTES : MAX_PACKAGE_BYTES;
             require(e.size > 0 && e.size <= entryLimit && e.compressed > 0 && e.compressed <= MAX_PACKAGE_BYTES
                     && e.offset < cdOffset && e.offset != 0xffffffffL, "ZIP entry exceeds byte budget or uses ZIP64");
             require(e.method != 0 || e.compressed == e.size, "Stored ZIP size mismatch");
@@ -135,10 +138,13 @@ final class StrictZip {
         } finally { if (inflater != null) inflater.end(); }
     }
     static void write(File output, File assetRoot, List<FileEntry> files, Map<String, byte[]> json, CancelCheck cancel) throws IOException {
+        write(output, assetRoot, files, json, cancel, false);
+    }
+    static void write(File output, File assetRoot, List<FileEntry> files, Map<String, byte[]> json, CancelCheck cancel, boolean ai) throws IOException {
         List<Entry> entries = new ArrayList<>();
         for (String name : json.keySet()) entries.add(entry(name, json.get(name).length));
-        for (FileEntry f : files) if (!f.path.equals("scene.json")) entries.add(entry(f.path, f.byteLength));
-        require(entries.size() <= MAX_FILES, "Too many ZIP files");
+        for (FileEntry f : files) if (!json.containsKey(f.path)) entries.add(entry(f.path, f.byteLength));
+        require(entries.size() <= (ai ? MAX_ASSETS + 5 : MAX_FILES), "Too many ZIP files");
         long dataBytes = 0, centralBytes = 0;
         for (Entry e : entries) { dataBytes += 30 + e.name.length + e.size; centralBytes += 46 + e.name.length; }
         require(dataBytes + centralBytes + 22 <= MAX_PACKAGE_BYTES, "Export ZIP exceeds byte budget");
@@ -193,6 +199,10 @@ final class StrictZip {
             if (created) try { Files.deleteIfExists(output.toPath()); } catch (IOException cleanup) { failure.addSuppressed(cleanup); }
             throw failure;
         }
+    }
+    private static File resolvePackage(File root, String path, boolean ai) throws IOException {
+        if (!ai) return resolve(root, path);
+        return AiPackageCodec.resolve(root, path);
     }
     private static Entry entry(String path, long length) { Entry e=new Entry(); e.path=path; e.name=path.getBytes(StandardCharsets.US_ASCII); e.size=length; e.compressed=length; return e; }
     private static int u16(RandomAccessFile in) throws IOException { return in.readUnsignedByte() | in.readUnsignedByte()<<8; }
