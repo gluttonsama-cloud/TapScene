@@ -1,0 +1,43 @@
+name: Docs proposal checks
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  docs-checks:
+    name: docs-checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out the proposed merge
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Test checkers, including negative fixtures
+        run: python3 tests/test_checks.py
+      - name: Check proposal documents
+        run: python3 scripts/check_docs.py
+
+  gate:
+    name: ci/gate
+    needs: [docs-checks]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out the proposed merge
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Require actual success and ready PR policy
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 scripts/check_gate.py --event "$GITHUB_EVENT_PATH"

@@ -1,0 +1,10 @@
+{
+  "requirements": [
+    {
+      "id": "ENG-001",
+      "title": "首个规范基线与文档门禁",
+      "source": "docs/engineering/engineering-standard.md",
+      "status": "Proposed"
+    }
+  ]
+}
