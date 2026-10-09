@@ -191,7 +191,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
             mutableState.update { it.copy(project = null, route = ProjectRoute.PROJECTS,
                 selectedStepId = null, stepDraft = null, bitmap = null, preview = null, issues = emptyList(), dirtyStepIds = emptySet()) }
         }
-        message(if (result.pendingAssetCleanupCount > 0) "项目已删除，部分私有图片将在下次打开时继续清理" else "本地项目已删除")
+        message(if (result.pendingAssetCleanupCount > 0) "项目已删除，部分本机图片（可能含原截图）将在下次打开时继续清理" else "本地项目已删除")
     }
 
     fun openStep(id: String) = execute("读取步骤画面") {
@@ -463,7 +463,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
             }
             message("步骤已删除，已移除 ${result.impact.hotspotCount} 个相关热点" +
                 (if (result.impact.incomingNextActionCount > 0) "；${result.impact.incomingNextActionCount} 个下一步动作需重选目标" else "") +
-                (if (result.pendingAssetCleanupCount > 0) "；私有图片稍后继续清理" else ""))
+                (if (result.pendingAssetCleanupCount > 0) "；本机图片（可能含原截图）稍后继续清理" else ""))
         }
     }
 

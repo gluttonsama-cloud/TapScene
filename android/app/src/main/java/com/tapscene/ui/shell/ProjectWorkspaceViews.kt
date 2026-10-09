@@ -421,6 +421,7 @@ fun ProjectSourcesContent(
     onOpenSource: (String) -> Unit,
     onOpenCandidates: () -> Unit,
     onAnalyzeSource: (String) -> Unit,
+    onImportScreenshot: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val enabled = !busy && !loadFailed
@@ -453,6 +454,17 @@ fun ProjectSourcesContent(
                     OutlinedButton(onClick = onImportVideo, enabled = enabled && drafts.size < 3,
                         modifier = Modifier.heightIn(min = 48.dp)) { Text("导入录屏") }
                 }
+            }
+        }
+        item(key = "screenshot") {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("补充截图", style = MaterialTheme.typography.titleMedium)
+                    Text("每次一张，复核后加入步骤。", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                OutlinedButton(onClick = onImportScreenshot, enabled = !busy,
+                    modifier = Modifier.heightIn(min = 48.dp)) { Text("导入截图") }
             }
         }
         item(key = "source_summary") {

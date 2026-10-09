@@ -1,5 +1,6 @@
 package com.tapscene.data
 
+import com.tapscene.media.ImportedImageSource
 import com.tapscene.media.ImportedSource
 import com.tapscene.media.OpaqueMask
 import java.io.File
@@ -38,6 +39,8 @@ sealed interface StepOrigin {
     }
     /** Historical identity only. The superseded asset may be cleaned up; there is no file handle. */
     data class Image(val base: SafeImageBinding) : StepOrigin
+    /** A selected external PNG/JPEG held privately; never a previously reviewed safe base. */
+    data class ImportedImage(val source: ImportedImageSource) : StepOrigin
 }
 
 /** An edit lease on one exact current safe PNG, never an imported or historical readable source. */
@@ -67,8 +70,13 @@ data class ProjectStep(
     val captureId: String,
     val nextAction: ProjectNextAction? = null,
     val regions: List<ProjectRegion> = emptyList(),
+    /** Public evidence kind is retained through subsequent safe-image redactions. */
+    val evidenceKind: String = if (origin is StepOrigin.ImportedImage) "authored" else "recorded",
 ) {
     init {
+        require(evidenceKind in setOf("recorded", "authored", "imported")) { "步骤证据种类无效。" }
+        if (origin is StepOrigin.ImportedImage) require(evidenceKind == "authored" &&
+            asset.width == origin.source.metadata.outputWidth && asset.height == origin.source.metadata.outputHeight)
         if (origin is StepOrigin.Image) require(origin.base.stepId == id &&
             origin.base.width == asset.width && origin.base.height == asset.height) { "安全图片步骤与底图身份或尺寸不一致。" }
     }
@@ -84,7 +92,7 @@ data class ProjectStep(
     val sourceId: String? get() = source?.sourceId
     val frameTimeUs: Long? get() = videoOrigin?.frameTimeUs
     val timePrecisionUs: Long? get() = videoOrigin?.timePrecisionUs
-    val originLabel: String get() = source?.displayName ?: "已保存安全画面"
+    val originLabel: String get() = source?.displayName ?: if (evidenceKind == "authored") "截图" else "已保存安全画面"
     fun safeImageBinding(project: ProjectSummary) = SafeImageBinding(project.id, id, project.revision,
         asset.id, asset.sha256, asset.width, asset.height)
 }
@@ -234,6 +242,7 @@ object ProjectLimits {
     const val MAX_TOTAL_TRANSITION_US = 60_000_000L
     const val MAX_REGIONS = 80
     const val MAX_REGIONS_PER_STEP = 12
+    const val MAX_SCREENSHOTS = 20
     const val MAX_STEPS = 40
     const val MAX_EDGES = 80
     const val MAX_HOTSPOTS_PER_STEP = 6
