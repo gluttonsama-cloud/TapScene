@@ -11,6 +11,8 @@ import com.tapscene.data.ProjectStore
 import com.tapscene.data.ProjectSnapshot
 import com.tapscene.data.CandidateOcrStore
 import com.tapscene.data.ReviewedStepInput
+import com.tapscene.data.SafeImageBinding
+import com.tapscene.data.StepOrigin
 import com.tapscene.data.SourceDraft
 import com.tapscene.data.WorkspaceStore
 import com.tapscene.media.DecodedFrame
@@ -46,14 +48,24 @@ data class StepImageCorrection(
     val title: String,
     val regionCount: Int,
     val transitionCount: Int,
+    /** The current formal PNG at session entry, never this step's previous image provenance. */
+    val safeImageBase: SafeImageBinding? = null,
 )
 
 class StepCorrectionException(message: String) : Exception(message)
+
+/** Only this round's masks are editable. All earlier masks are already pixels in [bitmap]. */
+data class SafeImageCorrectionDraft(
+    val binding: SafeImageBinding,
+    val bitmap: Bitmap? = null,
+    val masks: List<OpaqueMask> = emptyList(),
+)
 
 data class WorkspaceUiState(
     val drafts: List<SourceDraft> = emptyList(),
     val correction: StepImageCorrection? = null,
     val correctionDraft: SourceDraft? = null,
+    val safeImageDraft: SafeImageCorrectionDraft? = null,
     val completedCorrectionId: String? = null,
     val selectedId: String? = null,
     val frame: DecodedFrame? = null,
@@ -71,6 +83,16 @@ data class WorkspaceUiState(
 ) {
     val selected: SourceDraft? get() = if (correction != null) correctionDraft
         else drafts.firstOrNull { it.source.sourceId == selectedId }
+
+    /** Shared route/workspace gate. Displaying the candidate still requires explicit confirmation. */
+    fun canReviewCorrection(session: StepImageCorrection, digest: String): Boolean {
+        if (busy || unsavedEdits || correction != session || candidate?.mimeType != "image/png" ||
+            candidate.sha256 != digest || candidateImage?.isRecycled != false) return false
+        val image = safeImageDraft
+        return if (image != null) image.binding == session.safeImageBase && image.bitmap?.isRecycled == false &&
+            image.masks.isNotEmpty() && correctionDraft == null && frame == null
+        else correctionDraft != null && frame?.bitmap?.isRecycled == false && frameReviewId == session.sessionId
+    }
 }
 
 class MediaWorkspace(application: Application) : AndroidViewModel(application) {
@@ -120,17 +142,25 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
                 if (from.nextAction?.let { it.transition != null && (from.id == stepId || it.targetStepId == stepId) } == true) 1 else 0
         }
         invalidateCandidate()
+        val video = step.videoOrigin
         mutableState.update { it.copy(correction = StepImageCorrection(project.project.id, step.id,
-            project.project.revision, UUID.randomUUID().toString(), step.title, step.regions.size, transitionCount),
-            correctionDraft = SourceDraft(step.source, step.frameTimeUs, step.masks.toList()),
+            project.project.revision, UUID.randomUUID().toString(), step.title, step.regions.size, transitionCount,
+            step.safeImageBinding(project.project)),
+            correctionDraft = video?.let { SourceDraft(it.source, it.frameTimeUs, step.masks.toList()) },
+            safeImageDraft = null,
             completedCorrectionId = null, frame = null, frameReviewId = null, message = null) }
-        retryStepCorrection()
+        if (video != null) retryStepCorrection()
         return true
     }
 
     fun retryStepCorrection() {
         val snapshot = state.value
         val correction = snapshot.correction ?: return
+        snapshot.safeImageDraft?.let { draft ->
+            // A live validated base needs no reload; failure retries must not capture old pixels.
+            if (draft.bitmap?.isRecycled != false) loadSafeImage(correction, draft.copy(bitmap = null))
+            return
+        }
         val draft = snapshot.correctionDraft ?: return
         execute("读取步骤原片") {
             verifyCorrection(correction)
@@ -138,23 +168,58 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Explicit opt-in: the safety-checked saved PNG becomes an irreversible pixel base. */
+    fun useSafeImageBase() {
+        val snapshot = state.value
+        if (snapshot.busy || savePickerPending) return
+        val correction = snapshot.correction ?: return
+        val binding = correction.safeImageBase ?: return
+        if (snapshot.safeImageDraft != null) return
+        loadSafeImage(correction, SafeImageCorrectionDraft(binding))
+    }
+
+    private fun loadSafeImage(correction: StepImageCorrection, draft: SafeImageCorrectionDraft) {
+        execute("读取并核对安全画面") {
+            invalidateCandidate()
+            releaseSafeImage()
+            // Clear every prior editable source before any suspension, including failed retries.
+            mutableState.update { it.copy(correctionDraft = null, safeImageDraft = draft.copy(bitmap = null),
+                frame = null, frameReviewId = null) }
+            verifyCorrection(correction)
+            check(draft.binding == correction.safeImageBase)
+            var loaded: Bitmap? = null
+            try {
+                withContext(Dispatchers.IO) { loaded = projectStore.readSafeImageBase(draft.binding) }
+                check(state.value.correction == correction)
+                mutableState.update { it.copy(safeImageDraft = draft.copy(bitmap = checkNotNull(loaded))) }
+            } catch (cancelled: CancellationException) {
+                loaded?.recycle()
+                throw cancelled
+            } catch (_: Exception) {
+                loaded?.recycle()
+                throw StepCorrectionException("安全画面缺失、已改变或校验未通过。无法生成新图，请返回后重新打开或重试；原步骤未替换。")
+            }
+        }
+    }
+
     fun selectCorrectionSource(sourceId: String) {
         val snapshot = state.value
         val correction = snapshot.correction ?: return
-        val draft = snapshot.correctionDraft ?: return
+        val draft = snapshot.correctionDraft
         val source = snapshot.drafts.firstOrNull { it.source.sourceId == sourceId }?.source ?: return
-        if (source == draft.source) return
+        if (source == draft?.source) return
         execute("更换取帧素材") {
             verifyCorrection(correction)
-            // Keep this step's masks, never another source's shared workbench masks.
-            decodeCorrection(correction, SourceDraft(source, 0, draft.masks.toList()), 0)
+            // Image masks belong to already-burned safe pixels, never to an unrelated video.
+            decodeCorrection(correction, SourceDraft(source, 0, draft?.masks.orEmpty().toList()), 0)
         }
     }
 
     fun closeStepCorrection(): Boolean {
         if (state.value.busy || savePickerPending) return false
         invalidateCandidate()
-        mutableState.update { it.copy(correction = null, correctionDraft = null, completedCorrectionId = null,
+        releaseSafeImage()
+        mutableState.update { it.copy(correction = null, correctionDraft = null, safeImageDraft = null, completedCorrectionId = null,
             frame = null, frameReviewId = null, message = null) }
         return true
     }
@@ -168,13 +233,14 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
 
     private suspend fun decodeCorrection(correction: StepImageCorrection, draft: SourceDraft, timeUs: Long) {
         invalidateCandidate()
-        mutableState.update { it.copy(correctionDraft = draft, frame = null, frameReviewId = null) }
+        releaseSafeImage()
+        mutableState.update { it.copy(correctionDraft = draft, safeImageDraft = null, frame = null, frameReviewId = null) }
         val exists = withContext(Dispatchers.IO) {
             val file = File(app.noBackupFilesDir, draft.source.privateRelativePath)
             draft.source.privateRelativePath == "sources/${draft.source.sourceId}.mp4" &&
                 file.canonicalFile == file.absoluteFile && file.isFile
         }
-        if (!exists) throw StepCorrectionException("本机原片已缺失。已保存画面仍可查看，暂不能重新取帧或恢复被遮挡的像素。")
+        if (!exists) throw StepCorrectionException("本机原片已缺失。可在安全画面上追加遮挡；无法恢复已遮挡的像素。")
         val decoded = decoder.decode(draft.source, timeUs)
         check(state.value.correction == correction)
         mutableState.update { it.copy(correctionDraft = draft.copy(frameTimeUs = decoded.presentationTimeUs),
@@ -188,10 +254,16 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
         val source = snapshot.selected
         val frame = snapshot.frame
         val correction = snapshot.correction
+        val image = snapshot.safeImageDraft
+        val validImage = correction != null && image?.bitmap?.isRecycled == false &&
+            image.binding == correction.safeImageBase && image.masks.isNotEmpty() && source == null && frame == null
+        val validVideo = image == null && source != null && frame != null &&
+            (correction == null || snapshot.frameReviewId == correction.sessionId)
         if (snapshot.busy || savePickerPending || snapshot.unsavedEdits ||
-            candidate == null || candidate.mimeType != "image/png" || source == null || frame == null ||
+            candidate == null || candidate.mimeType != "image/png" || (!validImage && !validVideo) ||
             snapshot.reviewedDigest != candidate.sha256 ||
-            (correction != null && snapshot.frameReviewId != correction.sessionId)
+            snapshot.candidateImage?.isRecycled != false ||
+            (correction != null && !snapshot.canReviewCorrection(correction, candidate.sha256))
         ) {
             message("请先生成并复核实际图片，再保存为步骤")
             return
@@ -199,8 +271,14 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
         execute(if (correction == null) "保存为项目步骤" else "替换步骤画面") {
             check(state.value.candidate?.sha256 == candidate.sha256 &&
                 state.value.reviewedDigest == candidate.sha256) { "复核已变化" }
-            val input = ReviewedStepInput(candidate.file, candidate.sha256, candidate.width, candidate.height,
-                source.source, frame.presentationTimeUs, frame.timePrecisionUs, source.masks.toList())
+            val input = if (validImage) {
+                ReviewedStepInput(candidate.file, candidate.sha256, candidate.width, candidate.height,
+                    origin = StepOrigin.Image(requireNotNull(image).binding), masks = image.masks.toList())
+            } else {
+                ReviewedStepInput(candidate.file, candidate.sha256, candidate.width, candidate.height,
+                    requireNotNull(source).source, requireNotNull(frame).presentationTimeUs,
+                    frame.timePrecisionUs, source.masks.toList())
+            }
             try {
                 commit(input)
             } finally {
@@ -319,18 +397,33 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
     }
 
     fun addMask(mask: OpaqueMask) {
+        state.value.safeImageDraft?.let { draft ->
+            if (draft.bitmap?.isRecycled != false || draft.masks.size >= 20) return
+            updateMasks(draft.masks + mask)
+            return
+        }
         val selected = state.value.selected ?: return
         if (state.value.frame == null || selected.masks.size >= 20) return
         updateMasks(selected.masks + mask)
     }
 
     fun undoMask() {
+        state.value.safeImageDraft?.let { draft ->
+            if (draft.bitmap?.isRecycled == false) updateMasks(draft.masks.dropLast(1))
+            return
+        }
         val selected = state.value.selected ?: return
         updateMasks(selected.masks.dropLast(1))
     }
 
     private fun updateMasks(masks: List<OpaqueMask>) {
         if (state.value.busy || savePickerPending) return
+        state.value.safeImageDraft?.let { draft ->
+            if (state.value.correction == null) return
+            invalidateCandidate()
+            mutableState.update { it.copy(safeImageDraft = draft.copy(masks = masks.toList())) }
+            return
+        }
         val correctionDraft = state.value.correctionDraft
         if (state.value.correction != null && correctionDraft != null) {
             invalidateCandidate()
@@ -369,11 +462,18 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
     fun makeImage() {
         if (!requireSavedEdits()) return
         val snapshot = state.value
-        val frame = snapshot.frame ?: return
-        val selected = snapshot.selected ?: return
+        val image = snapshot.safeImageDraft
+        if (image != null && image.masks.isEmpty()) {
+            message("请先追加至少一处遮挡，再生成并复核。")
+            return
+        }
+        val bitmap = if (image != null) image.bitmap else snapshot.frame?.bitmap
+        if (bitmap == null || bitmap.isRecycled) return
+        val masks = image?.masks ?: snapshot.selected?.masks ?: return
         execute("生成遮挡图片") {
             invalidateCandidate()
-            val candidate = writer.writePng(frame.bitmap, selected.masks, outputDirectory(), ::onStage)
+            snapshot.correction?.let { verifyCorrection(it) }
+            val candidate = writer.writePng(bitmap, masks, outputDirectory(), ::onStage)
             val image = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(candidate.file.path) }
                 ?: error("无法重读生成的图片")
             mutableState.update { it.copy(candidate = candidate, candidateImage = image) }
@@ -603,6 +703,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         closed = true
         task?.cancel()
+        releaseSafeImage()
         cleanupScope.launch {
             operationLock.withLock {
                 runCatching { outputDirectory().listFiles()?.forEach(::removeCandidate); outputDirectory().delete() }
@@ -610,6 +711,11 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
             }
         }
         super.onCleared()
+    }
+
+    /** Published pixels can still be referenced by Compose/render IO; GC owns their final release. */
+    private fun releaseSafeImage() {
+        mutableState.update { it.copy(safeImageDraft = null) }
     }
 
     private fun cleanInactiveSessions() {

@@ -26,6 +26,34 @@ data class StepAsset(
     val height: Int,
 )
 
+/** Private media origin; never serialized into the public scene evidence-kind field. */
+sealed interface StepOrigin {
+    data class VideoFrame(val source: ImportedSource, val frameTimeUs: Long,
+        val timePrecisionUs: Long) : StepOrigin {
+        init {
+            require(frameTimeUs >= 0 && frameTimeUs <= source.metadata.durationUs && timePrecisionUs > 0) {
+                "实际取帧时间或时间精度无效。"
+            }
+        }
+    }
+    /** Historical identity only. The superseded asset may be cleaned up; there is no file handle. */
+    data class Image(val base: SafeImageBinding) : StepOrigin
+}
+
+/** An edit lease on one exact current safe PNG, never an imported or historical readable source. */
+data class SafeImageBinding(val projectId: String, val stepId: String, val revision: Long,
+    val assetId: String, val sha256: String, val width: Int, val height: Int) {
+    init {
+        require(listOf(projectId, stepId, assetId).all { id ->
+            runCatching { java.util.UUID.fromString(id).toString() == id }.getOrDefault(false)
+        } && revision > 0 && sha256.matches(Regex("[0-9a-f]{64}")) && width > 0 && height > 0 &&
+            width.toLong() * height <= 12_000_000) { "安全底图绑定无效。" }
+    }
+    fun matches(project: ProjectSummary, step: ProjectStep): Boolean = project.id == projectId &&
+        project.revision == revision && step.id == stepId && step.asset.id == assetId &&
+        step.asset.sha256 == sha256 && step.asset.width == width && step.asset.height == height
+}
+
 data class ProjectStep(
     val id: String,
     val title: String,
@@ -33,16 +61,32 @@ data class ProjectStep(
     val sortOrder: Int,
     val isTerminal: Boolean,
     val asset: StepAsset,
-    val source: ImportedSource,
-    val frameTimeUs: Long,
-    val timePrecisionUs: Long,
+    val origin: StepOrigin,
     val masks: List<OpaqueMask>,
     val hotspots: List<ProjectHotspot>,
     val captureId: String,
     val nextAction: ProjectNextAction? = null,
     val regions: List<ProjectRegion> = emptyList(),
 ) {
-    val sourceId: String get() = source.sourceId
+    init {
+        if (origin is StepOrigin.Image) require(origin.base.stepId == id &&
+            origin.base.width == asset.width && origin.base.height == asset.height) { "安全图片步骤与底图身份或尺寸不一致。" }
+    }
+    constructor(id: String, title: String, description: String, sortOrder: Int, isTerminal: Boolean,
+        asset: StepAsset, source: ImportedSource, frameTimeUs: Long, timePrecisionUs: Long,
+        masks: List<OpaqueMask>, hotspots: List<ProjectHotspot>, captureId: String,
+        nextAction: ProjectNextAction? = null, regions: List<ProjectRegion> = emptyList()) :
+        this(id, title, description, sortOrder, isTerminal, asset,
+            StepOrigin.VideoFrame(source, frameTimeUs, timePrecisionUs), masks, hotspots, captureId, nextAction, regions)
+    val videoOrigin: StepOrigin.VideoFrame? get() = origin as? StepOrigin.VideoFrame
+    val imageOrigin: StepOrigin.Image? get() = origin as? StepOrigin.Image
+    val source: ImportedSource? get() = videoOrigin?.source
+    val sourceId: String? get() = source?.sourceId
+    val frameTimeUs: Long? get() = videoOrigin?.frameTimeUs
+    val timePrecisionUs: Long? get() = videoOrigin?.timePrecisionUs
+    val originLabel: String get() = source?.displayName ?: "已保存安全画面"
+    fun safeImageBinding(project: ProjectSummary) = SafeImageBinding(project.id, id, project.revision,
+        asset.id, asset.sha256, asset.width, asset.height)
 }
 
 /** Integer bounds in the actual reviewed base image. No inferred native components. */
@@ -143,13 +187,19 @@ data class ReviewedStepInput(
     val sha256: String,
     val width: Int,
     val height: Int,
-    val source: ImportedSource,
-    val frameTimeUs: Long,
-    val timePrecisionUs: Long,
+    val origin: StepOrigin,
     val masks: List<OpaqueMask>,
     /** Stable token for this particular reviewed candidate; retries cannot duplicate the step. */
     val captureId: String = file.name,
-)
+) {
+    constructor(file: File, sha256: String, width: Int, height: Int, source: ImportedSource,
+        frameTimeUs: Long, timePrecisionUs: Long, masks: List<OpaqueMask>, captureId: String = file.name) :
+        this(file, sha256, width, height, StepOrigin.VideoFrame(source, frameTimeUs, timePrecisionUs), masks, captureId)
+    val videoOrigin: StepOrigin.VideoFrame? get() = origin as? StepOrigin.VideoFrame
+    val source: ImportedSource? get() = videoOrigin?.source
+    val frameTimeUs: Long? get() = videoOrigin?.frameTimeUs
+    val timePrecisionUs: Long? get() = videoOrigin?.timePrecisionUs
+}
 
 /**
  * Self-links count once in totals, and in both incoming and outgoing counts. edgeCount includes

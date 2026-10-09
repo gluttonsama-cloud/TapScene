@@ -130,8 +130,7 @@ object StepReplacementChecks {
                 nextAction = step.nextAction?.let { action -> if (step.id == a || action.targetStepId == a) action.copy(transition = null) else action },
                 regions = if (step.id == a) step.regions.map { it.copy(asset = null, reviewedAt = null) } else step.regions,
             )
-            if (step.id == a) expected.copy(asset = changed.asset, source = replacement.source,
-                frameTimeUs = replacement.frameTimeUs, timePrecisionUs = replacement.timePrecisionUs,
+            if (step.id == a) expected.copy(asset = changed.asset, origin = replacement.origin,
                 masks = replacement.masks, captureId = replacement.captureId) else expected
         }) { "Replacement changed authored IDs, text, order, targets, terminal flags or unrelated outputs" }
         val staleRegion = changed.regions.single()
@@ -152,7 +151,7 @@ object StepReplacementChecks {
         val committedFiles = assetDigests(context)
         check(store.replaceReviewedStep(p, a, before.project.revision, replacement) == after)
         rejected { store.replaceReviewedStep(p, a, after.project.revision,
-            replacement.copy(frameTimeUs = replacement.frameTimeUs + 1_000)) }
+            replacement.copy(origin = checkNotNull(replacement.videoOrigin).let { it.copy(frameTimeUs = it.frameTimeUs + 1_000) })) }
         check(store.readProject(p) == after && assetDigests(context) == committedFiles)
         check(ViewerPackageCodec.sha256(input.file) == input.sha256 && ViewerPackageCodec.sha256(replacement.file) == replacement.sha256)
         status("PASS step replacement graph: stable step/action/hotspot IDs, text, order, start/terminal and targets; incoming/outgoing/self-loop clips and own crop invalidated; unrelated outputs retained; same-capture retry is idempotent")
@@ -196,7 +195,7 @@ object StepReplacementChecks {
         val actual = checkNotNull(ProjectStore(context).readProject(p))
         val terminal = actual.steps.single()
         check(actual.project.revision == before.project.revision + 1 && actual.project.startStepId == stepId)
-        check(terminal == before.steps.single().copy(asset = terminal.asset, frameTimeUs = replacement.frameTimeUs,
+        check(terminal == before.steps.single().copy(asset = terminal.asset, origin = replacement.origin,
             masks = replacement.masks, captureId = replacement.captureId))
         check(terminal.asset.sha256 == replacement.sha256 && terminal.isTerminal)
         check(store.replaceReviewedStep(p, stepId, before.project.revision, replacement) == actual)

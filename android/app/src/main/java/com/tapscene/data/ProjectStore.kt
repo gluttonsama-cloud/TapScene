@@ -195,6 +195,9 @@ class ProjectStore(context: Context) {
         }
         if (alreadySaved != null) return alreadySaved
         validateInput(frozen)
+        val imageBase = (frozen.origin as? StepOrigin.Image)?.base
+        require(imageBase == null || replacing && imageBase.projectId == projectId && imageBase.stepId == stepId &&
+            imageBase.revision == expectedRevision) { "安全画面只可追加遮挡并替换所绑定的当前步骤。" }
         val assetId = newId()
         val relativePath = assetPath(projectId, assetId)
         // Register before creating any owned file. A killed process therefore leaves an exact
@@ -239,6 +242,16 @@ class ProjectStore(context: Context) {
             check(byteLength > 0 && temporary.length() == byteLength) { "步骤 PNG 为空或复制不完整。" }
             check(hex(digest.digest()) == frozen.sha256.lowercase()) { "画面已改变，请重新生成并复核。" }
             SafeMediaWriterValidation.verifyPng(temporary, frozen.width, frozen.height, frozen.masks)
+            if (imageBase != null) {
+                // Retain only this operation's verified copy until commit. The historical ID is
+                // provenance, not a readable dependency after the superseded asset is cleaned.
+                val baseFile = access { db -> requireCurrentImageBase(db, imageBase) }
+                val baseCopy = File(operationDirectory, "base.png")
+                baseFile.copyTo(baseCopy)
+                check(sha256(baseCopy) == imageBase.sha256) { "安全底图已改变，请重新打开。" }
+                SafeMediaWriterValidation.verifyPngRedaction(temporary, baseCopy, frozen.width, frozen.height, frozen.masks)
+                check(baseCopy.delete()) { "安全底图暂存清理失败，请重试。" }
+            }
             // Verify the actual stored bytes again, rather than trusting candidate metadata.
             check(sha256(temporary) == frozen.sha256.lowercase()) { "步骤画面校验失败，请重新复核。" }
             owner.ensureActive()
@@ -255,14 +268,15 @@ class ProjectStore(context: Context) {
                         check(!replacing || current.project.revision == expectedRevision) { "草稿已改变，底图未替换。" }
                         require(replacing || current.steps.none { it.id == stepId }) { "这个步骤已经保存，请刷新后继续。" }
                         require(replacing || current.steps.size < ProjectLimits.MAX_STEPS) { "每个项目最多 40 个步骤。" }
-                        val existingSource = readSource(db, projectId, frozen.source.sourceId)
-                        check(existingSource == null || existingSource == frozen.source) {
-                            "素材来源记录已改变，请重新取帧。"
-                        }
-                        if (existingSource == null) {
-                            db.insertOrThrow("sources", null, ContentValues().apply {
-                                put("project_id", projectId); put("source_id", frozen.source.sourceId)
-                                put("source_json", sourceJson(frozen.source).toString())
+                        if (imageBase != null) requireCurrentImageBase(db, imageBase)
+                        frozen.videoOrigin?.source?.let { source ->
+                            val existingSource = readSource(db, projectId, source.sourceId)
+                            check(existingSource == null || existingSource == source) {
+                                "素材来源记录已改变，请重新取帧。"
+                            }
+                            if (existingSource == null) db.insertOrThrow("sources", null, ContentValues().apply {
+                                put("project_id", projectId); put("source_id", source.sourceId)
+                                put("source_json", sourceJson(source).toString())
                             })
                         }
                         val directory = projectAssetDirectory(projectId)
@@ -279,8 +293,8 @@ class ProjectStore(context: Context) {
                             put("project_id", projectId); put("state_id", stepId); put("capture_id", frozen.captureId)
                             put("sort_order", previous?.sortOrder ?: current.steps.size); put("title", cleanTitle)
                             put("description", cleanDescription); put("is_terminal", if (previous?.isTerminal == true) 1 else 0)
-                            put("source_id", frozen.source.sourceId); put("input_asset_id", assetId)
-                            put("frame_pts_us", frozen.frameTimeUs); put("time_precision_us", frozen.timePrecisionUs)
+                            put("input_asset_id", assetId)
+                            putOrigin(frozen.origin)
                             put("masks_json", masksJson(frozen.masks).toString())
                         }
                         if (previous == null) db.insertOrThrow("states", null, stateValues)
@@ -1070,7 +1084,7 @@ class ProjectStore(context: Context) {
         val steps = db.rawQuery("""
             SELECT s.*, a.relative_path, a.sha256, a.byte_length, a.width, a.height, src.source_json
             FROM states s JOIN local_assets a ON a.project_id=s.project_id AND a.asset_id=s.input_asset_id
-            JOIN sources src ON src.project_id=s.project_id AND src.source_id=s.source_id
+            LEFT JOIN sources src ON src.project_id=s.project_id AND src.source_id=s.source_id
             WHERE s.project_id=? ORDER BY s.sort_order, s.state_id
         """.trimIndent(), arrayOf(projectId)).use { cursor ->
             buildList {
@@ -1081,8 +1095,7 @@ class ProjectStore(context: Context) {
                         sortOrder = cursor.int("sort_order"), isTerminal = cursor.int("is_terminal") == 1,
                         asset = StepAsset(cursor.string("input_asset_id"), cursor.string("relative_path"),
                             cursor.string("sha256"), cursor.long("byte_length"), cursor.int("width"), cursor.int("height")),
-                        source = parseSource(JSONObject(cursor.string("source_json"))),
-                        frameTimeUs = cursor.long("frame_pts_us"), timePrecisionUs = cursor.long("time_precision_us"),
+                        origin = readOrigin(cursor),
                         masks = parseMasks(JSONArray(cursor.string("masks_json"))), hotspots = readHotspots(db, projectId, id),
                         captureId = cursor.string("capture_id"), nextAction = readNextAction(db, projectId, id),
                         regions = readRegions(db, projectId, id),
@@ -1303,6 +1316,9 @@ class ProjectStore(context: Context) {
             directory.canonicalFile == directory.absoluteFile &&
             temporary.canonicalFile == temporary.absoluteFile) { "步骤暂存路径不受支持。" }
         deleteImportFile(temporary)
+        val baseCopy = File(directory, "base.png")
+        check(baseCopy.canonicalFile == baseCopy.absoluteFile) { "安全底图暂存路径不受支持。" }
+        deleteImportFile(baseCopy)
         if (directory.exists()) {
             check(directory.isDirectory && directory.delete()) { "步骤暂存目录清理失败。" }
             syncDirectory(stagingRoot)
@@ -1381,9 +1397,12 @@ class ProjectStore(context: Context) {
     private fun hasMatchingCapture(snapshot: ProjectSnapshot, input: ReviewedStepInput): Boolean {
         val step = snapshot.steps.firstOrNull { it.captureId == input.captureId } ?: return false
         check(step.asset.sha256 == input.sha256.lowercase() && step.asset.width == input.width &&
-            step.asset.height == input.height && step.source == input.source && step.frameTimeUs == input.frameTimeUs &&
-            step.timePrecisionUs == input.timePrecisionUs && step.masks == input.masks) {
+            step.asset.height == input.height && step.origin == input.origin && step.masks == input.masks) {
             "此保存令牌对应的画面已改变，请重新生成并复核。"
+        }
+        val file = checkedAssetFile(snapshot.project.id, step.asset.privateRelativePath)
+        check(file.isFile && file.length() == step.asset.byteLength && sha256(file) == step.asset.sha256) {
+            "已保存画面缺失或改变，请重新生成并复核。"
         }
         return true
     }
@@ -1394,23 +1413,86 @@ class ProjectStore(context: Context) {
             "步骤画面尺寸无效或超过 1200 万像素。"
         }
         require(input.masks.size <= 20) { "每个步骤最多 20 块遮挡。" }
-        require(input.timePrecisionUs > 0 && input.frameTimeUs in 0..input.source.metadata.durationUs) {
-            "实际取帧时间或时间精度无效。"
+        val sourceFile = when (val origin = input.origin) {
+            is StepOrigin.VideoFrame -> {
+                val source = origin.source
+                require(origin.timePrecisionUs > 0 && origin.frameTimeUs in 0..source.metadata.durationUs) {
+                    "实际取帧时间或时间精度无效。"
+                }
+                validId(source.sourceId)
+                val file = File(root, source.privateRelativePath)
+                require(source.privateRelativePath == "sources/${source.sourceId}.mp4" &&
+                    file.canonicalFile == file.absoluteFile && file.isFile) { "本机原素材已缺失，请重新导入。" }
+                val metadata = source.metadata
+                require(metadata.byteLength > 0 && file.length() == metadata.byteLength && SHA.matches(metadata.sha256) &&
+                    metadata.width > 0 && metadata.height > 0 && metadata.durationUs > 0 &&
+                    metadata.rotationDeg in setOf(0, 90, 180, 270) &&
+                    metadata.pixelWidthHeightRatio.isFinite() && metadata.pixelWidthHeightRatio > 0f) { "原素材记录无效。" }
+                file
+            }
+            is StepOrigin.Image -> {
+                require(input.width == origin.base.width && input.height == origin.base.height && input.masks.isNotEmpty()) {
+                    "安全画面追加遮挡须保持底图尺寸并至少添加一块遮挡。"
+                }
+                access { db -> requireCurrentImageBase(db, origin.base) }
+            }
         }
-        validId(input.source.sourceId)
-        val sourceFile = File(root, input.source.privateRelativePath)
-        require(input.source.privateRelativePath == "sources/${input.source.sourceId}.mp4" &&
-            sourceFile.canonicalFile == sourceFile.absoluteFile && sourceFile.isFile) { "本机原素材已缺失，请重新导入。" }
-        val metadata = input.source.metadata
-        require(metadata.byteLength > 0 && sourceFile.length() == metadata.byteLength && SHA.matches(metadata.sha256) &&
-            metadata.width > 0 && metadata.height > 0 && metadata.durationUs > 0 &&
-            metadata.rotationDeg in setOf(0, 90, 180, 270) &&
-            metadata.pixelWidthHeightRatio.isFinite() && metadata.pixelWidthHeightRatio > 0f) { "原素材记录无效。" }
         val candidate = input.file.canonicalFile
         require(candidate.isFile && candidate.path.startsWith(root.path + File.separator) &&
             candidate != sourceFile.canonicalFile && candidate.length() in 1..MAX_PNG_BYTES) {
             "只能保存本机生成并已复核的 PNG 候选。"
         }
+    }
+
+    /** Caller owns this bitmap. Reading a latest safe base does not assert author review. */
+    suspend fun readSafeImageBase(binding: SafeImageBinding): Bitmap {
+        val file = access { db -> requireCurrentImageBase(db, binding) }
+        SafeMediaWriterValidation.verifyPng(file, binding.width, binding.height, emptyList())
+        val bitmap = BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply {
+            inPreferredConfig = Bitmap.Config.ARGB_8888; inScaled = false
+        }) ?: error("已保存安全画面无法读取。")
+        try {
+            check(bitmap.width == binding.width && bitmap.height == binding.height) { "安全底图尺寸已改变。" }
+            access { db -> requireCurrentImageBase(db, binding) }
+            currentCoroutineContext().ensureActive()
+            return bitmap
+        } catch (failure: Throwable) { bitmap.recycle(); throw failure }
+    }
+
+    private fun requireCurrentImageBase(db: SQLiteDatabase, binding: SafeImageBinding): File {
+        val project = requireSnapshot(db, binding.projectId)
+        val step = project.steps.singleOrNull { it.id == binding.stepId } ?: error("步骤已不存在。")
+        check(binding.matches(project.project, step)) { "安全底图或草稿已改变，请返回后重新打开。" }
+        val file = checkedAssetFile(binding.projectId, step.asset.privateRelativePath)
+        check(file.isFile && file.length() == step.asset.byteLength && sha256(file) == binding.sha256) {
+            "已保存安全画面缺失或改变，原步骤未替换。"
+        }
+        return file
+    }
+
+    private fun ContentValues.putOrigin(origin: StepOrigin) {
+        listOf("source_id", "frame_pts_us", "time_precision_us", "base_asset_id", "base_sha256",
+            "base_revision", "base_width", "base_height").forEach { putNull(it) }
+        when (origin) {
+            is StepOrigin.VideoFrame -> {
+                put("origin_kind", "videoFrame"); put("source_id", origin.source.sourceId)
+                put("frame_pts_us", origin.frameTimeUs); put("time_precision_us", origin.timePrecisionUs)
+            }
+            is StepOrigin.Image -> {
+                val base = origin.base
+                put("origin_kind", "image"); put("base_asset_id", base.assetId); put("base_sha256", base.sha256)
+                put("base_revision", base.revision); put("base_width", base.width); put("base_height", base.height)
+            }
+        }
+    }
+
+    private fun readOrigin(cursor: Cursor): StepOrigin = when (cursor.string("origin_kind")) {
+        "videoFrame" -> StepOrigin.VideoFrame(parseSource(JSONObject(cursor.string("source_json"))),
+            cursor.long("frame_pts_us"), cursor.long("time_precision_us"))
+        "image" -> StepOrigin.Image(SafeImageBinding(cursor.string("project_id"), cursor.string("state_id"),
+            cursor.long("base_revision"), cursor.string("base_asset_id"), cursor.string("base_sha256"),
+            cursor.int("base_width"), cursor.int("base_height")))
+        else -> error("步骤来源种类无效，请保留本机数据。")
     }
 
     private fun sourceJson(source: ImportedSource) = JSONObject().apply {
@@ -1438,8 +1520,18 @@ class ProjectStore(context: Context) {
         } }
     }
 
-    private class Database(context: Context, path: String) : SQLiteOpenHelper(context, path, null, 5) {
-        override fun onConfigure(db: SQLiteDatabase) { db.setForeignKeyConstraintsEnabled(true) }
+    internal class Database(context: Context, path: String) : SQLiteOpenHelper(context, path, null, 6) {
+        override fun onConfigure(db: SQLiteDatabase) {
+            // SQLiteOpenHelper calls this BEFORE its upgrade transaction. Changing a PRAGMA
+            // inside onUpgrade is ineffective and dropping states would cascade child rows.
+            db.setForeignKeyConstraintsEnabled(db.version !in 1..5)
+        }
+        override fun onOpen(db: SQLiteDatabase) {
+            // Runs after successful upgrade commit, but before the helper exposes the handle.
+            // Failure here rejects opening; migration validation itself must happen pre-commit.
+            db.setForeignKeyConstraintsEnabled(true)
+            check(foreignKeys(db) == 1) { "项目关系保护未能启用，请保留本机数据。" }
+        }
         override fun onCreate(db: SQLiteDatabase) {
             db.execSQL("""CREATE TABLE projects (
                 project_id TEXT PRIMARY KEY NOT NULL, title TEXT NOT NULL, goal TEXT NOT NULL,
@@ -1457,17 +1549,7 @@ class ProjectStore(context: Context) {
                 width INTEGER NOT NULL CHECK(width>0), height INTEGER NOT NULL CHECK(height>0),
                 UNIQUE(project_id,asset_id), FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE
             )""")
-            db.execSQL("""CREATE TABLE states (
-                project_id TEXT NOT NULL, state_id TEXT NOT NULL, capture_id TEXT NOT NULL,
-                sort_order INTEGER NOT NULL CHECK(sort_order>=0),
-                title TEXT NOT NULL, description TEXT NOT NULL, is_terminal INTEGER NOT NULL CHECK(is_terminal IN (0,1)),
-                source_id TEXT NOT NULL, input_asset_id TEXT NOT NULL, frame_pts_us INTEGER NOT NULL CHECK(frame_pts_us>=0),
-                time_precision_us INTEGER NOT NULL CHECK(time_precision_us>0), masks_json TEXT NOT NULL,
-                PRIMARY KEY(project_id,state_id), UNIQUE(project_id,input_asset_id), UNIQUE(project_id,capture_id),
-                FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE,
-                FOREIGN KEY(project_id,source_id) REFERENCES sources(project_id,source_id) DEFERRABLE INITIALLY DEFERRED,
-                FOREIGN KEY(project_id,input_asset_id) REFERENCES local_assets(project_id,asset_id) DEFERRABLE INITIALLY DEFERRED
-            )""")
+            createStates(db, "states")
             db.execSQL("""CREATE TABLE hotspots (
                 project_id TEXT NOT NULL, hotspot_id TEXT NOT NULL, state_id TEXT NOT NULL, label TEXT NOT NULL,
                 rect_left REAL NOT NULL CHECK(rect_left>=0 AND rect_left<1),
@@ -1566,14 +1648,110 @@ class ProjectStore(context: Context) {
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            check(oldVersion in 1..4 && newVersion == 5) { "项目数据库需要安全迁移；请保留现有本机数据。" }
-            // SQLiteOpenHelper commits both additive migrations and user_version together. Never
-            // rebuild old tables or drop pending image cleanup/import records during an upgrade.
+            check(oldVersion in 1..5 && newVersion == 6 && foreignKeys(db) == 0) {
+                "项目数据库需要安全迁移；请保留现有本机数据。"
+            }
             if (oldVersion < 2) createNextActions(db)
             if (oldVersion < 3) createTransitions(db)
             if (oldVersion < 4) createRegions(db)
             if (oldVersion < 5) createEditorDrafts(db)
+            migrateOrigins(db)
         }
+
+        private fun foreignKeys(db: SQLiteDatabase): Int = db.rawQuery("PRAGMA foreign_keys", null).use {
+            check(it.moveToFirst()); it.getInt(0)
+        }
+
+        private fun createStates(db: SQLiteDatabase, table: String) {
+            check(table == "states" || table == "states_v6")
+            db.execSQL(STATES_SQL.replace("CREATE TABLE states (", "CREATE TABLE $table ("))
+        }
+
+        private fun migrateOrigins(db: SQLiteDatabase) {
+            check(db.inTransaction() && foreignKeys(db) == 0) { "项目迁移保护未就绪。" }
+            // Do not silently lose user-installed schema objects on a table rebuild.
+            db.rawQuery("SELECT type,name,tbl_name FROM sqlite_master WHERE type IN ('index','trigger','view') AND sql IS NOT NULL", null).use { rows ->
+                while (rows.moveToNext()) {
+                    check(rows.getString(0) == "index" && (rows.getString(2) != "states" ||
+                        rows.getString(1) in setOf("states_order", "states_source"))) {
+                        "项目包含额外数据库对象，无法安全迁移；请保留本机数据。"
+                    }
+                }
+            }
+            val names = db.rawQuery("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name", null).use {
+                buildList { while (it.moveToNext()) add(it.getString(0)) }
+            }
+            val unchanged = names.filter { it != "states" }.associateWith { fingerprint(db, it) }
+            val states = fingerprint(db, "states", LEGACY_STATE_COLUMNS)
+            createStates(db, "states_v6")
+            db.execSQL("INSERT INTO states_v6 ($LEGACY_STATE_COLUMNS,origin_kind) SELECT $LEGACY_STATE_COLUMNS,'videoFrame' FROM states")
+            check(fingerprint(db, "states_v6", LEGACY_STATE_COLUMNS) == states) { "步骤迁移核对失败。" }
+            db.execSQL("DROP TABLE states")
+            db.execSQL("ALTER TABLE states_v6 RENAME TO states")
+            db.execSQL("CREATE INDEX states_order ON states(project_id,sort_order)")
+            db.execSQL("CREATE INDEX states_source ON states(source_id)")
+            check(fingerprint(db, "states", LEGACY_STATE_COLUMNS) == states &&
+                unchanged.all { (table, before) -> fingerprint(db, table) == before }) {
+                "项目关系迁移核对失败，原数据将保留。"
+            }
+            db.rawQuery("PRAGMA foreign_key_check", null).use { check(!it.moveToFirst()) { "项目关系无效，原数据将保留。" } }
+            db.rawQuery("PRAGMA integrity_check", null).use { rows ->
+                check(rows.moveToFirst() && rows.getString(0) == "ok" && !rows.moveToNext()) { "项目完整性核对失败。" }
+            }
+        }
+
+        /** Stream all exact typed values, ordered by every projected column. Includes drafts,
+         * self-links, NULL targets, assets and journals; empty FK checks alone miss cascaded rows. */
+        private fun fingerprint(db: SQLiteDatabase, table: String, columns: String = "*"): String {
+            check(table.matches(Regex("[A-Za-z_][A-Za-z0-9_]*")))
+            val names = db.rawQuery("SELECT $columns FROM \"$table\" LIMIT 0", null).use { it.columnNames }
+            val order = names.joinToString(",") { "\"$it\"" }
+            val digest = MessageDigest.getInstance("SHA-256")
+            var count = 0L
+            db.rawQuery("SELECT $columns FROM \"$table\" ORDER BY $order", null).use { rows ->
+                while (rows.moveToNext()) {
+                    count++
+                    for (index in 0 until rows.columnCount) {
+                        val type = rows.getType(index)
+                        digest.update(type.toByte())
+                        val bytes = when (type) {
+                            Cursor.FIELD_TYPE_NULL -> byteArrayOf()
+                            Cursor.FIELD_TYPE_BLOB -> rows.getBlob(index)
+                            Cursor.FIELD_TYPE_FLOAT -> java.lang.Double.toHexString(rows.getDouble(index)).toByteArray(Charsets.UTF_8)
+                            else -> rows.getString(index).toByteArray(Charsets.UTF_8)
+                        }
+                        digest.update(java.nio.ByteBuffer.allocate(4).putInt(bytes.size).array())
+                        digest.update(bytes)
+                    }
+                }
+            }
+            return "$count:" + digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
+        }
+
+        companion object {
+            private const val LEGACY_STATE_COLUMNS = "project_id,state_id,capture_id,sort_order,title,description,is_terminal,source_id,input_asset_id,frame_pts_us,time_precision_us,masks_json"
+            internal val STATES_SQL = """CREATE TABLE states (
+                project_id TEXT NOT NULL, state_id TEXT NOT NULL, capture_id TEXT NOT NULL,
+                sort_order INTEGER NOT NULL CHECK(sort_order>=0),
+                title TEXT NOT NULL, description TEXT NOT NULL, is_terminal INTEGER NOT NULL CHECK(is_terminal IN (0,1)),
+                source_id TEXT, input_asset_id TEXT NOT NULL, frame_pts_us INTEGER CHECK(frame_pts_us>=0),
+                time_precision_us INTEGER CHECK(time_precision_us>0), masks_json TEXT NOT NULL,
+                origin_kind TEXT NOT NULL CHECK(origin_kind IN ('videoFrame','image')),
+                base_asset_id TEXT, base_sha256 TEXT, base_revision INTEGER, base_width INTEGER, base_height INTEGER,
+                CHECK((origin_kind='videoFrame' AND source_id IS NOT NULL AND frame_pts_us IS NOT NULL AND time_precision_us IS NOT NULL
+                    AND base_asset_id IS NULL AND base_sha256 IS NULL AND base_revision IS NULL AND base_width IS NULL AND base_height IS NULL)
+                    OR (origin_kind='image' AND source_id IS NULL AND frame_pts_us IS NULL AND time_precision_us IS NULL
+                    AND base_asset_id IS NOT NULL AND length(base_asset_id)>0 AND base_sha256 IS NOT NULL
+                    AND length(base_sha256)=64 AND base_sha256 NOT GLOB '*[^0-9a-f]*'
+                    AND base_revision IS NOT NULL AND base_revision>0 AND base_width IS NOT NULL AND base_width>0
+                    AND base_height IS NOT NULL AND base_height>0 AND base_width*base_height<=12000000)),
+                PRIMARY KEY(project_id,state_id), UNIQUE(project_id,input_asset_id), UNIQUE(project_id,capture_id),
+                FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE,
+                FOREIGN KEY(project_id,source_id) REFERENCES sources(project_id,source_id) DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(project_id,input_asset_id) REFERENCES local_assets(project_id,asset_id) DEFERRABLE INITIALLY DEFERRED
+            )"""
+        }
+
     }
 
     companion object {

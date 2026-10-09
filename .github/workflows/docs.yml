@@ -102,7 +102,9 @@ jobs:
           grep -qx TAPSCENE_FIXTURE_CHECKS_OK "$RUNNER_TEMP/fixture-checks.txt"
       - name: Check project graph schema invariants
         if: steps.scope.outputs.android == 'true'
-        run: python3 tools/project-checks/check-schema.py
+        run: |
+          python3 tools/project-checks/check-schema.py
+          python3 tools/project-checks/check-origin-migration.py
       - name: Prepare the pinned offline OCR sources and models
         if: steps.scope.outputs.android == 'true'
         run: |
@@ -283,7 +285,7 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 31, f"Expected thirty-one Compose review images, found {len(images)}"
+          assert len(images) == 33, f"Expected thirty-three Compose review images, found {len(images)}"
           lines = [
               "TapScene shell review: host-side Compose / Layoutlib renders.",
               "Not device screenshots; does not validate media decoding, touch, or system pickers.",
@@ -296,7 +298,7 @@ jobs:
               assert data[:8] == b"\x89PNG\r\n\x1a\n", image
               width, height = struct.unpack(">II", data[16:24])
               assert width > 0 and height > 0, image
-              if "EditorDraftRecovery" in str(image):
+              if "EditorDraftRecovery" in str(image) or "SafeImage" in str(image):
                   # A modal window can yield a valid but blank PNG in Layoutlib. Reject that
                   # before treating the two recovery form images as usable review evidence.
                   import zlib

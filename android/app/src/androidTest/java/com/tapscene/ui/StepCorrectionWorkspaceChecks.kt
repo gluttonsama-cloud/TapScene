@@ -171,12 +171,13 @@ object StepCorrectionWorkspaceChecks {
         status("PASS correction workspace save: actual reviewed PNG replaces B without appending; dirty A/B text/action labels survive; incoming/outgoing clips clear in every retained draft and both later saves succeed; missing source blocks regeneration/save but preserves the saved PNG")
         checkSourceRecovery(application, media, saved, b, shared)
         status("PASS correction source recovery: missing selected source clears frame/output/review; returning to original decodes with session masks intact; corrupt shared metadata does not block stored-step decode/output or get silently overwritten")
+        SafeImageCorrectionWorkspaceChecks.run(application, projects, media, saved, b, shared, status)
     }
 
     private suspend fun checkMissingSource(application: Application, media: MediaWorkspace, before: ProjectSnapshot,
         stepId: String, shared: List<SourceDraft>) {
         val step = before.steps.single { it.id == stepId }
-        val original = File(application.noBackupFilesDir, step.source.privateRelativePath)
+        val original = File(application.noBackupFilesDir, checkNotNull(step.videoOrigin).source.privateRelativePath)
         val parked = File(original.parentFile, "${original.name}.held")
         check(original.renameTo(parked))
         try {
@@ -199,7 +200,7 @@ object StepCorrectionWorkspaceChecks {
         stepId: String, shared: List<SourceDraft>) {
         val step = before.steps.single { it.id == stepId }
         val workbench = WorkspaceStore(application, before.project.id)
-        val missing = step.source.copy(sourceId = id()).let { it.copy(privateRelativePath = "sources/${it.sourceId}.mp4") }
+        val missing = checkNotNull(step.videoOrigin).source.copy(sourceId = id()).let { it.copy(privateRelativePath = "sources/${it.sourceId}.mp4") }
         val withMissing = shared + SourceDraft(missing, masks = listOf(OpaqueMask(.1f, .1f, .2f, .2f)))
         workbench.write(withMissing)
         withContext(Dispatchers.Main.immediate) { media.reload() }
@@ -216,7 +217,7 @@ object StepCorrectionWorkspaceChecks {
         check(media.state.value.selected?.source == missing && media.state.value.selected?.masks == step.masks)
         check(media.state.value.frame == null && media.state.value.frameReviewId == null)
         check(media.state.value.candidate == null && media.state.value.reviewedDigest == null)
-        withContext(Dispatchers.Main.immediate) { media.selectCorrectionSource(step.sourceId) }
+        withContext(Dispatchers.Main.immediate) { media.selectCorrectionSource(checkNotNull(step.videoOrigin).source.sourceId) }
         idle(media)
         check(media.state.value.frame != null && media.state.value.frameReviewId == session)
         check(media.state.value.selected?.source == step.source && media.state.value.selected?.masks == step.masks)

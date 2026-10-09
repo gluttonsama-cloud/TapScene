@@ -93,7 +93,7 @@ class TransitionWorkspace(application: Application) : AndroidViewModel(applicati
                 cleanInactiveSessions()
                 val project = store.readProject(projectId) ?: error("项目已移除")
                 val all = WorkspaceStore(app, projectId).read().map { it.source } +
-                    project.steps.map { it.source } + project.steps.flatMap { step ->
+                    project.steps.mapNotNull { it.videoOrigin?.source } + project.steps.flatMap { step ->
                         listOfNotNull(step.nextAction?.transition?.source) + step.hotspots.mapNotNull { it.transition?.source }
                     }
                 project to all.distinctBy { it.sourceId }
@@ -106,16 +106,17 @@ class TransitionWorkspace(application: Application) : AndroidViewModel(applicati
             val target = snapshot.steps.firstOrNull { it.id == targetId }
             check(target != null || hotspot?.endLabel != null) { "先为动作选择有效目标" }
             val existing = action?.transition ?: hotspot?.transition
-            val source = sources.firstOrNull { it.sourceId == (existing?.source?.sourceId ?: step.sourceId) }
+            val video = step.videoOrigin
+            val source = sources.firstOrNull { it.sourceId == (existing?.source?.sourceId ?: video?.source?.sourceId) }
                 ?: sources.firstOrNull()
-            val start = existing?.startUs ?: step.frameTimeUs.takeIf { source?.sourceId == step.sourceId } ?: 0L
+            val start = existing?.startUs ?: video?.frameTimeUs?.takeIf { source?.sourceId == video.source.sourceId } ?: 0L
             val duration = source?.metadata?.durationUs ?: 0L
             val boundedStart = start.coerceIn(0L, (duration - 1_000L).coerceAtLeast(0L))
             val end = existing?.endUs ?: (boundedStart + 3_000_000L).coerceAtMost(duration)
             mutableState.update { it.copy(revision = snapshot.project.revision, fromTitle = step.title,
                 targetTitle = target?.title ?: "结束 · ${hotspot?.endLabel}", sources = sources,
                 selectedSourceId = source?.sourceId, startUs = boundedStart, endUs = end,
-                masks = existing?.masks ?: step.masks.takeIf { source?.sourceId == step.sourceId }.orEmpty(),
+                masks = existing?.masks ?: step.masks.takeIf { video != null && source?.sourceId == video.source.sourceId }.orEmpty(),
                 existing = existing, otherDurationUs = transitionDuration(snapshot) - (existing?.asset?.durationUs ?: 0L)) }
             if (source != null) {
                 try { loadFrame(source, boundedStart) }
