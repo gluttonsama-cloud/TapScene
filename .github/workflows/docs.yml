@@ -26,6 +26,30 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Choose checks from changed paths
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import subprocess
+
+          # Include both paths of a rename, so moving source into docs cannot skip checks.
+          changed = subprocess.check_output([
+              "git", "diff", "--name-only", "--no-renames", "-z", os.environ["BASE_SHA"], "HEAD",
+          ]).decode("utf-8").split("\0")
+          def needs_android(path):
+              if path.startswith(("android/", "tools/media-checks/", "tools/project-checks/", ".github/workflows/")):
+                  return True
+              return not (path.startswith(("docs/", "tools/signing/")) or path.endswith(".md"))
+          android = any(needs_android(path) for path in changed if path)
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"android={str(android).lower()}\n")
+          print("Android/media checks required." if android else
+                "Android/media checks skipped: only documentation or signing tooling changed.")
+          PY
       - name: Check document encoding and changed whitespace
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -40,31 +64,48 @@ jobs:
                   Path(path).read_bytes().decode("utf-8")
           PY
           git diff --check "$BASE_SHA" HEAD
+      - name: Check signing tool syntax without executing it
+        run: |
+          python3 - <<'PY'
+          import ast
+          from pathlib import Path
+
+          for path in sorted(Path("tools/signing").glob("*.py")):
+              ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+              print(f"Syntax checked: {path}")
+          PY
       - name: Use the runner's JDK 17
+        if: steps.scope.outputs.android == 'true'
         run: |
           test -x "$JAVA_HOME_17_X64/bin/javac"
           echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
           echo "$JAVA_HOME_17_X64/bin" >> "$GITHUB_PATH"
       - name: Set up pinned Gradle
+        if: steps.scope.outputs.android == 'true'
         uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
         with:
           gradle-version: '8.13'
           cache-disabled: true
       - name: Install media inspection tools from Ubuntu
+        if: steps.scope.outputs.android == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes ffmpeg
           command -v ffprobe
           command -v ffmpeg
       - name: Check and materialize real phone-media fixtures
+        if: steps.scope.outputs.android == 'true'
         run: |
           python3 tools/media-checks/materialize-fixtures.py "$RUNNER_TEMP/media-fixtures" --verify-media 2>&1 | tee "$RUNNER_TEMP/fixture-checks.txt"
           grep -qx TAPSCENE_FIXTURE_CHECKS_OK "$RUNNER_TEMP/fixture-checks.txt"
       - name: Check project graph schema invariants
+        if: steps.scope.outputs.android == 'true'
         run: python3 tools/project-checks/check-schema.py
       - name: Build the side-by-side preview and run lint
+        if: steps.scope.outputs.android == 'true'
         run: gradle -p android --no-daemon -PcompatibilityPreview=true :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
       - name: Check merged privacy settings
+        if: steps.scope.outputs.android == 'true'
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -88,7 +129,7 @@ jobs:
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs \
             android/app/build/outputs/apk/debug/app-debug.apk | tee "$RUNNER_TEMP/apk-signature.txt"
       - name: Keep the debug APK and lint result
-        if: success()
+        if: success() && steps.scope.outputs.android == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: tapscene-debug
@@ -97,7 +138,52 @@ jobs:
             android/app/build/reports/lint-results-debug.html
           retention-days: 7
           if-no-files-found: error
+      - name: Render Compose shell previews on the host
+        if: steps.scope.outputs.android == 'true'
+        run: |
+          # Layoutlib renders real Compose UI without an emulator or KVM. These are
+          # review images, not device screenshots or a visual-regression pass.
+          gradle -p android --no-daemon -PcompatibilityPreview=true :app:updateDebugScreenshotTest
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import os
+          import struct
+
+          root = Path("android/app/src/screenshotTestDebug/reference")
+          images = sorted(root.rglob("*.png"))
+          assert len(images) == 4, f"Expected four Compose review images, found {len(images)}"
+          lines = [
+              "TapScene shell review: host-side Compose / Layoutlib renders.",
+              "Not device screenshots; does not validate media decoding, touch, or system pickers.",
+              "Sample data exists only in screenshotTest source files.",
+              f"CI commit: {os.environ['GITHUB_SHA']}",
+              "",
+          ]
+          for image in images:
+              data = image.read_bytes()
+              assert data[:8] == b"\x89PNG\r\n\x1a\n", image
+              width, height = struct.unpack(">II", data[16:24])
+              assert width > 0 and height > 0, image
+              lines.append(f"{image.relative_to(root)} | {width}x{height} | SHA256 {hashlib.sha256(data).hexdigest()}")
+          report = Path(os.environ["RUNNER_TEMP"]) / "compose-review.txt"
+          report.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          print(report.read_text(encoding="utf-8"))
+          PY
+      - name: Keep native Compose review images
+        if: always() && steps.scope.outputs.android == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tapscene-compose-review
+          path: |
+            android/app/src/screenshotTestDebug/reference/**/*.png
+            android/app/build/reports/screenshotTest/
+            android/app/build/test-results/screenshotTest/
+            ${{ runner.temp }}/compose-review.txt
+          retention-days: 7
+          if-no-files-found: warn
       - name: Check native media when an accelerated Android emulator is available
+        if: steps.scope.outputs.android == 'true'
         timeout-minutes: 15
         run: |
           # Never change KVM/security permissions. Software boot was too slow/unreliable on
@@ -135,7 +221,7 @@ jobs:
             | tee "$RUNNER_TEMP/media-instrumentation.txt"
           grep -q TAPSCENE_MEDIA_CHECKS_OK "$RUNNER_TEMP/media-instrumentation.txt"
       - name: Keep diagnostic results
-        if: always()
+        if: always() && steps.scope.outputs.android == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: media-check-results
