@@ -126,7 +126,7 @@ class SourceImporter(context: Context) {
         try {
             retriever.setDataSource(file.absolutePath)
             if (retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE) != "video/mp4") {
-                throw MediaImportException("只支持 MP4 容器的 H.264 SDR 录屏。")
+                throw MediaImportException("只支持 MP4 容器的 H.264 或 H.265/HEVC 8 位 SDR 录屏。")
             }
         } finally {
             retriever.release()
@@ -135,8 +135,9 @@ class SourceImporter(context: Context) {
         try {
             extractor.setDataSource(file.absolutePath)
             val format = videoTrack(extractor).second
-            if (format.getString(MediaFormat.KEY_MIME) != MediaFormat.MIMETYPE_VIDEO_AVC) {
-                throw MediaImportException("只支持 H.264 编码，请在外部转换后重新导入。")
+            val videoMime = format.getString(MediaFormat.KEY_MIME)
+            if (!VideoBitstreamParser.isSupportedMime(videoMime)) {
+                throw MediaImportException("不支持视频编码 ${videoMime ?: "未知"}。请选择 H.264 或 HEVC Main 8 位 SDR；也可关闭录屏的高效编码后重新录制。")
             }
             val width = visibleSize(format, horizontal = true)
             val height = visibleSize(format, horizontal = false)
@@ -187,9 +188,9 @@ class SourceImporter(context: Context) {
             val size = input.readInt().toLong() and 0xffffffffL
             val boxType = ByteArray(4).also(input::readFully).toString(Charsets.US_ASCII)
             val brand = ByteArray(4).also(input::readFully).toString(Charsets.US_ASCII)
-            val accepted = setOf("isom", "iso2", "iso3", "iso4", "iso5", "iso6", "iso7", "iso8", "iso9", "mp41", "mp42", "avc1", "M4V ")
+            val accepted = setOf("isom", "iso2", "iso3", "iso4", "iso5", "iso6", "iso7", "iso8", "iso9", "mp41", "mp42", "avc1", "hvc1", "hev1", "M4V ")
             if (boxType != "ftyp" || size < 16 || size > input.length() || brand !in accepted) {
-                throw MediaImportException("只支持标准 MP4 录屏，请在外部转换后重新导入。")
+                throw MediaImportException("只支持标准 MP4 录屏，请在系统录屏设置中选择 MP4 后重新录制。")
             }
         }
     }

@@ -15,7 +15,7 @@ jobs:
   gate:
     name: ci/gate
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Check out the proposed merge
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -46,8 +46,15 @@ jobs:
         with:
           gradle-version: '8.13'
           cache-disabled: true
-      - name: Build Android and run lint
-        run: gradle -p android --no-daemon :app:assembleDebug :app:lintDebug
+      - name: Check real encoded AVC and HEVC parameter sets
+        run: |
+          python3 tools/media-checks/materialize-fixtures.py "$RUNNER_TEMP/media-fixtures"
+          kotlinc -version
+          kotlinc android/app/src/main/java/com/tapscene/media/VideoBitstreamParser.kt \
+            tools/media-checks/BitstreamChecks.kt -include-runtime -d "$RUNNER_TEMP/bitstream-checks.jar"
+          java -jar "$RUNNER_TEMP/bitstream-checks.jar" "$RUNNER_TEMP/media-fixtures" | tee "$RUNNER_TEMP/bitstream-checks.txt"
+      - name: Build the side-by-side preview and run lint
+        run: gradle -p android --no-daemon -PcompatibilityPreview=true :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
       - name: Check merged privacy settings
         run: |
           python3 - <<'PY'
@@ -78,3 +85,34 @@ jobs:
             android/app/build/reports/lint-results-debug.html
           retention-days: 7
           if-no-files-found: error
+      - name: Check native media on an Android emulator
+        timeout-minutes: 15
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "emulator" "system-images;android-35;default;x86_64"
+          echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd --force \
+            --name tapscene-media --package "system-images;android-35;default;x86_64"
+          acceleration=off
+          if test -r /dev/kvm && test -w /dev/kvm; then acceleration=on; fi
+          "$ANDROID_HOME/emulator/emulator" -avd tapscene-media -no-window -noaudio -no-boot-anim \
+            -no-snapshot -wipe-data -gpu swiftshader_indirect -accel "$acceleration" -cores 2 -memory 2048 \
+            > "$RUNNER_TEMP/emulator.txt" 2>&1 &
+          emulator_pid=$!
+          trap 'kill "$emulator_pid" 2>/dev/null || true' EXIT
+          timeout 600 bash -c 'until adb shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; do sleep 5; done'
+          adb install android/app/build/outputs/apk/debug/app-debug.apk
+          adb install android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          timeout 300 adb shell am instrument -w \
+            com.tapscene.preview.hevc.test/com.tapscene.media.MediaCompatibilityInstrumentation \
+            | tee "$RUNNER_TEMP/media-instrumentation.txt"
+          grep -q TAPSCENE_MEDIA_CHECKS_OK "$RUNNER_TEMP/media-instrumentation.txt"
+      - name: Keep diagnostic results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: media-check-results
+          path: |
+            ${{ runner.temp }}/bitstream-checks.txt
+            ${{ runner.temp }}/media-instrumentation.txt
+            ${{ runner.temp }}/emulator.txt
+          retention-days: 7
+          if-no-files-found: ignore

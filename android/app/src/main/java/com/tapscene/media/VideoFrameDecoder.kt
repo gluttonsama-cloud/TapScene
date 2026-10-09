@@ -9,11 +9,11 @@ import android.graphics.Rect
 import android.media.Image
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.os.SystemClock
 import java.io.File
-import java.nio.ByteBuffer
 import java.util.ArrayDeque
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
@@ -74,7 +74,7 @@ class VideoFrameDecoder(context: Context) {
         } catch (known: FrameDecodeException) {
             throw known
         } catch (failure: Exception) {
-            throw FrameDecodeException("无法完整解码录屏，请重新录制或在外部转换后导入。", failure)
+            throw FrameDecodeException("无法完整解码录屏，请关闭录屏的高效编码和 HDR 后重新录制。", failure)
         }
     }
 
@@ -105,6 +105,7 @@ class VideoFrameDecoder(context: Context) {
         var codec: MediaCodec? = null
         var failure: Throwable? = null
         var selectedBitmap: Bitmap? = null
+        var activeMime: String? = null
         try {
             currentCoroutineContext().ensureActive()
             if (metadata.width <= 0 || metadata.height <= 0 || metadata.durationUs !in 1..MediaLimits.MAX_DURATION_US ||
@@ -113,11 +114,10 @@ class VideoFrameDecoder(context: Context) {
             ) throw FrameDecodeException("录屏尺寸、方向或时长超出支持范围。")
             extractor.setDataSource(file.absolutePath)
             val (track, inputFormat) = videoTrack(extractor)
-            if (inputFormat.getString(MediaFormat.KEY_MIME) != MediaFormat.MIMETYPE_VIDEO_AVC) {
-                throw FrameDecodeException("只支持 H.264 录屏。")
-            }
-            requireBoundedDimensions(inputFormat)
-            val parameterSets = requireEightBitAvc(inputFormat)
+            val parameterSets = requireSupportedVideoBitstream(inputFormat)
+            val inputMime = parameterSets.mime
+            activeMime = inputMime
+            requireBoundedDimensions(inputFormat, inputMime)
             rejectUnsupportedColour(inputFormat)
             if (visibleSize(inputFormat, true) != metadata.width ||
                 visibleSize(inputFormat, false) != metadata.height ||
@@ -133,10 +133,8 @@ class VideoFrameDecoder(context: Context) {
             inputFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
             // Rotation is applied exactly once after YUV conversion, not by the decoder.
             inputFormat.setInteger(MediaFormat.KEY_ROTATION, 0)
-            val decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            val decoder = createStartedDecoder(inputFormat, inputMime)
             codec = decoder
-            decoder.configure(inputFormat, null, null, 0)
-            decoder.start()
             val info = MediaCodec.BufferInfo()
             var inputEos = false
             var inputCount = 0
@@ -171,7 +169,11 @@ class VideoFrameDecoder(context: Context) {
                             ) throw FrameDecodeException("录屏时间戳、时长或帧数超出支持范围。")
                             val size = extractor.readSampleData(buffer, 0)
                             if (size <= 0 || size > buffer.capacity()) throw FrameDecodeException("录屏包含不完整的视频样本。")
-                            checkInBandParameterSets(buffer, size, parameterSets)
+                            try {
+                                VideoBitstreamParser.verifySample(buffer, size, parameterSets)
+                            } catch (error: VideoBitstreamException) {
+                                throw FrameDecodeException(error.message ?: "视频样本编码参数无效（$inputMime）。", error)
+                            }
                             decoder.queueInputBuffer(inputIndex, 0, size, pts, 0)
                             extractor.advance()
                         }
@@ -210,7 +212,7 @@ class VideoFrameDecoder(context: Context) {
                                 val outputFormat = decoder.getOutputFormat(outputIndex)
                                 val colour = verifyOutputFormat(outputFormat, inputFormat, metadata)
                                 val outputImage = decoder.getOutputImage(outputIndex)
-                                    ?: throw FrameDecodeException("此设备不能提供可检查的 YUV 画面。")
+                                    ?: throw FrameDecodeException(decoderUnavailableMessage(inputMime))
                                 outputImage.use { image ->
                                     checkImage(image, metadata)
                                     val currentLayout = Layout(image.width, image.height, Rect(image.cropRect), colour)
@@ -228,7 +230,7 @@ class VideoFrameDecoder(context: Context) {
                             }
                             if (eos) {
                                 if (frameCount == 0 || (targetUs == null && frameCount != inputCount)) {
-                                    throw FrameDecodeException("录屏没有完整解码，请重新录制或转换后导入。")
+                                    throw FrameDecodeException("录屏没有完整解码，请关闭高效编码和 HDR 后重新录制。")
                                 }
                                 if (targetUs == null && frameCount * 1_000_000L >
                                     60L * (metadata.durationUs + MediaLimits.TIMESTAMP_TOLERANCE_US)
@@ -249,9 +251,12 @@ class VideoFrameDecoder(context: Context) {
                 }
             }
         } catch (error: Throwable) {
-            failure = error
+            val reported = if (error is MediaCodec.CodecException) {
+                FrameDecodeException(decoderUnavailableMessage(activeMime ?: "未知视频编码"), error)
+            } else error
+            failure = reported
             selectedBitmap?.recycle()
-            throw error
+            throw reported
         } finally {
             // Release even when configure/start failed; cleanup must not replace cancellation.
             var cleanupFailure: Throwable? = null
@@ -269,7 +274,7 @@ class VideoFrameDecoder(context: Context) {
     }
 
     private fun verifyOutputFormat(output: MediaFormat, input: MediaFormat, metadata: SourceMetadata): Colour {
-        requireBoundedDimensions(output)
+        requireBoundedDimensions(output, input.getString(MediaFormat.KEY_MIME))
         rejectUnsupportedColour(output)
         if (visibleSize(output, true) != metadata.width || visibleSize(output, false) != metadata.height ||
             output.intOrZero(MediaFormat.KEY_ROTATION) != 0
@@ -279,13 +284,13 @@ class VideoFrameDecoder(context: Context) {
         if (colour.standard !in setOf(MediaFormat.COLOR_STANDARD_BT709, MediaFormat.COLOR_STANDARD_BT601_PAL, MediaFormat.COLOR_STANDARD_BT601_NTSC) ||
             colour.range !in setOf(MediaFormat.COLOR_RANGE_FULL, MediaFormat.COLOR_RANGE_LIMITED) ||
             colour.transfer != MediaFormat.COLOR_TRANSFER_SDR_VIDEO
-        ) throw FrameDecodeException("无法确认录屏为受支持的 SDR 色彩格式，请在外部转换后导入。")
+        ) throw FrameDecodeException("无法确认录屏为受支持的 SDR 色彩格式，请关闭 HDR 后重新录制。")
         return colour
     }
 
-    private fun requireBoundedDimensions(format: MediaFormat) {
-        // A tiny crop must not hide an enormous coded image. Permit macroblock padding only.
-        val maximum = MediaLimits.MAX_HEIGHT + 16
+    private fun requireBoundedDimensions(format: MediaFormat, mime: String?) {
+        // A tiny crop must not hide an enormous coded image. HEVC may pad to a 64-pixel CTU.
+        val maximum = MediaLimits.MAX_HEIGHT + if (mime == MediaFormat.MIMETYPE_VIDEO_HEVC) 64 else 16
         if (format.getInteger(MediaFormat.KEY_WIDTH) !in 1..maximum ||
             format.getInteger(MediaFormat.KEY_HEIGHT) !in 1..maximum
         ) throw FrameDecodeException("录屏编码尺寸超出支持范围。")
@@ -388,94 +393,91 @@ class VideoFrameDecoder(context: Context) {
         return ColorSpace.connect(source, ColorSpace.get(ColorSpace.Named.SRGB))
     }
 
-    /** Reject High-10/4:2:2/4:4:4 before a codec can silently down-convert to 8-bit output. */
-    private fun requireEightBitAvc(format: MediaFormat): List<ByteArray> {
-        val csd = format.getByteBuffer("csd-0")?.duplicate()
-            ?: throw FrameDecodeException("录屏缺少可验证的 H.264 参数。")
-        if (csd.remaining() !in 5..65_536) throw FrameDecodeException("H.264 参数无效。")
-        val parameterSets = ArrayList<ByteArray>()
-        val data = csd.slice()
-        forEachNal(data, data.remaining()) { start, end ->
-            if (data.get(start).toInt() and 0x1f == 7) {
-                val nal = ByteArray(end - start) { data.get(start + it) }
-                val payload = ArrayList<Byte>()
-                var zeros = 0
-                for (i in 1 until nal.size) {
-                    val value = nal[i].toInt() and 0xff
-                    if (zeros >= 2 && value == 3) { zeros = 0; continue }
-                    payload.add(nal[i])
-                    zeros = if (value == 0) zeros + 1 else 0
-                }
-                val bits = SpsBits(payload.toByteArray())
-                val profile = bits.read(8)
-                bits.read(8) // constraint flags
-                bits.read(8) // level_idc
-                bits.ue() // seq_parameter_set_id
-                if (profile !in setOf(66, 77, 88, 100)) throw FrameDecodeException("只支持 8 位 H.264 SDR 录屏。")
-                if (profile == 100 && (bits.ue() != 1 || bits.ue() != 0 || bits.ue() != 0)) {
-                    throw FrameDecodeException("只支持 8 位、4:2:0 的 H.264 录屏。")
-                }
-                parameterSets.add(nal)
+    /** Try only advertised byte-buffer/YUV420 decoders; no Surface or tone-mapping fallback. */
+    private suspend fun createStartedDecoder(format: MediaFormat, mime: String): MediaCodec {
+        var lastFailure: Exception? = null
+        val candidates = try {
+            MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { candidate ->
+                if (candidate.isEncoder || !candidate.supportedTypes.any { it.equals(mime, ignoreCase = true) }) false
+                else try {
+                    val capabilities = candidate.getCapabilitiesForType(mime)
+                    MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible in capabilities.colorFormats &&
+                        capabilities.isFormatSupported(format)
+                } catch (_: Exception) { false }
+            }
+        } catch (error: Exception) {
+            throw FrameDecodeException(decoderUnavailableMessage(mime), error)
+        }
+        for (candidate in candidates) {
+            currentCoroutineContext().ensureActive()
+            var decoder: MediaCodec? = null
+            try {
+                decoder = MediaCodec.createByCodecName(candidate.name)
+                decoder.configure(format, null, null, 0)
+                decoder.start()
+                return decoder
+            } catch (cancelled: CancellationException) {
+                try { decoder?.release() } catch (cleanup: Exception) { cancelled.addSuppressed(cleanup) }
+                throw cancelled
+            } catch (error: Exception) {
+                try { decoder?.release() } catch (cleanup: Exception) { error.addSuppressed(cleanup) }
+                lastFailure = error
+            } catch (fatal: Throwable) {
+                try { decoder?.release() } catch (cleanup: Throwable) { fatal.addSuppressed(cleanup) }
+                throw fatal
             }
         }
-        if (parameterSets.isEmpty()) throw FrameDecodeException("无法验证录屏的 H.264 编码参数。")
-        return parameterSets
+        throw FrameDecodeException(decoderUnavailableMessage(mime), lastFailure)
     }
 
-    private fun checkInBandParameterSets(buffer: ByteBuffer, size: Int, allowed: List<ByteArray>) {
-        // Android's MP4 extractor delivers AVC samples with Annex-B start codes. Inspect every
-        // replacement SPS before queueing it: a decoder can otherwise hide a High-10 change by
-        // converting it into the requested 8-bit YUV output, without changing frame dimensions.
-        forEachNal(buffer, size) { start, end ->
-            val type = buffer.get(start).toInt() and 0x1f
-            if (type == 7 && allowed.none { nal ->
-                    nal.size == end - start && nal.indices.all { buffer.get(start + it) == nal[it] }
-                }
-            ) throw FrameDecodeException("录屏中途改变了 H.264 编码参数，请重新录制固定格式的视频。")
-            if (type !in setOf(1, 5, 6, 7, 8, 9, 10, 11, 12)) {
-                throw FrameDecodeException("录屏包含暂不支持的 H.264 扩展。")
-            }
-        }
-    }
+    private fun decoderUnavailableMessage(mime: String): String =
+        "此设备无法以可检查的 8 位 YUV 画面解码 $mime。请关闭系统录屏的“高效编码/H.265”和 HDR，选择 H.264/兼容模式重新录制。"
+}
 
-    private inline fun forEachNal(buffer: ByteBuffer, size: Int, block: (Int, Int) -> Unit) {
-        var nalStart = -1
-        var zeros = 0
-        var found = false
-        for (i in 0 until size) {
-            val value = buffer.get(i).toInt() and 0xff
-            if (value == 1 && zeros >= 2) {
-                if (nalStart >= 0) {
-                    val end = i - zeros
-                    if (end <= nalStart) throw FrameDecodeException("H.264 视频样本不完整。")
-                    block(nalStart, end)
-                } else if (i != zeros) {
-                    throw FrameDecodeException("H.264 视频样本格式无效。")
-                }
-                nalStart = i + 1
-                found = true
-            }
-            zeros = if (value == 0) zeros + 1 else 0
-        }
-        val end = size - zeros
-        if (!found || nalStart < 0 || end <= nalStart) throw FrameDecodeException("H.264 视频样本格式无效。")
-        block(nalStart, end)
-    }
-
-    private class SpsBits(private val bytes: ByteArray) {
-        private var bit = 0
-        fun read(count: Int): Int {
-            if (count !in 0..30 || bit + count > bytes.size * 8) throw FrameDecodeException("H.264 参数已损坏。")
-            var value = 0
-            repeat(count) { value = (value shl 1) or ((bytes[bit / 8].toInt() ushr (7 - bit % 8)) and 1); bit++ }
-            return value
-        }
-        fun ue(): Int {
-            var zeros = 0
-            while (read(1) == 0) {
-                if (++zeros > 20) throw FrameDecodeException("H.264 参数超出支持范围。")
-            }
-            return ((1 shl zeros) - 1) + read(zeros)
+/** Shared by import, frame extraction and export input verification. Does not accept HDR by profile. */
+internal fun requireSupportedVideoBitstream(format: MediaFormat): VideoParameterSets {
+    val mime = format.getString(MediaFormat.KEY_MIME)
+        ?: throw FrameDecodeException("无法识别视频编码，请重新录制 H.264 SDR 视频。")
+    val csd = (0..2).mapNotNull { index ->
+        format.getByteBuffer("csd-$index")?.duplicate()?.let { buffer ->
+            if (buffer.remaining() !in 1..65_536) throw FrameDecodeException("视频编码参数无效（$mime）。")
+            ByteArray(buffer.remaining()).also { buffer.get(it) }
         }
     }
+    val configuration = try {
+        VideoBitstreamParser.validateConfiguration(mime, csd)
+    } catch (error: VideoBitstreamException) {
+        throw FrameDecodeException(error.message ?: "无法验证视频编码参数（$mime）。", error)
+    }
+    configuration.hevcSps.forEach { sps ->
+        if (sps.width != visibleSize(format, true) || sps.height != visibleSize(format, false)) {
+            throw FrameDecodeException("HEVC 编码尺寸与录屏显示尺寸不一致，请重新录制固定尺寸的视频。")
+        }
+        fun verifyColour(key: String, value: Int?) {
+            if (value == null) return
+            val actual = format.intOrZero(key)
+            if (actual != 0 && actual != value) throw FrameDecodeException("HEVC 码流与容器色彩信息不一致，请使用 SDR 重新录制。")
+            // This is explicit SPS evidence, not a guessed SDR default. Decoded output is checked too.
+            if (actual == 0) format.setInteger(key, value)
+        }
+        verifyColour(MediaFormat.KEY_COLOR_STANDARD, when (sps.colourPrimaries) {
+            1 -> MediaFormat.COLOR_STANDARD_BT709
+            5 -> MediaFormat.COLOR_STANDARD_BT601_PAL
+            6 -> MediaFormat.COLOR_STANDARD_BT601_NTSC
+            else -> null
+        })
+        verifyColour(MediaFormat.KEY_COLOR_TRANSFER, sps.transferCharacteristics?.let { MediaFormat.COLOR_TRANSFER_SDR_VIDEO })
+        verifyColour(MediaFormat.KEY_COLOR_RANGE, sps.fullRange?.let {
+            if (it) MediaFormat.COLOR_RANGE_FULL else MediaFormat.COLOR_RANGE_LIMITED
+        })
+    }
+    // Source evidence must be complete before configuring a codec. A decoder may invent default
+    // BT.601/BT.709/SDR tags for untagged input, which cannot establish the source's actual colour.
+    if (format.containsKey(MediaFormat.KEY_HDR_STATIC_INFO) || format.containsKey("hdr10-plus-info") ||
+        format.intOrZero(MediaFormat.KEY_COLOR_STANDARD) !in setOf(MediaFormat.COLOR_STANDARD_BT709,
+            MediaFormat.COLOR_STANDARD_BT601_PAL, MediaFormat.COLOR_STANDARD_BT601_NTSC) ||
+        format.intOrZero(MediaFormat.KEY_COLOR_RANGE) !in setOf(MediaFormat.COLOR_RANGE_FULL, MediaFormat.COLOR_RANGE_LIMITED) ||
+        format.intOrZero(MediaFormat.KEY_COLOR_TRANSFER) != MediaFormat.COLOR_TRANSFER_SDR_VIDEO
+    ) throw FrameDecodeException("无法从源文件确认 $mime 的完整 SDR 色彩信息，请关闭 HDR 并使用明确标记为 SDR 的录屏重新导入。")
+    return configuration
 }

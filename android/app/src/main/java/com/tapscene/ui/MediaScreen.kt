@@ -96,7 +96,7 @@ fun MediaScreen(workspace: MediaWorkspace) {
             ) {
                 Text("TapScene", style = MaterialTheme.typography.headlineMedium)
                 Text("素材与遮挡", style = MaterialTheme.typography.titleLarge)
-                Text("MP4 / H.264 / SDR 竖屏，单段不超过 3 分钟、200 MiB。原片只保存在本机。",
+                Text("MP4 / H.264 或 H.265 / 8 位 SDR 竖屏，单段不超过 3 分钟、200 MiB。原片只保存在本机。",
                     style = MaterialTheme.typography.bodyMedium)
                 Button(onClick = { import.launch(arrayOf("video/mp4")) }, enabled = !state.busy && !savePending && !state.loadFailed && !state.unsavedEdits,
                     modifier = Modifier.fillMaxWidth()) { Text("选择录屏") }

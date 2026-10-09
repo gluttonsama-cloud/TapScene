@@ -108,9 +108,9 @@ internal object SafeMediaWriterValidation {
         try {
             extractor.setDataSource(file.absolutePath)
             val format = videoTrack(extractor).second
-            check(format.getString(MediaFormat.KEY_MIME) == MediaFormat.MIMETYPE_VIDEO_AVC) {
-                "只支持本机 H.264 视频。"
-            }
+            // Apply the same input bit-depth / profile gate as import and frame decoding.
+            // HEVC input is allowed; the generated output below remains strictly AVC-only.
+            requireSupportedVideoBitstream(format)
             check(format.containsKey(MediaFormat.KEY_DURATION) &&
                 format.getLong(MediaFormat.KEY_DURATION) >= endUs
             ) { "裁剪区间超出实际视频时长。" }

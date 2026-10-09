@@ -1,0 +1,114 @@
+{
+  "avc-sdr.mp4": {
+    "sha256": "14fe3e4182883152356698dbd6945fda3834f51270845c186895caedba800e07",
+    "bytes": 32793,
+    "streams": [
+      {
+        "codec_name": "h264",
+        "profile": "Constrained Baseline",
+        "width": 160,
+        "height": 288,
+        "pix_fmt": "yuv420p",
+        "color_range": "tv",
+        "color_space": "bt709",
+        "color_transfer": "bt709",
+        "color_primaries": "bt709",
+        "nb_frames": "10"
+      }
+    ]
+  },
+  "avc-sdr.csd": {
+    "sha256": "31bd0c4a704ac3901ed55b1c465e0c30ef3bec379fd71f93c9a5bd37dddc0eac",
+    "bytes": 39
+  },
+  "hevc-10bit-sdr.mp4": {
+    "sha256": "f7dfd4c9dd38d0ecb2729d2d760b26560e832034949fdf475f30c66555ceb454",
+    "bytes": 26684,
+    "streams": [
+      {
+        "codec_name": "hevc",
+        "profile": "Main 10",
+        "width": 160,
+        "height": 288,
+        "pix_fmt": "yuv420p10le",
+        "color_range": "tv",
+        "color_space": "bt709",
+        "color_transfer": "bt709",
+        "color_primaries": "bt709",
+        "nb_frames": "10"
+      }
+    ]
+  },
+  "hevc-10bit-sdr.csd": {
+    "sha256": "37794eeb7b044b3e1919a5c007ae08453b55583514debd282331c61a9f91d001",
+    "bytes": 2421
+  },
+  "hevc-hdr.mp4": {
+    "sha256": "d9a256ffe6ec4721fa44b30aa8a541e161a00b75aef916b522d1c863ce076dc7",
+    "bytes": 27267,
+    "streams": [
+      {
+        "codec_name": "hevc",
+        "profile": "Main",
+        "width": 160,
+        "height": 288,
+        "pix_fmt": "yuv420p",
+        "color_range": "tv",
+        "color_space": "bt2020nc",
+        "color_transfer": "smpte2084",
+        "color_primaries": "bt2020",
+        "nb_frames": "10"
+      }
+    ]
+  },
+  "hevc-hdr.csd": {
+    "sha256": "a2ffbcf2fb85baef19c3b7d88f88634f32afd287703c75e67deb5dfee88c528f",
+    "bytes": 2431
+  },
+  "hevc-sdr.mp4": {
+    "sha256": "69cde5f331962190bad8e2d0e0f2b9d9675e3a683b968d41b442ae8765f1cb37",
+    "bytes": 37451,
+    "streams": [
+      {
+        "codec_name": "hevc",
+        "profile": "Main",
+        "width": 160,
+        "height": 288,
+        "pix_fmt": "yuv420p",
+        "color_range": "tv",
+        "color_space": "bt709",
+        "color_transfer": "bt709",
+        "color_primaries": "bt709",
+        "nb_frames": "10"
+      },
+      {
+        "codec_name": "aac",
+        "profile": "LC",
+        "nb_frames": "45"
+      }
+    ]
+  },
+  "hevc-sdr.csd": {
+    "sha256": "fd08d9b310cef89cac45043ea716831a3360b08150382b21b79625f4b96bb980",
+    "bytes": 2430
+  },
+  "hevc-unknown-colour.mp4": {
+    "sha256": "92ab03a608b51824b2e40d82db86e1f1efa64484bd82906cace774f07d9e00a5",
+    "bytes": 25992,
+    "streams": [
+      {
+        "codec_name": "hevc",
+        "profile": "Main",
+        "width": 160,
+        "height": 288,
+        "pix_fmt": "yuv420p",
+        "color_range": "tv",
+        "nb_frames": "10"
+      }
+    ]
+  },
+  "hevc-unknown-colour.csd": {
+    "sha256": "e272c12c94d5d7b6ecf68ae1da5faed9fe6c3444d12b4605f6c8d152e2850ed5",
+    "bytes": 2427
+  }
+}

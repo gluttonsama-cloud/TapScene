@@ -131,7 +131,8 @@ class SafeMediaWriter(context: Context) {
     }
 
     /**
-     * Re-encodes [startUs, endUs) of a local H.264/SDR MP4, never passthrough/remux trimming.
+     * Re-encodes [startUs, endUs) of a local supported 8-bit SDR AVC/HEVC MP4 to H.264,
+     * never passthrough/remux trimming.
      * Every selected frame receives the same fixed opaque masks; audio and other tracks are absent.
      * A mask-free request is still fully transcoded and still needs the author's complete review.
      */

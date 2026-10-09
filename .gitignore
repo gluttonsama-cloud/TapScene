@@ -5,3 +5,4 @@
 *.iml
 *.jks
 *.keystore
+android/app/src/androidTest/assets/*.mp4
