@@ -9,10 +9,19 @@ import com.tapscene.data.ProjectHotspot
 import com.tapscene.data.ProjectSnapshot
 import com.tapscene.data.ProjectStep
 import com.tapscene.data.ProjectSummary
+import com.tapscene.data.SourceDraft
 import com.tapscene.data.StepAsset
+import com.tapscene.media.CandidateAnalysisStatus
+import com.tapscene.media.CandidateDecision
+import com.tapscene.media.CandidateReason
+import com.tapscene.media.FrameCandidate
 import com.tapscene.media.ImportedSource
 import com.tapscene.media.OpaqueMask
 import com.tapscene.media.SourceMetadata
+import com.tapscene.recording.RecordingPhase
+import com.tapscene.recording.RecordingStopReason
+import com.tapscene.recording.RecordingUiState
+import com.tapscene.ui.CandidateWorkspaceState
 import com.tapscene.ui.StepEditDraft
 
 /** In-memory layout examples only. No store, decoder, file access, or production seed data. */
@@ -71,6 +80,42 @@ internal object ShellPreviewFixture {
         description = selectedStep.description,
         isTerminal = selectedStep.isTerminal,
         hotspots = selectedStep.hotspots,
+    )
+
+    val sources = listOf(SourceDraft(source))
+    val recording = RecordingUiState(
+        phase = RecordingPhase.Interrupted,
+        sessionId = "layout-sample-recording",
+        projectId = project.project.id,
+        sourceId = source.sourceId,
+        stopReason = RecordingStopReason.ProcessInterrupted,
+        error = "布局样例：已录内容尚未登记，可继续检查。",
+        canRetry = true,
+    )
+    val candidateState = CandidateWorkspaceState(
+        projectId = project.project.id,
+        sourceId = source.sourceId,
+        status = CandidateAnalysisStatus.COMPLETED,
+        completedSamples = 37,
+        totalSamples = 37,
+        uniqueFrames = 3,
+        candidates = List(3) { index ->
+            FrameCandidate(
+                id = "layout-sample-candidate-${index + 1}",
+                sourceId = source.sourceId,
+                actualTimeUs = index * 6_000_000L,
+                timePrecisionUs = 1_000L,
+                width = Width,
+                height = Height,
+                changeScore = if (index == 0) 0f else .25f,
+                reason = when (index) {
+                    0 -> CandidateReason.FIRST_FRAME
+                    1 -> CandidateReason.VISUAL_CHANGE
+                    else -> CandidateReason.LAST_FRAME
+                },
+                decision = if (index == 1) CandidateDecision.SUGGESTED else CandidateDecision.KEPT,
+            )
+        },
     )
 
     fun bitmap(index: Int): Bitmap {

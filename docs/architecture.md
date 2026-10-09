@@ -4,9 +4,13 @@
 
 本文定义待实现的数据、接口和模块；具体版本组合与兼容范围在实现时验证。
 
-当前 Android 壳层复用既有本地项目与媒体用例：顶层项目/演示库，项目工作区步骤/素材/检查，单步编辑器独立五模式；录制、候选、交付、账号、版本和观看器先提供真实空态与禁用执行，不伪造后端状态。现有项目/素材持久化与安全输出边界不因换壳改变。
+当前 Android 壳层复用既有本地项目与媒体用例：顶层项目/演示库，项目工作区步骤/素材/检查，单步编辑器独立五模式；录制与候选接入本机实现；交付、账号、版本和观看器仍提供真实空态与禁用执行，不伪造后端状态。现有项目/素材持久化与安全输出边界不因换壳改变。
 
-录制主线采用 MediaProjection 会话与画面变化/OCR 候选（待实现），授权仅在开始操作时请求。Accessibility 是可选增强：点击事件与控件 bounds 是动作证据，不能当作真实触点，节点 source 可空；精确触点捕获需单独真机试验。后续录制记录需区分会话/选中 App、事件来源与置信信息、时间、窗口/crop/rotation 映射，映射到最终画布后才能归一化热点；旧视频只提供画面证据。停止即停止采集，不保存密码或键盘文本，不绕过 FLAG_SECURE。此增量不注册录制或无障碍服务，也不新增系统权限。 官方约束参见 [MediaProjection 会话与尺寸变化](https://developer.android.com/media/grow/media-projection)、[Accessibility 点击事件](https://developer.android.com/reference/android/view/accessibility/AccessibilityEvent#TYPE_VIEW_CLICKED)、[受保护窗口](https://developer.android.com/reference/android/view/WindowManager.LayoutParams#FLAG_SECURE)。
+录制采用 MediaProjection + MediaRecorder 无声 H.264 Surface，前台服务在获取投影前启动；每会话只消费一次授权和一次 virtual display，不持久化授权令牌。停止先断开采集，原始文件封口、同步后写 journal，再按稳定 sourceId 校验和登记私有素材；登记持久化未确认时保留 sealed 副本，重试幂等，中断不自动重新采集。仅当前会话的独占临时文件可显式删除。Workspace 局部更新在共享锁内读改写，原子替换后同步目录；“可能已提交”失败不删除原片。
+
+API 32+ 利用系统等比 fit/居中输出固定编码画布，旋转和窗口变化可产生留边；API 34 记录内容尺寸回调及粗略 fit 区域，但时间不是媒体 PTS，不能用于触点映射。API 26–31 检测显示变化即结束本段。画面候选使用一个 Media3 Surface 会话，最多 361 次时间请求、30 个候选；32×32 特征比较并按实际帧 PTS 去重，毫秒精度。独立私有 SQLite 保存 source SHA、算法版本、检查点和人工选择；确认 PNG 保存为步骤后以稳定 captureId 对账，不把候选选择当复核。
+
+授权只在点击开始时请求；前台通知可停止，通知权限拒绝仍可回 App 停止。此增量新增 mediaProjection 前台服务及通知权限，没有音频、网络、广泛存储或无障碍权限。画面可能含可见密码/键盘输入，不能承诺自动排除；尊重 FLAG_SECURE。Accessibility、OCR、自动热点与精确触点仍未实现。官方约束参见 [MediaProjection 会话与尺寸变化](https://developer.android.com/media/grow/media-projection)、[前台服务类型](https://developer.android.com/develop/background-work/services/fgs/service-types#media-projection)、[受保护窗口](https://developer.android.com/reference/android/view/WindowManager.LayoutParams#FLAG_SECURE)。
 
 
 ```mermaid

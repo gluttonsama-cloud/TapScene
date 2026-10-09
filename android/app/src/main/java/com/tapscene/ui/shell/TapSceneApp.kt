@@ -18,15 +18,20 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tapscene.data.*
 import com.tapscene.ui.*
+import com.tapscene.media.CandidateAnalysisStatus
+import com.tapscene.recording.RecordingCoordinator
+import com.tapscene.recording.RecordingPhase
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /** The shell routes existing capabilities; unavailable services never manufacture project data. */
 @Composable
-fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace) {
+fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: CandidateWorkspace) {
     val state by projects.state.collectAsStateWithLifecycle()
     val mediaState by media.state.collectAsStateWithLifecycle()
+    val candidateState by candidates.state.collectAsStateWithLifecycle()
+    val recording by RecordingCoordinator.state.collectAsStateWithLifecycle()
     val context = LocalContext.current.applicationContext
     var library by rememberSaveable { mutableStateOf(false) }
     var tab by rememberSaveable { mutableStateOf(ProjectTab.STEPS) }
@@ -48,12 +53,78 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace) {
     var projectMore by rememberSaveable { mutableStateOf(false) }
     var transitionHotspot by rememberSaveable { mutableStateOf<String?>(null) }
     var retainedMedia by remember { mutableStateOf(false) }
+    var pendingCandidateProject by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingCandidateSource by rememberSaveable { mutableStateOf<String?>(null) }
+    var autoAnalyzeSource by rememberSaveable { mutableStateOf<String?>(null) }
+    var reviewQueue by rememberSaveable { mutableStateOf(arrayListOf<String>()) }
+    var reviewIndex by rememberSaveable { mutableStateOf(0) }
+    var preparedCandidate by remember { mutableStateOf<String?>(null) }
     val projectId = state.project?.project?.id
-    val unavailable = state.busy || state.loadFailed
+    val unavailable = state.busy || state.loadFailed || candidateState.busy
     LaunchedEffect(page, projectId, state.busy) {
         if (page == "transition" && projectId == null && !state.busy) pop()
     }
     val scopeReady = projectId != null && media.projectId == projectId && !retainedMedia
+    val openRecordedCandidates: (String, String, Boolean) -> Unit = { id, source, analyze ->
+        pendingCandidateProject = id
+        pendingCandidateSource = source
+        autoAnalyzeSource = source.takeIf { analyze }
+        if (projectId != id) projects.openProject(id)
+        else if (media.projectId == id && !mediaState.busy) media.reload()
+    }
+    LaunchedEffect(pendingCandidateProject, projectId, state.busy, scopeReady, mediaState.busy) {
+        val expectedProject = pendingCandidateProject
+        val expectedSource = pendingCandidateSource
+        if (expectedProject != null && !state.busy && projectId == expectedProject && scopeReady && !mediaState.busy) {
+            pendingCandidateProject = null
+            pendingCandidateSource = null
+            if (mediaState.drafts.any { it.source.sourceId == expectedSource }) {
+                media.selectSource(requireNotNull(expectedSource))
+                pages.clear(); pages.add("candidates")
+            } else { autoAnalyzeSource = null; projects.message("录屏尚未读入，请从项目素材重新打开。") }
+        } else if (expectedProject != null && !state.busy && projectId != expectedProject) {
+            pendingCandidateProject = null; pendingCandidateSource = null; autoAnalyzeSource = null
+        }
+    }
+    LaunchedEffect(projectId, scopeReady, mediaState.selectedId, page, mediaState.busy) {
+        if ((page == "candidates" || page == "candidate-review") && scopeReady && !mediaState.busy) {
+            val source = mediaState.selected?.source
+            if (source != null) candidates.activate(projectId, source)
+        } else if (projectId != candidateState.projectId && !candidateState.loading) candidates.activate(null, null)
+    }
+    LaunchedEffect(autoAnalyzeSource, candidateState.sourceId, candidateState.loading, candidateState.busy) {
+        if (autoAnalyzeSource != null && autoAnalyzeSource == candidateState.sourceId && !candidateState.loading && !candidateState.busy) {
+            autoAnalyzeSource = null
+            if (candidateState.status == CandidateAnalysisStatus.NOT_STARTED) candidates.analyze()
+        }
+    }
+    val reviewSelected: (List<String>) -> Unit = { ids ->
+        val eligible = candidateState.candidates.filter { it.id in ids && it.usedStepId == null }.sortedBy { it.actualTimeUs }
+        if (!unavailable && scopeReady && !mediaState.busy && eligible.isNotEmpty()) {
+            if (eligible.size > ProjectLimits.MAX_STEPS - (state.project?.steps?.size ?: 0)) projects.message("所选画面超过项目剩余步骤数量。")
+            else {
+                reviewQueue = ArrayList(eligible.map { it.id }); reviewIndex = 0; preparedCandidate = null
+                push("candidate-review")
+            }
+        }
+    }
+    val queuedCandidate = candidateState.candidates.firstOrNull { it.id == reviewQueue.getOrNull(reviewIndex) }
+    LaunchedEffect(page, reviewIndex, candidateState.loading, mediaState.busy, state.busy, scopeReady) {
+        if (page == "candidate-review" && !candidateState.loading && !mediaState.busy && !state.busy && scopeReady) {
+            if (reviewIndex >= reviewQueue.size) {
+                pop(); candidates.refresh(); projects.message("所选画面已处理，可以继续编辑步骤。")
+            } else if (queuedCandidate?.usedStepId != null) { reviewIndex++; preparedCandidate = null }
+            else if (queuedCandidate != null && preparedCandidate != queuedCandidate.id) {
+                preparedCandidate = queuedCandidate.id
+                media.prepareCandidateImage(queuedCandidate.sourceId, queuedCandidate.actualTimeUs)
+            }
+        }
+    }
+    LaunchedEffect(page, projectId, state.busy, pendingCandidateProject) {
+        if ((page == "candidate-review" || page == "candidates") && projectId == null && !state.busy && pendingCandidateProject == null) {
+            reviewQueue = arrayListOf(); pages.clear()
+        }
+    }
     val closeEditor: () -> Unit = {
         if (!state.busy) {
             if (state.stepDraft?.dirty == true) confirmLeave = true else projects.back()
@@ -118,7 +189,17 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace) {
     TapSceneTheme {
         Surface(Modifier.fillMaxSize(), color = ShellColors.Background) {
             Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
-                if (!retainedMedia && state.route != ProjectRoute.MEDIA) {
+                if (recording.isBusy && page != "record") Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(if (recording.phase == RecordingPhase.Recording) "录制中" else "录屏处理中", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = ShellColors.Accent)
+                    TextButton(onClick = { push("record") }) { Text("查看") }
+                    if (recording.phase == RecordingPhase.Recording || recording.phase == RecordingPhase.Starting) TextButton(onClick = { RecordingCoordinator.stop(context) }) { Text("停止") }
+                }
+                if (candidateState.busy && page != "candidates") Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("正在整理候选 ${candidateState.completedSamples}/${candidateState.totalSamples}", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
+                    TextButton(onClick = { push("candidates") }) { Text("查看") }
+                    TextButton(onClick = candidates::cancel) { Text("取消") }
+                }
+                if (!retainedMedia && state.route != ProjectRoute.MEDIA && page != "candidate-review") {
                     if (state.busy || (scopeReady && mediaState.busy)) {
                         LinearProgressIndicator(Modifier.fillMaxWidth())
                         Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -143,7 +224,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace) {
                     when {
                         retainedMedia -> MediaScreen(media, onBack = { retainedMedia = false; projects.reload() })
                         page != null -> when (page) {
-                            "record" -> RecordingSetupScreen(pop, requestImport)
+                            "record" -> RecordingCaptureRoute(projects, pop, requestImport, openRecordedCandidates)
                             "settings" -> {
                                 val storage by produceState<Pair<Int, Long>?>(null, state.projects, state.retainedMediaWorkspaces, mediaState.drafts) {
                                     value = withContext(Dispatchers.IO) {
@@ -165,9 +246,32 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace) {
                                 if (media.activateProject(id)) retainedMedia = true
                                 else projects.message(media.state.value.message ?: "请先完成当前素材处理。")
                             }
-                            "candidates" -> Column(Modifier.fillMaxSize()) {
-                                ShellTopBar("候选步骤", pop)
-                                CandidatesContent(if (scopeReady) mediaState.drafts else emptyList(), { pop(); tab = ProjectTab.SOURCES })
+                            "candidates" -> CandidateSelectionScreen(candidateState,
+                                if (scopeReady) mediaState.drafts else emptyList(), candidates,
+                                scopeReady && !mediaState.busy && !state.busy && !mediaState.loadFailed,
+                                ProjectLimits.MAX_STEPS - (state.project?.steps?.size ?: 0),
+                                { if (!candidateState.busy) media.selectSource(it) }, reviewSelected,
+                                { pop() }, requestImport)
+                            "candidate-review" -> {
+                                val item = queuedCandidate
+                                val targetProject = projectId
+                                if (item != null && scopeReady && targetProject != null) Column(Modifier.fillMaxSize()) {
+                                    if (!mediaState.busy && mediaState.candidate == null && preparedCandidate == item.id) {
+                                        TextButton(onClick = { media.prepareCandidateImage(item.sourceId, item.actualTimeUs) }) { Text("重试准备画面") }
+                                    }
+                                    Box(Modifier.weight(1f)) {
+                                        MediaScreen(media, onBack = { reviewQueue = arrayListOf(); preparedCandidate = null; pop(); candidates.refresh() },
+                                            headerTitle = "校正 ${reviewIndex + 1}/${reviewQueue.size}",
+                                            confirmLabel = if (reviewIndex == reviewQueue.lastIndex) "确认画面并完成" else "确认画面并下一张",
+                                            batchReview = true, onSkip = { media.invalidateCandidate(); reviewIndex++; preparedCandidate = null },
+                                            onReviewedImage = { input ->
+                                                check(input.source.sourceId == item.sourceId) { "候选来源已变化，请返回重新选择。" }
+                                                val stepId = projects.saveReviewedStep(targetProject, input.copy(captureId = "candidate-${item.id}"), openEditor = false)
+                                                candidates.markUsed(item.id, stepId)
+                                                reviewIndex++; preparedCandidate = null
+                                            })
+                                    }
+                                } else ScreenEmpty("候选尚未就绪", "已保存步骤仍在项目中。", "返回候选", { pop(); candidates.refresh() })
                             }
                             "review" -> ReleaseReviewScreen(pop)
                             "delivery" -> DeliveryOptionsScreen(pop, { push("review") }, { push("ai") }, { push("account") }, { push("versions") })
@@ -220,7 +324,11 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace) {
                                         if (scopeReady && !mediaState.busy && !mediaState.unsavedEdits) {
                                             media.selectSource(id); projects.openMedia()
                                         }
-                                    }, { push("candidates") })
+                                    }, { push("candidates") }, { id ->
+                                        if (scopeReady && !unavailable && !mediaState.busy && !mediaState.unsavedEdits) {
+                                            media.selectSource(id); autoAnalyzeSource = id; push("candidates")
+                                        }
+                                    })
                                 }
                                 ProjectTab.CHECKS -> DeliveryCheckScreen(state.project, state.issues, { tab = ProjectTab.STEPS },
                                     { issue -> issue.stepId?.let(projects::openStep) ?: run { tab = ProjectTab.STEPS } },
@@ -245,7 +353,11 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace) {
             } }
             deletingProject?.let { item -> ConfirmDelete("删除“${item.title}”？",
                 "项目、${item.stepCount} 个步骤、热点和项目图片将删除，无法撤销。原录屏与导出的文件保留；原录屏可在设置的本机保留素材中管理。", !state.busy,
-                { deletingProject = null }, { deletingProject = null; projects.deleteProject(item.id) }) }
+                { deletingProject = null }, { if (recording.projectId == item.id && (recording.isBusy || recording.canRetry)) {
+                    deletingProject = null; projects.message("请先停止或处理这个项目的未完成录制。")
+                } else if (candidateState.projectId == item.id && candidateState.busy) {
+                    deletingProject = null; projects.message("请先取消候选整理。")
+                } else { deletingProject = null; projects.deleteProject(item.id) } }) }
             deletingStep?.let { step -> ConfirmDelete("删除“${step.title}”？",
                 "步骤、图片及 ${projects.deletionHotspotCount(step.id)} 个关联热点将删除，包括未保存草稿中指向它的热点。原录屏保留。${if (state.project?.project?.startStepId == step.id) "删除后需要重新设置起点。" else ""}", !state.busy,
                 { deletingStep = null }, { deletingStep = null; projects.deleteStep(step.id) }) }

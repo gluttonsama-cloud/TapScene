@@ -110,7 +110,7 @@ fun ProjectHomeContent(
             item(key = "loading") { WorkspaceEmpty("正在读取本机项目", "读取完成后，项目会显示在这里。") }
         } else if (state.projects.isEmpty()) {
             item(key = "empty") {
-                WorkspaceEmpty("从一段操作开始", "录制尚未接入，可先导入录屏。")
+                WorkspaceEmpty("从一段操作开始", "录下一段操作，或导入已有录屏。")
             }
         } else if (visibleProjects.isEmpty()) {
             item(key = "no_matches") { WorkspaceEmpty("没有找到匹配项目", "换个关键词，或清除搜索查看全部项目。") }
@@ -381,6 +381,7 @@ fun ProjectSourcesContent(
     onImportVideo: () -> Unit,
     onOpenSource: (String) -> Unit,
     onOpenCandidates: () -> Unit,
+    onAnalyzeSource: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val enabled = !busy && !loadFailed
@@ -395,9 +396,9 @@ fun ProjectSourcesContent(
                 Text("从 TapScene 开始录制，再操作目标 App。录制结束后，在这里整理为可点击的演示。",
                     style = MaterialTheme.typography.bodyMedium)
                 Button(onClick = onRecord, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                    Text("录制准备")
+                    Text("开始录制")
                 }
-                Text("录制同步点击与自动整理尚未接入；准备页会说明当前能力。",
+                Text("按画面变化整理候选，点击与热点由你校正。",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
@@ -436,22 +437,23 @@ fun ProjectSourcesContent(
             }
         }
         items(drafts, key = { it.source.sourceId }) { draft ->
-            SourceDraftRow(draft = draft, enabled = enabled, onOpen = { onOpenSource(draft.source.sourceId) })
+            SourceDraftRow(draft = draft, enabled = enabled, onOpen = { onOpenSource(draft.source.sourceId) },
+                onAnalyze = { onAnalyzeSource(draft.source.sourceId) })
         }
         item(key = "candidates") {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 WorkspaceSectionTitle("整理与确认")
-                Text("自动整理会提出步骤与热点候选，画面和动作需要分别确认。当前尚未接入。",
+                Text("按画面变化整理候选；批量选择后，在同一校正页调帧、遮挡和确认。",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedButton(onClick = onOpenCandidates, enabled = !busy,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("查看候选确认页") }
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("整理候选步骤") }
             }
         }
     }
 }
 
 @Composable
-private fun SourceDraftRow(draft: SourceDraft, enabled: Boolean, onOpen: () -> Unit) {
+private fun SourceDraftRow(draft: SourceDraft, enabled: Boolean, onOpen: () -> Unit, onAnalyze: () -> Unit) {
     val source = draft.source
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -470,69 +472,10 @@ private fun SourceDraftRow(draft: SourceDraft, enabled: Boolean, onOpen: () -> U
             }
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("校正位置 ${formatSourceDuration(draft.frameTimeUs)} · ${draft.masks.size} 处遮挡",
-                Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            OutlinedButton(onClick = onAnalyze, enabled = enabled, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("整理候选") }
             TextButton(onClick = onOpen, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp)) { Text("手动校正") }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-    }
-}
-
-/** Page 03 has no analysis backend yet. Never materialize mock candidates or confirmation counts. */
-@Composable
-fun CandidatesContent(
-    sources: List<SourceDraft>,
-    onOpenSources: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    LazyColumn(
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(24.dp),
-    ) {
-        item(key = "candidate_sources") {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("来源", Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleMedium)
-                    TextButton(onClick = onOpenSources, modifier = Modifier.heightIn(min = 48.dp)) { Text("管理素材") }
-                }
-                if (sources.isEmpty()) {
-                    Text("尚未添加来源素材。", style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                } else {
-                    sources.forEach { draft ->
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(draft.source.displayName, style = MaterialTheme.typography.bodyMedium,
-                                maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            Text("${formatSourceDuration(draft.source.metadata.durationUs)} · ${formatSourceBytes(draft.source.metadata.byteLength)}",
-                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            }
-        }
-        item(key = "candidate_list") {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                WorkspaceSectionTitle("候选步骤")
-                WorkspaceEmpty("自动整理尚未接入", "接入后，这里将列出候选画面、时码、标题及热点。当前没有分析结果，不会自动加入步骤。")
-                OutlinedButton(onClick = {}, enabled = false, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                    Text("开始自动整理 · 尚未接入")
-                }
-            }
-        }
-        item(key = "candidate_confirmation") {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                WorkspaceSectionTitle("加入分镜前")
-                Text("画面确认：检查代表帧、时码和标题。\n动作确认：逐项核对热点位置与跳转目标。",
-                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Button(onClick = {}, enabled = false, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                    Text("加入已确认项")
-                }
-            }
-        }
     }
 }
 

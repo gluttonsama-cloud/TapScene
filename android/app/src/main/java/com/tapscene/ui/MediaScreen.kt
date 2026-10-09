@@ -88,6 +88,10 @@ private enum class ManualMediaMode(val label: String) {
 fun MediaScreen(
     workspace: MediaWorkspace,
     onBack: (() -> Unit)? = null,
+    headerTitle: String = "手动校正",
+    confirmLabel: String = "确认画面并加入步骤",
+    batchReview: Boolean = false,
+    onSkip: (() -> Unit)? = null,
     onReviewedImage: (suspend (ReviewedStepInput) -> Unit)? = null,
 ) {
     val state by workspace.state.collectAsStateWithLifecycle()
@@ -126,8 +130,10 @@ fun MediaScreen(
     LaunchedEffect(mode, state.candidate?.sha256) { scrollState.scrollTo(0) }
 
     Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
-        ShellTopBar(title = "手动校正", onBack = if (onBack != null) leave else null) {
-            Box {
+        ShellTopBar(title = headerTitle, onBack = if (onBack != null) leave else null) {
+            if (batchReview) {
+                if (onSkip != null) TextButton(onClick = onSkip, enabled = canEdit) { Text("稍后") }
+            } else Box {
                 TextButton(onClick = { sourceMenu = true }, enabled = idle) { Text("素材 ▾") }
                 DropdownMenu(expanded = sourceMenu, onDismissRequest = { sourceMenu = false }) {
                     state.drafts.forEachIndexed { index, draft ->
@@ -163,7 +169,7 @@ fun MediaScreen(
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Row(Modifier.fillMaxWidth()) {
-            ManualMediaMode.entries.forEach { item ->
+            ManualMediaMode.entries.filterNot { batchReview && it == ManualMediaMode.CLIP }.forEach { item ->
                 val available = when (item) {
                     ManualMediaMode.FRAME -> true
                     ManualMediaMode.MASK, ManualMediaMode.CLIP -> state.frame != null
@@ -211,6 +217,9 @@ fun MediaScreen(
                 val meta = selected.source.metadata
                 // Keep local time fields when moving between modes; they still invalidate output on edit.
                 var requestedSeconds by rememberSaveable { mutableStateOf(selected.frameTimeUs / 1_000_000f) }
+                LaunchedEffect(state.frame?.presentationTimeUs, batchReview) {
+                    if (batchReview) state.frame?.let { requestedSeconds = it.presentationTimeUs / 1_000_000f }
+                }
                 var start by rememberSaveable { mutableStateOf("0.000") }
                 var end by rememberSaveable { mutableStateOf(seconds(min(meta.durationUs, 3_000_000))) }
                 when (mode) {
@@ -225,9 +234,12 @@ fun MediaScreen(
                         Slider(value = requestedSeconds, onValueChange = { requestedSeconds = it },
                             valueRange = 0f..(meta.durationUs / 1_000_000f).coerceAtLeast(0.001f), enabled = canEdit,
                             modifier = Modifier.semantics { contentDescription = "录屏取帧时间" })
-                        OutlinedButton(onClick = { workspace.takeFrame((requestedSeconds * 1_000_000).toLong()) },
+                        OutlinedButton(onClick = {
+                            val time = (requestedSeconds * 1_000_000).toLong()
+                            if (batchReview) workspace.prepareCandidateImage(selected.source.sourceId, time) else workspace.takeFrame(time)
+                        },
                             enabled = canEdit, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("手动取这一帧") }
-                        if (state.frame != null) {
+                        if (state.frame != null && !batchReview) {
                             Text("没有敏感内容可直接继续；需要遮挡时切换到“遮挡”。",
                                 style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                             Button(onClick = workspace::makeImage, enabled = canEdit,
@@ -304,9 +316,10 @@ fun MediaScreen(
                                         workspace.saveReviewedImage(onReviewedImage)
                                     }
                                 }, enabled = canEdit && state.candidateImage != null,
-                                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("确认画面并加入步骤") }
+                                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(confirmLabel) }
                                 HorizontalDivider()
                             }
+                            if (!batchReview) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Checkbox(checked = state.reviewedDigest == candidate.sha256,
                                     onCheckedChange = { checked ->
@@ -335,6 +348,7 @@ fun MediaScreen(
                                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("保存到文件") }
                             Text("仅导出本次已复核的图片或短片，不包含原片。离线观看包尚未接入。",
                                 style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                            }
                         }
                     }
                 }

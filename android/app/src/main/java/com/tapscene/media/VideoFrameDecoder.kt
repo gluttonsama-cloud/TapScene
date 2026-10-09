@@ -71,6 +71,36 @@ class VideoFrameDecoder(context: Context) {
         }
     }
 
+    /**
+     * A bounded, sequential batch shares one Surface decoder and its release/cancellation gate.
+     * [onSample] only borrows Media3's bitmap until it returns: never retain or recycle it.
+     * Callbacks include duplicate returned PTS so completed requests remain honest progress;
+     * consumers must deduplicate by actual PTS, not by requested time or nominal frame rate.
+     */
+    internal suspend fun sampleFrames(
+        source: ImportedSource,
+        requestedTimesUs: List<Long>,
+        onSample: suspend (bitmap: Bitmap, actualTimeUs: Long, timePrecisionUs: Long) -> Unit,
+    ) {
+        require(requestedTimesUs.isNotEmpty() && requestedTimesUs.size <= 512) { "画面采样数量无效。" }
+        require(requestedTimesUs.all { it >= 0 } && requestedTimesUs.zipWithNext().all { (a, b) -> a < b }) {
+            "画面采样时间必须递增。"
+        }
+        val (file, info) = withContext(Dispatchers.IO) {
+            val file = resolve(source)
+            file to inspect(file, source.metadata)
+        }
+        withSurface(file, info) {
+            for (requested in requestedTimesUs) {
+                currentCoroutineContext().ensureActive()
+                val frame = frameAt(requested.coerceAtMost(info.metadata.durationUs - 1))
+                stage = "sample_features"
+                onSample(frame.bitmap, frame.presentationTimeMs * 1_000L, 1_000L)
+                currentCoroutineContext().ensureActive()
+            }
+        }
+    }
+
     /** Input preflight samples beginning/middle/end. It does not decode the whole video again. */
     internal suspend fun validate(
         file: File,
