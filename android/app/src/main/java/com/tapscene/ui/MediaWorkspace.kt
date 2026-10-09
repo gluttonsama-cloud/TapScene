@@ -73,6 +73,9 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
         reload()
     }
 
+    /** Read-only scope identity for routing; never exposes a source path. */
+    val projectId: String? get() = activeProjectId
+
     /** Separate source budgets/drafts per project; null retains the earlier media-only workspace. */
     fun activateProject(projectId: String?): Boolean {
         if (state.value.busy || savePickerPending || !requireSavedEdits()) return false
@@ -361,6 +364,8 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
     }
 
     fun cancel() { task?.cancel() }
+    fun clearMessage() { mutableState.update { it.copy(message = null) } }
+
     fun message(text: String) { mutableState.update { it.copy(message = text) } }
 
     private fun outputDirectory() = File(app.noBackupFilesDir, "candidates/$sessionId")

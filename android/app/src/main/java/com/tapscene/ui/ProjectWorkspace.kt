@@ -10,6 +10,7 @@ import com.tapscene.data.ProjectLimits
 import com.tapscene.data.ProjectSnapshot
 import com.tapscene.data.ProjectStep
 import com.tapscene.data.ProjectStore
+import com.tapscene.data.StepAsset
 import com.tapscene.data.ProjectSummary
 import com.tapscene.data.ReviewedStepInput
 import com.tapscene.data.RetainedMediaWorkspace
@@ -635,6 +636,39 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         mutableState.update { it.copy(bitmap = null) }
         val bitmap = decodeBitmap(project, step)
         mutableState.update { it.copy(bitmap = bitmap) }
+    }
+
+    /** Bounded thumbnail decoding shares this workspace's repository, never opens a raw source. */
+    suspend fun loadReviewedThumbnail(projectId: String, stepId: String, asset: StepAsset): Bitmap? = withContext(Dispatchers.IO) {
+        try {
+            require(asset.byteLength in 1..MAX_PNG_BYTES && asset.width > 0 && asset.height > 0 &&
+                asset.width.toLong() * asset.height <= MAX_PNG_PIXELS)
+            val file = store.resolveAsset(projectId, stepId)
+            require(file.length() == asset.byteLength)
+            file.inputStream().use { input ->
+                val digest = MessageDigest.getInstance("SHA-256")
+                val buffer = ByteArray(64 * 1024)
+                var count = 0L
+                while (true) {
+                    coroutineContext.ensureActive()
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    count += read
+                    require(count <= asset.byteLength)
+                    digest.update(buffer, 0, read)
+                }
+                require(count == asset.byteLength && digest.digest().joinToString("") { "%02x".format(it) } == asset.sha256)
+                input.channel.position(0)
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeStream(input, null, bounds)
+                require(bounds.outMimeType == "image/png" && bounds.outWidth == asset.width && bounds.outHeight == asset.height)
+                var sample = 1
+                while (asset.width.toLong() / sample * (asset.height / sample) > 220_000) sample *= 2
+                input.channel.position(0)
+                BitmapFactory.decodeStream(input, null, BitmapFactory.Options().apply { inSampleSize = sample; inScaled = false })
+            }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { null }
     }
 
     private suspend fun decodeBitmap(project: ProjectSnapshot, step: ProjectStep): Bitmap? {
