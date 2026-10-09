@@ -32,6 +32,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.tapscene.data.ProjectSnapshot
 import com.tapscene.data.ReleaseSummary
@@ -342,94 +343,132 @@ fun AiPackageScreen(
     val plan = resolved?.getOrNull()
     var confirmExport by remember(config) { mutableStateOf(false) }
     var chooseSource by rememberSaveable { mutableStateOf(false) }
-    ServicePage("AI 动画配置", onBack) {
+    var chooseNext by remember(config) { mutableStateOf(false) }
+    val last = config?.visits?.lastOrNull()
+    val lastStep = config?.scene?.states?.firstOrNull { it.id == last?.stateId }
+    val needsNext = last != null && last.selectedEdgeId == null && lastStep?.terminal == false
+    val selectedFrames = remember(config) { config?.let { runCatching { aiSelectedDurationFrames(it) }.getOrNull() } }
+    Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
+        ShellTopBar("AI 动画配置", onBack)
         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-        state.message?.let { Text(it, color = ShellColors.Accent) }
-        DetailSection("演示版本") {
-            if (config == null || chooseSource) {
-                if (state.releases.isEmpty()) Text("先完成成品复核与封存，再选择固定版本。", color = ShellColors.Muted)
-                state.releases.forEach { item ->
-                    ShellActionRow(item.title, "${item.stepCount} 个步骤 · ${formatReleaseDate(item.sealedAt)} · ${if (item.origin == "local") "本机成品" else "导入版本"}",
-                        onClick = { chooseSource = false; onChooseRelease(item.id) }, enabled = !state.busy)
+        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(24.dp)) {
+            state.message?.let { Text(it, color = ShellColors.Accent) }
+            DetailSection("演示版本") {
+                if (config == null || chooseSource) {
+                    if (state.releases.isEmpty()) Text("先完成成品复核与封存，再选择固定版本。", color = ShellColors.Muted)
+                    state.releases.forEach { item ->
+                        ShellActionRow(item.title, "${item.stepCount} 个步骤 · ${formatReleaseDate(item.sealedAt)} · ${if (item.origin == "local") "本机成品" else "导入版本"}",
+                            onClick = { chooseSource = false; onChooseRelease(item.id) }, enabled = !state.busy)
+                    }
+                } else {
+                    ShellLabelValue("版本", config.scene.title)
+                    Text("${config.scene.states.size} 个步骤 · ${config.scene.regions.size} 个可用区域", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    TextButton(onClick = { chooseSource = true }, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("换一个版本") }
                 }
-            } else {
-                ShellLabelValue("版本", config.scene.title)
-                Text("${config.scene.states.size} 个步骤 · ${config.scene.regions.size} 个可用区域", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-                TextButton(onClick = { chooseSource = true }, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("换一个版本") }
+            }
+            if (config != null && !chooseSource) {
+                DetailSection("画面方向", "选择生成视频的横竖方向。") {
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        OutlinedButton(onClick = { onCanvas(false) }, enabled = !state.busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("${if (config.width == 1080) "✓ " else ""}竖屏 9:16") }
+                        OutlinedButton(onClick = { onCanvas(true) }, enabled = !state.busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("${if (config.width == 1920) "✓ " else ""}横屏 16:9") }
+                    }
+                }
+                DetailSection("播放顺序", "逐步选择接下来播放的内容，也可以返回之前的步骤。视频最长 10 分钟。") {
+                    config.visits.forEachIndexed { index, visit ->
+                        val step = config.scene.states.single { it.id == visit.stateId }
+                        val edge = config.scene.edges.firstOrNull { it.id == visit.selectedEdgeId }
+                        val effects = config.effects.filter { it.visitId == visit.visitId }
+                        var showEffects by rememberSaveable(visit.visitId) { mutableStateOf(false) }
+                        var annotation by rememberSaveable(visit.visitId) { mutableStateOf(effects.firstOrNull { it.type == "annotation" }?.text.orEmpty()) }
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("${index + 1}. ${step.title}", style = MaterialTheme.typography.titleSmall)
+                            Text(edge?.let { "接着：${it.label}" } ?: if (step.terminal) "播放到这里结束" else "请选择下一步", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(onClick = { onHold(visit.visitId, maxOf(1, visit.holdFrames - 30)) }, enabled = !state.busy && visit.holdFrames > 1, modifier = Modifier.heightIn(min = 48.dp)) { Text("− 1 秒") }
+                                Text("停留 ${aiSeconds(visit.holdFrames)} 秒", modifier = Modifier.weight(1f))
+                                OutlinedButton(onClick = { onHold(visit.visitId, minOf(RenderPlan.MAX_HOLD_FRAMES, visit.holdFrames + 30)) }, enabled = !state.busy && visit.holdFrames < RenderPlan.MAX_HOLD_FRAMES, modifier = Modifier.heightIn(min = 48.dp)) { Text("+ 1 秒") }
+                            }
+                            effects.forEach { Text(aiEffectLabel(config, it), style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted) }
+                            TextButton(onClick = { showEffects = !showEffects }, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (showEffects) "收起效果" else if (effects.isEmpty()) "添加效果" else "调整效果") }
+                            if (showEffects) {
+                                if (edge?.hotspotId != null) TextButton(onClick = { onEffect(visit.visitId, "click", null, null) }, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("${if (effects.any { it.type == "click" }) "✓ " else ""}点击提示") }
+                                if (edge?.toStateId != null && edge.transitionAssetId == null) TextButton(onClick = { onEffect(visit.visitId, "transition", null, null) }, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("${if (effects.any { it.type == "transition" }) "✓ " else ""}平滑切换到下一步") }
+                                config.scene.regions.filter { it.stateId == visit.stateId }.forEach { region ->
+                                    Text("区域：${region.name}", style = MaterialTheme.typography.bodySmall)
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        listOf("focus" to "聚焦", "highlight" to "高亮").forEach { (type, label) ->
+                                            OutlinedButton(onClick = { onEffect(visit.visitId, type, region.id, null) }, enabled = !state.busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("${if (effects.any { it.type == type && it.regionId == region.id }) "✓ " else ""}$label") }
+                                        }
+                                    }
+                                }
+                                OutlinedTextField(value = annotation, onValueChange = { if (it.length <= 240) annotation = it }, enabled = !state.busy,
+                                    label = { Text("画面标注（最多 240 字）") }, modifier = Modifier.fillMaxWidth())
+                                TextButton(onClick = { onEffect(visit.visitId, "annotation", null, annotation) }, enabled = !state.busy && (annotation.isNotBlank() || effects.any { it.type == "annotation" }), modifier = Modifier.heightIn(min = 48.dp)) { Text(if (effects.any { it.type == "annotation" }) "移除已有标注" else "加入标注") }
+                            }
+                        }
+                        ShellDivider()
+                    }
+                    if (!needsNext) Text("已选好播放顺序", color = ShellColors.Accent)
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        TextButton(onClick = onPrevious, enabled = !state.busy && (config.visits.size > 1 || last?.selectedEdgeId != null), modifier = Modifier.heightIn(min = 48.dp)) { Text("撤回最后一步") }
+                        TextButton(onClick = onReset, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("重新选择") }
+                    }
+                }
+                DetailSection("保存前检查") {
+                    ShellLabelValue("视频时长", plan?.let { "约 ${aiSeconds(it.totalFrames)} 秒 · ${it.visits.size} 步" } ?: "请先选好播放顺序并检查效果")
+                    Text("包含这个版本的全部已复核画面、裁片和过渡视频，也保留未选分支。原始录屏不会打包。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    Text("改停留时间后，需要重设这一步的效果及前一步的平滑切换。其他步骤保留。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    Text("手机保存动画数据包，再交给电脑上的配套渲染工具生成 MP4。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    if (plan != null) AiTechnicalDetails(config, plan)
+                }
             }
         }
         if (config != null && !chooseSource) {
-            DetailSection("画面方向", "选择生成视频的横竖方向。") {
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedButton(onClick = { onCanvas(false) }, enabled = !state.busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("${if (config.width == 1080) "✓ " else ""}竖屏 9:16") }
-                    OutlinedButton(onClick = { onCanvas(true) }, enabled = !state.busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("${if (config.width == 1920) "✓ " else ""}横屏 16:9") }
+            ShellDivider()
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("${config.visits.size} 步 / ${if (plan != null) "总时长" else "当前时长"} ${
+                    (plan?.totalFrames ?: selectedFrames)?.let { "约 ${aiSeconds(it)} 秒" } ?: "待检查"
+                }", style = MaterialTheme.typography.labelMedium, color = ShellColors.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Button(onClick = { if (needsNext) chooseNext = true else confirmExport = true },
+                    enabled = !state.busy && (needsNext || plan != null), shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                    Text(if (needsNext) "接着播放" else "检查并保存")
                 }
-            }
-            DetailSection("播放顺序", "逐步选择接下来播放的内容，也可以返回之前的步骤。视频最长 10 分钟。") {
-                config.visits.forEachIndexed { index, visit ->
-                    val step = config.scene.states.single { it.id == visit.stateId }
-                    val edge = config.scene.edges.firstOrNull { it.id == visit.selectedEdgeId }
-                    val effects = config.effects.filter { it.visitId == visit.visitId }
-                    var showEffects by rememberSaveable(visit.visitId) { mutableStateOf(false) }
-                    var annotation by rememberSaveable(visit.visitId) { mutableStateOf(effects.firstOrNull { it.type == "annotation" }?.text.orEmpty()) }
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("${index + 1}. ${step.title}", style = MaterialTheme.typography.titleSmall)
-                        Text(edge?.let { "接着：${it.label}" } ?: if (step.terminal) "播放到这里结束" else "请选择下一步", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(onClick = { onHold(visit.visitId, maxOf(1, visit.holdFrames - 30)) }, enabled = !state.busy && visit.holdFrames > 1, modifier = Modifier.heightIn(min = 48.dp)) { Text("− 1 秒") }
-                            Text("停留 ${aiSeconds(visit.holdFrames)} 秒", modifier = Modifier.weight(1f))
-                            OutlinedButton(onClick = { onHold(visit.visitId, minOf(RenderPlan.MAX_HOLD_FRAMES, visit.holdFrames + 30)) }, enabled = !state.busy && visit.holdFrames < RenderPlan.MAX_HOLD_FRAMES, modifier = Modifier.heightIn(min = 48.dp)) { Text("+ 1 秒") }
-                        }
-                        effects.forEach { Text(aiEffectLabel(config, it), style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted) }
-                        TextButton(onClick = { showEffects = !showEffects }, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (showEffects) "收起效果" else if (effects.isEmpty()) "添加效果" else "调整效果") }
-                        if (showEffects) {
-                            if (edge?.hotspotId != null) TextButton(onClick = { onEffect(visit.visitId, "click", null, null) }, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("${if (effects.any { it.type == "click" }) "✓ " else ""}点击提示") }
-                            if (edge?.toStateId != null && edge.transitionAssetId == null) TextButton(onClick = { onEffect(visit.visitId, "transition", null, null) }, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("${if (effects.any { it.type == "transition" }) "✓ " else ""}平滑切换到下一步") }
-                            config.scene.regions.filter { it.stateId == visit.stateId }.forEach { region ->
-                                Text("区域：${region.name}", style = MaterialTheme.typography.bodySmall)
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    listOf("focus" to "聚焦", "highlight" to "高亮").forEach { (type, label) ->
-                                        OutlinedButton(onClick = { onEffect(visit.visitId, type, region.id, null) }, enabled = !state.busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("${if (effects.any { it.type == type && it.regionId == region.id }) "✓ " else ""}$label") }
-                                    }
-                                }
-                            }
-                            OutlinedTextField(value = annotation, onValueChange = { if (it.length <= 240) annotation = it }, enabled = !state.busy,
-                                label = { Text("画面标注（最多 240 字）") }, modifier = Modifier.fillMaxWidth())
-                            TextButton(onClick = { onEffect(visit.visitId, "annotation", null, annotation) }, enabled = !state.busy && (annotation.isNotBlank() || effects.any { it.type == "annotation" }), modifier = Modifier.heightIn(min = 48.dp)) { Text(if (effects.any { it.type == "annotation" }) "移除已有标注" else "加入标注") }
-                        }
-                    }
-                    ShellDivider()
-                }
-                val last = config.visits.last()
-                val lastStep = config.scene.states.single { it.id == last.stateId }
-                if (last.selectedEdgeId == null && !lastStep.terminal) {
-                    Text("接着播放", style = MaterialTheme.typography.titleSmall)
-                    config.scene.edges.filter { it.fromStateId == last.stateId }.forEach { edge ->
-                        val target = edge.toStateId?.let { targetId -> config.scene.states.single { it.id == targetId }.title } ?: "结束：${edge.endLabel}"
-                        OutlinedButton(onClick = { onChooseEdge(edge.id) }, enabled = !state.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("${edge.label} → $target") }
-                    }
-                } else Text("已选好播放顺序", color = ShellColors.Accent)
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    TextButton(onClick = onPrevious, enabled = !state.busy && (config.visits.size > 1 || last.selectedEdgeId != null), modifier = Modifier.heightIn(min = 48.dp)) { Text("撤回最后一步") }
-                    TextButton(onClick = onReset, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("重新选择") }
-                }
-            }
-            DetailSection("保存前检查") {
-                ShellLabelValue("视频时长", plan?.let { "约 ${aiSeconds(it.totalFrames)} 秒 · ${it.visits.size} 步" } ?: "请先选好播放顺序并检查效果")
-                Text("包含这个版本的全部已复核画面、裁片和过渡视频，也保留未选分支。原始录屏不会打包。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-                Text("改停留时间后，需要重设这一步的效果及前一步的平滑切换。其他步骤保留。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-                Text("手机保存动画数据包，再交给电脑上的配套渲染工具生成 MP4。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-                Button(onClick = { confirmExport = true }, enabled = !state.busy && plan != null, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("检查并保存") }
-                if (plan != null) AiTechnicalDetails(config, plan)
             }
         }
     }
+    if (chooseNext && config != null && last != null && needsNext) AlertDialog(
+        onDismissRequest = { chooseNext = false }, title = { Text("接着播放") },
+        text = {
+            Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(lastStep?.title.orEmpty(), style = MaterialTheme.typography.titleSmall)
+                config.scene.edges.filter { it.fromStateId == last.stateId }.forEach { edge ->
+                    val target = edge.toStateId?.let { targetId -> config.scene.states.single { it.id == targetId }.title } ?: "结束：${edge.endLabel}"
+                    OutlinedButton(onClick = { chooseNext = false; onChooseEdge(edge.id) }, enabled = !state.busy,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("${edge.label} → $target") }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = { chooseNext = false }, modifier = Modifier.heightIn(min = 48.dp)) { Text("返回调整") } },
+    )
     if (confirmExport && plan != null && config != null) AlertDialog(
         onDismissRequest = { confirmExport = false }, title = { Text("保存 AI 动画包？") },
         text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) { AiExportReviewContent(config, plan) } },
         confirmButton = { TextButton(onClick = { confirmExport = false; onExport() }) { Text("选择保存位置") } },
         dismissButton = { TextButton(onClick = { confirmExport = false }) { Text("返回调整") } },
     )
+}
+
+/** Informational duration of the explicit visits only; it never makes an unfinished plan exportable. */
+internal fun aiSelectedDurationFrames(config: AiPackageConfiguration): Int = config.visits.sumOf { visit ->
+    val edge = config.scene.edges.firstOrNull { it.id == visit.selectedEdgeId }
+    val transition = edge?.transitionAssetId?.let { id ->
+        RenderPlan.millisecondsToFrames(requireNotNull(config.scene.assets.firstOrNull { it.id == id }?.durationMs))
+    } ?: 0
+    val overlap = config.effects.filter { it.visitId == visit.visitId && it.type == "transition" }.sumOf { it.durationFrames }
+    visit.holdFrames + transition - overlap
 }
 
 private fun aiSeconds(frames: Int): String = String.format(Locale.ROOT, "%.2f", frames / 30.0)

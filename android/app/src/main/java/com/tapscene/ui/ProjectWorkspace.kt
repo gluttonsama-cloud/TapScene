@@ -97,6 +97,7 @@ data class ProjectUiState(
     val preview: PreviewState? = null,
     val issues: List<ProjectIssue> = emptyList(),
     val dirtyStepIds: Set<String> = emptySet(),
+    val editorExitIssue: String? = null,
     /** Also changes for unsaved text/geometry, invalidating an older preview immediately. */
     val editRevision: Long = 0,
 ) {
@@ -126,7 +127,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     private val draftGenerations = mutableMapOf<Pair<String, String>, Long>()
     private val pendingStages = linkedMapOf<Pair<String, String>, Long>()
     private var stagingTask: Job? = null
-    private val savingDrafts = mutableSetOf<Pair<String, String>>()
+    private val savingDrafts = mutableMapOf<Pair<String, String>, StepEditDraft>()
 
     private data class DraftRecord(
         val draft: StepEditDraft,
@@ -293,13 +294,20 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
 
     fun saveStepDraft() = saveStepDraftInternal(null)
 
+    /** Validate and commit this panel and this step once; raw panel input survives any failure. */
+    fun savePendingStepForm() = saveStepDraftInternal(null, includePending = true)
+
+    fun savePendingStepForm(projectId: String, stepId: String) {
+        if (state.value.project?.project?.id == projectId && state.value.selectedStepId == stepId) savePendingStepForm()
+    }
+
     fun saveBeforeTransition(onSaved: () -> Unit) = saveStepDraftInternal(onSaved)
 
-    private fun saveStepDraftInternal(onSaved: (() -> Unit)?) {
+    private fun saveStepDraftInternal(onSaved: (() -> Unit)?, includePending: Boolean = false) {
         if (state.value.busy || state.value.loadFailed) return
         val project = state.value.project ?: return
         val draft = state.value.stepDraft ?: return
-        if (draft.pendingForm != null) { message("请先应用或取消面板中的输入，再保存步骤"); return }
+        if (draft.pendingForm != null && !includePending) { message("请在面板中保存本步，或取消面板输入"); return }
         if (!draft.dirty) { onSaved?.invoke(); return }
         val key = project.project.id to draft.stepId
         val record = drafts[key] ?: return
@@ -307,30 +315,41 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
             message("此步骤有新的已保存内容，请先处理冲突。你的修改仍保留")
             return
         }
+        val submitted = try { if (includePending) draft.withSubmittedForm(project.steps) else draft }
+        catch (failure: IllegalArgumentException) { message(failure.message ?: "请检查面板输入"); return }
         invalidateStaging(key)
-        savingDrafts += key
+        savingDrafts[key] = submitted
         execute("保存步骤", editing = true, afterRefresh = {
             savingDrafts.remove(key)
             if (drafts[key]?.draft?.dirty == true) queueStage(key)
         }) {
-            val saved = draftWriteLock.withLock {
-                val session = sessionFor(project.project.id)
-                withContext(Dispatchers.IO) {
-                    store.saveStepDraft(project.project.id, draft.stepId, draft.title, draft.description,
-                        draft.isTerminal, draft.hotspots, expectedRevision = record.baseRevision,
-                        nextAction = draft.nextAction, editorDraftSession = session)
+            draftWriteLock.withLock {
+                // Cancellation may stop waiting for the lock. Once SQL starts, retain its
+                // committed snapshot even if cancellation or the subsequent refresh fails.
+                withContext(NonCancellable) {
+                    val session = sessionFor(project.project.id)
+                    val saved = withContext(Dispatchers.IO) {
+                        store.saveStepDraft(project.project.id, draft.stepId, submitted.title, submitted.description,
+                            submitted.isTerminal, submitted.hotspots, expectedRevision = record.baseRevision,
+                            nextAction = submitted.nextAction, editorDraftSession = session)
+                    }
+                    saved.steps.firstOrNull { it.id == draft.stepId }?.let { step ->
+                        drafts[key] = DraftRecord(step.toDraft(), step, saved.project.revision)
+                    }
+                    applyProject(saved)
+                    message("步骤已保存")
                 }
             }
-            saved.steps.firstOrNull { it.id == draft.stepId }?.let { step ->
-                drafts[key] = DraftRecord(step.toDraft(), step, saved.project.revision)
-            }
-            applyProject(saved)
-            message("步骤已保存")
+            coroutineContext.ensureActive()
             onSaved?.invoke()
         }
     }
 
-    fun discardStepDraft() {
+    fun discardStepDraft() = discardStepDraftInternal(leave = false)
+
+    fun discardStepDraftAndLeave() = discardStepDraftInternal(leave = true)
+
+    private fun discardStepDraftInternal(leave: Boolean) {
         if (state.value.busy) return
         val project = state.value.project ?: return
         val step = state.value.selectedStep ?: return
@@ -338,6 +357,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         invalidateStaging(key)
         execute("放弃本步修改", editing = true, afterRefresh = {
             if (drafts[key]?.draft?.dirty == true) queueStage(key)
+            else if (leave && !state.value.loadFailed) leaveEditorRoute()
         }) {
             draftWriteLock.withLock {
                 // Once clearing starts, keep its committed result and in-memory state together.
@@ -350,6 +370,60 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
                 }
             }
         }
+    }
+
+    /** Return only after this exact draft has crossed its local persistence boundary. */
+    fun leaveEditor() {
+        val current = state.value
+        if (current.busy || current.loadFailed) return
+        val project = current.project ?: return
+        val draft = current.stepDraft ?: return
+        if (draft.conflicts.isNotEmpty()) {
+            mutableState.update { it.copy(editorExitIssue = "本步有尚未处理的内容冲突。请继续编辑核对，或明确放弃本步修改。") }
+            return
+        }
+        if (!draft.dirty || draft.recoveryStatus == DraftRecoveryStatus.STAGED) {
+            leaveEditorRoute()
+            return
+        }
+        val key = project.project.id to draft.stepId
+        invalidateStaging(key)
+        execute("暂存本步并返回", afterRefresh = {
+            val latest = drafts[key]?.draft
+            if (!state.value.loadFailed && latest != null && latest.conflicts.isEmpty() &&
+                (!latest.dirty || latest.recoveryStatus == DraftRecoveryStatus.STAGED)) leaveEditorRoute()
+            else mutableState.update { it.copy(editorExitIssue = if (latest?.conflicts?.isNotEmpty() == true)
+                "本步有尚未处理的内容冲突。请继续编辑核对，或明确放弃本步修改。"
+                else "本步修改尚未确认落盘，关闭应用可能丢失。输入仍在，请重试暂存或继续编辑。") }
+        }) {
+            var committed = false
+            try {
+                draftWriteLock.withLock {
+                    // Keep a committed write and its status together, including cancellation.
+                    withContext(NonCancellable) {
+                        val latest = drafts.getValue(key)
+                        val staged = latest.toStoredDraft()
+                        val session = sessionFor(project.project.id)
+                        check(withContext(Dispatchers.IO) { store.writeEditorDraft(project.project.id, draft.stepId, session, staged) })
+                        drafts[key] = latest.copy(draft = latest.draft.copy(dirty = staged != null,
+                            recoveryStatus = if (staged == null) DraftRecoveryStatus.NONE else DraftRecoveryStatus.STAGED))
+                        publishDraftState(project)
+                        committed = true
+                    }
+                }
+            } catch (failure: Exception) {
+                if (!committed) drafts[key]?.let { latest -> drafts[key] = latest.copy(draft = latest.draft.copy(recoveryStatus = DraftRecoveryStatus.FAILED)) }
+                publishDraftState(project)
+                throw failure
+            }
+        }
+    }
+
+    fun dismissEditorExitIssue() { mutableState.update { it.copy(editorExitIssue = null) } }
+
+    private fun leaveEditorRoute() {
+        invalidatePreview()
+        mutableState.update { it.copy(route = ProjectRoute.STEPS, bitmap = null, editorExitIssue = null) }
     }
 
     fun editPendingForm(projectId: String, stepId: String, form: EditorPendingForm?) {
@@ -891,14 +965,16 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
                     try {
                         if (locked) {
                             refresh()
-                            afterRefresh?.invoke()
                         }
                     } catch (_: Exception) {
                         mutableState.update { it.copy(loadFailed = true, bitmap = null,
                             message = "无法读取本地项目，原记录与未保存修改均已保留。请重试读取") }
                     } finally {
-                        if (locked) operationLock.unlock()
-                        mutableState.update { it.copy(busy = false, stage = null) }
+                        try { if (locked) afterRefresh?.invoke() }
+                        finally {
+                            if (locked) operationLock.unlock()
+                            mutableState.update { it.copy(busy = false, stage = null) }
+                        }
                     }
                 }
             }
@@ -1007,10 +1083,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
                     val accepted = draftWriteLock.withLock {
                         if (draftGenerations[nextKey] != generation) return@withLock false
                         val latest = drafts[nextKey] ?: return@withLock false
-                        staged = latest.takeIf { it.draft.pendingForm != null || it.draft.conflicts.isNotEmpty() ||
-                            !sameEdits(it.draft, it.baseStep) }?.let {
-                            StoredEditorDraft(it.baseRevision, it.baseStep.editorFields(), it.draft.fields(), it.draft.pendingForm)
-                        }
+                        staged = latest.toStoredDraft()
                         val session = sessionFor(nextKey.first)
                         withContext(Dispatchers.IO) { store.writeEditorDraft(nextKey.first, nextKey.second, session, staged) }
                     }
@@ -1031,6 +1104,10 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
             }
         }
     }
+
+    private fun DraftRecord.toStoredDraft(): StoredEditorDraft? = takeIf {
+        it.draft.pendingForm != null || it.draft.conflicts.isNotEmpty() || !sameEdits(it.draft, it.baseStep)
+    }?.let { StoredEditorDraft(it.baseRevision, it.baseStep.editorFields(), it.draft.fields(), it.draft.pendingForm) }
 
     /** All rows are loaded before applyProject computes any dirty gates. */
     private suspend fun restoreDrafts(project: ProjectSnapshot) {
@@ -1059,8 +1136,8 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
                 drafts.remove(key)
                 return@forEach
             }
-            if (key in savingDrafts && record.draft.pendingForm == null &&
-                project.project.revision != record.baseRevision && sameSavedEdits(record.draft, step)) {
+            val submitted = savingDrafts[key]
+            if (submitted != null && project.project.revision != record.baseRevision && sameSavedEdits(submitted, step)) {
                 invalidateStaging(key)
                 drafts[key] = DraftRecord(step.toDraft(), step, project.project.revision)
                 return@forEach

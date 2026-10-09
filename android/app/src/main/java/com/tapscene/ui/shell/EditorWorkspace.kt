@@ -27,15 +27,18 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ModalBottomSheetProperties
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -84,6 +87,8 @@ data class EditorCallbacks(
     val onPendingFormChange: (EditorPendingForm?) -> Unit = {},
     val onRetryStaging: () -> Unit = {},
     val onResolveConflict: (Boolean) -> Unit = {},
+    val onSavePendingForm: () -> Unit = {},
+    val onResolveUnsavedSteps: () -> Unit = {},
 )
 
 @Composable
@@ -97,12 +102,18 @@ fun EditorWorkspaceContent(
     previewEnabled: Boolean = !draft.dirty,
     regionsEnabled: Boolean = !draft.dirty,
     correctionEnabled: Boolean = true,
+    dirtyStepCount: Int = if (draft.dirty) 1 else 0,
+    formMessage: String? = null,
 ) {
     var mode by rememberSaveable(draft.stepId) { mutableStateOf(EditorMode.FRAME) }
     var adding by rememberSaveable(draft.stepId) { mutableStateOf(false) }
     var selectedId by rememberSaveable(draft.stepId) { mutableStateOf<String?>(null) }
     var terminalConflict by rememberSaveable(draft.stepId) { mutableStateOf(false) }
     var showDiscard by rememberSaveable(draft.stepId) { mutableStateOf(false) }
+    val openName: () -> Unit = {
+        callbacks.onPendingFormChange(EditorPendingForm(EditorFormKind.NAME,
+            title = draft.title, description = draft.description))
+    }
     val step = project.steps.firstOrNull { it.id == draft.stepId }
     val selected = draft.hotspots.firstOrNull { it.id == selectedId }
     val pendingForm = draft.pendingForm
@@ -132,10 +143,7 @@ fun EditorWorkspaceContent(
             Row(Modifier.fillMaxWidth().heightIn(min = 60.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = goBack, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("返回") }
                 Column(Modifier.weight(1f).clickable(enabled = !busy, role = Role.Button,
-                    onClickLabel = "编辑步骤名称与讲解") {
-                    callbacks.onPendingFormChange(EditorPendingForm(EditorFormKind.NAME,
-                        title = draft.title, description = draft.description))
-                }.padding(vertical = 8.dp)) {
+                    onClickLabel = "编辑步骤名称与讲解", onClick = openName).padding(vertical = 8.dp)) {
                     Text(draft.title.ifBlank { "未命名步骤" }, style = MaterialTheme.typography.titleMedium,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                     val saveStatus = when {
@@ -143,7 +151,7 @@ fun EditorWorkspaceContent(
                         draft.recoveryStatus == DraftRecoveryStatus.FAILED -> "暂存失败"
                         busy -> "处理中"
                         draft.recoveryStatus == DraftRecoveryStatus.STAGING -> "暂存中"
-                        draft.recoveryStatus == DraftRecoveryStatus.STAGED -> "已暂存"
+                        draft.recoveryStatus == DraftRecoveryStatus.STAGED -> "已暂存 · 未正式保存"
                         draft.dirty || pendingForm != null -> "未保存"
                         else -> "已保存"
                     }
@@ -164,6 +172,8 @@ fun EditorWorkspaceContent(
                     modifier = Modifier.heightIn(min = 48.dp)) { Text("保存") }
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            if (dirtyStepCount > 0 && (!previewEnabled || !regionsEnabled))
+                UnsavedStepsAction(dirtyStepCount, !busy, callbacks.onResolveUnsavedSteps)
             EditorCanvas(bitmap = bitmap,
                 hotspots = if (mode == EditorMode.HOTSPOTS || mode == EditorMode.BRANCHES) draft.hotspots else emptyList(),
                 modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
@@ -177,9 +187,8 @@ fun EditorWorkspaceContent(
                 when (mode) {
                     EditorMode.FRAME -> {
                         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                            Text(step?.asset?.let { "${it.width} × ${it.height}" } ?: "图片信息不可用",
-                                Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            TextButton(onClick = openName, enabled = !busy,
+                                modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("名称与讲解") }
                             TextButton(onClick = { callbacks.onCorrectImage(false) }, enabled = !busy && correctionEnabled) { Text("替换画面") }
                         }
                         Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -187,15 +196,17 @@ fun EditorWorkspaceContent(
                                 if (terminal && (draft.hotspots.isNotEmpty() || draft.nextAction != null)) terminalConflict = true
                                 else { terminalConflict = false; callbacks.onTerminalChange(terminal) }
                             }, enabled = !busy)
-                            Text("在这一步结束", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                            Column(Modifier.weight(1f)) {
+                                Text("在这一步结束", style = MaterialTheme.typography.bodyMedium)
+                                Text(step?.asset?.let { "${it.width} × ${it.height}" } ?: "图片信息不可用",
+                                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                             TextButton(onClick = callbacks.onPreview, enabled = !busy && previewEnabled && hasBitmap) { Text("预览") }
                         }
                         if (terminalConflict && (draft.hotspots.isNotEmpty() || draft.nextAction != null)) {
                             Text("先移除本步动作，再设为终点。", style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.error)
                         }
-                        if (!previewEnabled) Text("保存所有步骤的修改后可预览。", style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
                         if (draft.dirty) TextButton(onClick = { showDiscard = true }, enabled = !busy) { Text("放弃本步修改") }
                     }
                     EditorMode.HOTSPOTS -> {
@@ -296,8 +307,7 @@ fun EditorWorkspaceContent(
                         OutlinedButton(onClick = callbacks.onOpenRegions, enabled = !busy && regionsEnabled && hasBitmap) {
                             Text("编辑区域")
                         }
-                        if (!regionsEnabled) Text("先保存或放弃所有步骤修改，再编辑区域。", style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+
                     }
                 }
             }
@@ -319,26 +329,19 @@ fun EditorWorkspaceContent(
     // The persisted pending form is the only source of modal inputs, including invalid text.
     // A restored form opens automatically; a conflict must be resolved before applying it.
     if (draft.conflicts.isEmpty()) pendingForm?.let { form ->
-        val dismiss = { callbacks.onPendingFormChange(null) }
+        val dismiss = { if (!busy) callbacks.onPendingFormChange(null) }
         when (form.kind) {
-            EditorFormKind.NAME -> StepNameSheet(form, !busy, draft.recoveryStatus,
-                callbacks.onRetryStaging, callbacks.onPendingFormChange, dismiss) { title, description ->
-                callbacks.onTitleChange(title)
-                callbacks.onDescriptionChange(description)
-                callbacks.onPendingFormChange(null)
-            }
+            EditorFormKind.NAME -> StepNameSheet(form, !busy, draft.recoveryStatus, formMessage,
+                callbacks.onRetryStaging, callbacks.onPendingFormChange, dismiss) { _, _ -> callbacks.onSavePendingForm() }
             EditorFormKind.HOTSPOT -> HotspotEditorSheet(form,
-                draft.hotspots.firstOrNull { it.id == form.objectId }, project.steps, !busy && !draft.isTerminal,
-                draft.recoveryStatus, callbacks.onRetryStaging, callbacks.onPendingFormChange, dismiss) {
-                callbacks.onPutHotspot(it)
-                selectedId = it.id
-                callbacks.onPendingFormChange(null)
+                draft.hotspots.firstOrNull { it.id == form.objectId }, project.steps, !busy && !draft.isTerminal, !busy,
+                draft.recoveryStatus, formMessage, callbacks.onRetryStaging, callbacks.onPendingFormChange, dismiss) {
+                callbacks.onSavePendingForm()
             }
             EditorFormKind.NEXT_ACTION -> NextActionEditorSheet(form,
-                draft.nextAction?.takeIf { it.id == form.objectId }, project.steps, !busy && !draft.isTerminal,
-                draft.recoveryStatus, callbacks.onRetryStaging, callbacks.onPendingFormChange, dismiss) {
-                callbacks.onPutNextAction(it)
-                callbacks.onPendingFormChange(null)
+                draft.nextAction?.takeIf { it.id == form.objectId }, project.steps, !busy && !draft.isTerminal, !busy,
+                draft.recoveryStatus, formMessage, callbacks.onRetryStaging, callbacks.onPendingFormChange, dismiss) {
+                callbacks.onSavePendingForm()
             }
         }
     }
@@ -347,6 +350,12 @@ fun EditorWorkspaceContent(
         text = { Text("这一步将恢复到最近一次保存的内容。") },
         confirmButton = { TextButton(onClick = { callbacks.onDiscard(); showDiscard = false }, enabled = !busy) { Text("放弃修改") } },
         dismissButton = { TextButton(onClick = { showDiscard = false }) { Text("继续编辑") } })
+}
+
+@Composable
+private fun UnsavedStepsAction(count: Int, enabled: Boolean, onClick: () -> Unit) {
+    TextButton(onClick = onClick, enabled = enabled,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("还有 ${count} 步待保存 · 去处理") }
 }
 
 /** Decorative geometry only; the enclosing tab exposes its visible label and selected state. */
@@ -397,11 +406,18 @@ private fun EditorModeIcon(mode: EditorMode, tint: Color) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun StepNameSheet(form: EditorPendingForm, enabled: Boolean, recoveryStatus: DraftRecoveryStatus,
+private fun StepNameSheet(form: EditorPendingForm, enabled: Boolean, recoveryStatus: DraftRecoveryStatus, message: String?,
     onRetry: () -> Unit, onChange: (EditorPendingForm) -> Unit, onDismiss: () -> Unit,
     onConfirm: (String, String) -> Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-        StepNameFormContent(form, enabled, recoveryStatus, onRetry, onChange, onDismiss, onConfirm)
+    val dismissAllowed by rememberUpdatedState(enabled)
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true,
+        confirmValueChange = { it != SheetValue.Hidden || dismissAllowed })
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState,
+        sheetGesturesEnabled = dismissAllowed,
+        properties = ModalBottomSheetProperties(shouldDismissOnBackPress = dismissAllowed)) {
+        StepNameFormContent(form, enabled, recoveryStatus, onRetry, onChange, onDismiss, { title, description ->
+            if (dismissAllowed && sheetState.targetValue != SheetValue.Hidden) onConfirm(title, description)
+        }, message)
     }
 }
 
@@ -409,29 +425,33 @@ private fun StepNameSheet(form: EditorPendingForm, enabled: Boolean, recoverySta
 @Composable
 internal fun StepNameFormContent(form: EditorPendingForm, enabled: Boolean, recoveryStatus: DraftRecoveryStatus,
     onRetry: () -> Unit, onChange: (EditorPendingForm) -> Unit, onDismiss: () -> Unit,
-    onConfirm: (String, String) -> Unit) {
-    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp),
+    onConfirm: (String, String) -> Unit, message: String? = null) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("名称与讲解", style = MaterialTheme.typography.titleMedium)
             PendingFormStatus(recoveryStatus, enabled, onRetry)
+            message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
             OutlinedTextField(form.title, { onChange(form.copy(title = it)) }, label = { Text("步骤名称") }, singleLine = true,
                 enabled = enabled, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(form.description, { onChange(form.copy(description = it)) }, label = { Text("讲解（可选）") }, minLines = 3, maxLines = 8,
                 enabled = enabled, modifier = Modifier.fillMaxWidth())
-            Text("应用后记得保存步骤。关闭此面板将丢弃未应用的内容。", style = MaterialTheme.typography.bodySmall,
+            Text("保存本步会正式保存本步文字与动作。取消会丢弃此面板输入。", style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = onDismiss) { Text("取消") }
+                TextButton(onClick = onDismiss, enabled = enabled) { Text("取消") }
                 Button(onClick = { onConfirm(form.title.trim(), form.description.trim()) },
-                    enabled = enabled && form.title.isNotBlank()) { Text("应用") }
+                    enabled = enabled && form.title.isNotBlank()) { Text("保存本步") }
             }
         }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun HotspotEditorSheet(form: EditorPendingForm, original: ProjectHotspot?, steps: List<ProjectStep>, enabled: Boolean,
-    recoveryStatus: DraftRecoveryStatus, onRetry: () -> Unit, onChange: (EditorPendingForm) -> Unit,
+private fun HotspotEditorSheet(form: EditorPendingForm, original: ProjectHotspot?, steps: List<ProjectStep>, enabled: Boolean, dismissEnabled: Boolean,
+    recoveryStatus: DraftRecoveryStatus, message: String?, onRetry: () -> Unit, onChange: (EditorPendingForm) -> Unit,
     onDismiss: () -> Unit, onConfirm: (ProjectHotspot) -> Unit) {
     // Visibility is presentation-only; every editable value belongs to the pending form.
     var showGeometry by rememberSaveable(form.objectId) { mutableStateOf(false) }
@@ -440,11 +460,19 @@ private fun HotspotEditorSheet(form: EditorPendingForm, original: ProjectHotspot
         original.rect // Editing only the label or target must not round an existing rectangle.
     } else editorPercentageRect(form.left, form.top, form.right, form.bottom)
     val validTarget = if (form.endsDemo) form.endLabel.isNotBlank() else steps.any { it.id == form.targetStepId }
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp),
+    val dismissAllowed by rememberUpdatedState(dismissEnabled)
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true,
+        confirmValueChange = { it != SheetValue.Hidden || dismissAllowed })
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState,
+        sheetGesturesEnabled = dismissAllowed,
+        properties = ModalBottomSheetProperties(shouldDismissOnBackPress = dismissAllowed)) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("热点动作", style = MaterialTheme.typography.titleMedium)
             PendingFormStatus(recoveryStatus, enabled, onRetry)
+            message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
             OutlinedTextField(form.label, { onChange(form.copy(label = it)) }, label = { Text("动作名称") }, singleLine = true,
                 enabled = enabled, modifier = Modifier.fillMaxWidth())
             Text("点击后前往", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 8.dp))
@@ -473,20 +501,22 @@ private fun HotspotEditorSheet(form: EditorPendingForm, original: ProjectHotspot
             }
             if (rectangle == null) Text("范围须在 0–100% 内，右边大于左边，底部大于顶部。", color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall)
+            }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = onDismiss) { Text("取消") }
+                TextButton(onClick = onDismiss, enabled = dismissEnabled) { Text("取消") }
                 Button(onClick = {
                     val rect = rectangle
                     val objectId = form.objectId
                     val edgeId = form.edgeId
-                    if (rect != null && objectId != null && edgeId != null) onConfirm(ProjectHotspot(
+                    if (dismissAllowed && sheetState.targetValue != SheetValue.Hidden &&
+                        rect != null && objectId != null && edgeId != null) onConfirm(ProjectHotspot(
                         id = objectId, label = form.label.trim(), rect = rect,
                         targetStepId = if (form.endsDemo) null else form.targetStepId,
                         endLabel = if (form.endsDemo) form.endLabel.trim() else null, edgeId = edgeId,
                         transition = original?.transition,
                     ))
                 }, enabled = enabled && form.label.isNotBlank() && rectangle != null && validTarget &&
-                    form.objectId != null && form.edgeId != null) { Text("应用动作") }
+                    form.objectId != null && form.edgeId != null) { Text("保存本步") }
             }
         }
     }
@@ -495,15 +525,23 @@ private fun HotspotEditorSheet(form: EditorPendingForm, original: ProjectHotspot
 /** This action has no rectangle and remains separate from the canvas hotspot editor. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun NextActionEditorSheet(form: EditorPendingForm, original: ProjectNextAction?, steps: List<ProjectStep>, enabled: Boolean,
-    recoveryStatus: DraftRecoveryStatus, onRetry: () -> Unit, onChange: (EditorPendingForm) -> Unit,
+private fun NextActionEditorSheet(form: EditorPendingForm, original: ProjectNextAction?, steps: List<ProjectStep>, enabled: Boolean, dismissEnabled: Boolean,
+    recoveryStatus: DraftRecoveryStatus, message: String?, onRetry: () -> Unit, onChange: (EditorPendingForm) -> Unit,
     onDismiss: () -> Unit, onConfirm: (ProjectNextAction) -> Unit) {
     val validTarget = steps.any { it.id == form.targetStepId }
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp),
+    val dismissAllowed by rememberUpdatedState(dismissEnabled)
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true,
+        confirmValueChange = { it != SheetValue.Hidden || dismissAllowed })
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState,
+        sheetGesturesEnabled = dismissAllowed,
+        properties = ModalBottomSheetProperties(shouldDismissOnBackPress = dismissAllowed)) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("下一步按钮", style = MaterialTheme.typography.titleMedium)
             PendingFormStatus(recoveryStatus, enabled, onRetry)
+            message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
             Text("画布外按钮 · 作者编排", style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             OutlinedTextField(form.label, { onChange(form.copy(label = it)) }, label = { Text("按钮文字") }, singleLine = true,
@@ -516,11 +554,12 @@ private fun NextActionEditorSheet(form: EditorPendingForm, original: ProjectNext
                     onChange(form.copy(targetStepId = step.id))
                 }
             }
+            }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = onDismiss) { Text("取消") }
-                Button(onClick = { form.objectId?.let { id -> onConfirm(ProjectNextAction(
+                TextButton(onClick = onDismiss, enabled = dismissEnabled) { Text("取消") }
+                Button(onClick = { if (dismissAllowed && sheetState.targetValue != SheetValue.Hidden) form.objectId?.let { id -> onConfirm(ProjectNextAction(
                     id, form.label.trim(), form.targetStepId, original?.transition)) } },
-                    enabled = enabled && form.objectId != null && form.label.isNotBlank() && validTarget) { Text("应用动作") }
+                    enabled = enabled && form.objectId != null && form.label.isNotBlank() && validTarget) { Text("保存本步") }
             }
         }
     }
@@ -530,9 +569,9 @@ private fun NextActionEditorSheet(form: EditorPendingForm, original: ProjectNext
 private fun PendingFormStatus(status: DraftRecoveryStatus, enabled: Boolean, onRetry: () -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(when (status) {
-            DraftRecoveryStatus.NONE -> "尚未应用到步骤"
-            DraftRecoveryStatus.STAGING -> "暂存中 · 尚未应用"
-            DraftRecoveryStatus.STAGED -> "已暂存 · 尚未应用"
+            DraftRecoveryStatus.NONE -> "尚未正式保存"
+            DraftRecoveryStatus.STAGING -> "本机暂存中 · 未正式保存"
+            DraftRecoveryStatus.STAGED -> "已暂存到本机 · 未正式保存"
             DraftRecoveryStatus.FAILED -> "暂存失败 · 退出前请重试"
         }, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
             color = if (status == DraftRecoveryStatus.FAILED) MaterialTheme.colorScheme.error
@@ -568,17 +607,17 @@ private fun DraftConflictDialog(project: ProjectSnapshot, draft: StepEditDraft, 
     fun pendingTarget(form: EditorPendingForm): String = if (form.endsDemo) "结束 · ${form.endLabel}" else
         project.steps.firstOrNull { it.id == form.targetStepId }?.title ?: "尚未选择或目标已失效"
     val pendingHotspot = pending?.takeIf { it.kind == EditorFormKind.HOTSPOT }?.let {
-        "\n\n面板中待应用：\n${it.label.ifBlank { "未命名动作" }} → ${pendingTarget(it)}\n" +
+        "\n\n面板中待保存：\n${it.label.ifBlank { "未命名动作" }} → ${pendingTarget(it)}\n" +
             "左 ${it.left}% · 上 ${it.top}%\n右 ${it.right}% · 下 ${it.bottom}%"
     }.orEmpty()
     val pendingNext = pending?.takeIf { it.kind == EditorFormKind.NEXT_ACTION }?.let {
-        "\n\n面板中待应用：\n${it.label}\n→ ${pendingTarget(it)}"
+        "\n\n面板中待保存：\n${it.label}\n→ ${pendingTarget(it)}"
     }.orEmpty()
     val fields = listOf(
         Triple("标题", saved?.title ?: "步骤已移除",
-            if (pending?.kind == EditorFormKind.NAME) "${pending.title}\n（面板中待应用）" else draft.title),
+            if (pending?.kind == EditorFormKind.NAME) "${pending.title}\n（面板中待保存）" else draft.title),
         Triple("讲解", saved?.description.orEmpty().ifBlank { "未填写" },
-            if (pending?.kind == EditorFormKind.NAME) "${pending.description.ifBlank { "未填写" }}\n（面板中待应用）"
+            if (pending?.kind == EditorFormKind.NAME) "${pending.description.ifBlank { "未填写" }}\n（面板中待保存）"
             else draft.description.ifBlank { "未填写" }),
         Triple("终点", if (saved?.isTerminal == true) "在这一步结束" else "继续演示",
             if (draft.isTerminal) "在这一步结束" else "继续演示"),

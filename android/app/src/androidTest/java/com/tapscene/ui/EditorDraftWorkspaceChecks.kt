@@ -161,6 +161,109 @@ object EditorDraftWorkspaceChecks {
             check(b !in store.readEditorDrafts(p) && workspace.state.value.stepDraft?.pendingForm == null)
             status("PASS editor failed write and discard commit cancellation: exact input survives failure/retry; cancel after SQL clear cannot resurrect the discarded form")
 
+            // One panel action commits only the selected step, exactly once. Other dirty input is retained.
+            command(workspace) { openStep(a) }
+            withContext(Dispatchers.Main.immediate) { workspace.editDescription("Other step still pending") }
+            staged(workspace)
+            command(workspace) { openStep(b) }
+            val oneTap = EditorPendingForm(EditorFormKind.NAME, title = "  Panel saved B  ", description = "  Detailed input  ")
+            withContext(Dispatchers.Main.immediate) { workspace.editPendingForm(p, b, oneTap) }
+            staged(workspace)
+            val beforePanel = checkNotNull(store.readProject(p))
+            db(root) { execSQL("CREATE TRIGGER save_panel_fail BEFORE UPDATE OF title ON states BEGIN SELECT RAISE(FAIL,'injected'); END") }
+            command(workspace) { savePendingStepForm() }; settled(workspace)
+            check(workspace.state.value.stepDraft?.pendingForm == oneTap)
+            check(store.readProject(p) == beforePanel && store.readEditorDrafts(p).getValue(b).pendingForm == oneTap)
+            db(root) { execSQL("DROP TRIGGER save_panel_fail") }
+            command(workspace) { savePendingStepForm() }; settled(workspace)
+            val afterPanel = checkNotNull(store.readProject(p))
+            check(afterPanel.project.revision == beforePanel.project.revision + 1)
+            check(afterPanel.steps.single { it.id == b }.title == "Panel saved B")
+            check(afterPanel.steps.single { it.id == a } == beforePanel.steps.single { it.id == a })
+            check(workspace.state.value.stepDraft?.pendingForm == null && b !in store.readEditorDrafts(p))
+            check(a in workspace.state.value.dirtyStepIds && a in store.readEditorDrafts(p))
+
+            val hot = EditorPendingForm(EditorFormKind.HOTSPOT, objectId = id(), edgeId = id(), label = "Tap to A",
+                left = "12.3456", top = "10", right = "50", bottom = "60", targetStepId = a)
+            withContext(Dispatchers.Main.immediate) { workspace.editPendingForm(p, b, hot) }
+            staged(workspace); command(workspace) { savePendingStepForm() }; settled(workspace)
+            val savedHotspot = checkNotNull(store.readProject(p)).steps.single { it.id == b }.hotspots.single()
+            check(savedHotspot.label == "Tap to A" && savedHotspot.targetStepId == a)
+            val next = EditorPendingForm(EditorFormKind.NEXT_ACTION, objectId = id(), label = "Next A", targetStepId = a)
+            withContext(Dispatchers.Main.immediate) { workspace.editPendingForm(p, b, next) }
+            staged(workspace); command(workspace) { savePendingStepForm() }; settled(workspace)
+            check(store.readProject(p)?.steps?.single { it.id == b }?.nextAction?.targetStepId == a)
+            val stableNextId = checkNotNull(store.readProject(p)?.steps?.single { it.id == b }?.nextAction?.id)
+            withContext(Dispatchers.Main.immediate) {
+                workspace.removeNextAction()
+                workspace.editPendingForm(p, b, next.copy(objectId = id(), label = "Re-added next"))
+            }
+            staged(workspace); command(workspace) { savePendingStepForm() }; settled(workspace)
+            check(store.readProject(p)?.steps?.single { it.id == b }?.nextAction?.id == stableNextId)
+            check(store.readProject(p)?.steps?.single { it.id == b }?.nextAction?.label == "Re-added next")
+            status("PASS one-action panel save: name, hotspot and next action commit once; transaction failure retains exact raw form; other steps remain unsubmitted")
+
+            // A pre-commit cancellation keeps the panel. A post-commit cancellation clears it by actual reread.
+            val boundary = oneTap.copy(title = "Boundary panel")
+            withContext(Dispatchers.Main.immediate) { workspace.editPendingForm(p, b, boundary) }
+            staged(workspace)
+            val beforeCancel = store.readProject(p)
+            writeLock.lock()
+            withContext(Dispatchers.Main.immediate) { workspace.savePendingStepForm(); workspace.cancel() }
+            writeLock.unlock(); idle(workspace); settled(workspace)
+            check(workspace.state.value.stepDraft?.pendingForm == boundary && store.readProject(p) == beforeCancel)
+            coroutineScope {
+                val committed = CountDownLatch(1)
+                val watcher = async(Dispatchers.IO) {
+                    withTimeout(10_000) { while (store.readProject(p)?.steps?.single { it.id == b }?.title != boundary.title) delay(1) }
+                    committed.countDown()
+                }
+                withContext(Dispatchers.Main.immediate) {
+                    workspace.savePendingStepForm()
+                    check(committed.await(10, TimeUnit.SECONDS)) { "Panel save did not reach commit boundary" }
+                    workspace.cancel()
+                }
+                watcher.await()
+            }
+            idle(workspace); settled(workspace)
+            check(workspace.state.value.stepDraft?.pendingForm == null && b !in store.readEditorDrafts(p))
+            check(workspace.state.value.stepDraft?.title == boundary.title)
+            status("PASS panel save cancellation: pre-commit retains raw input; post-commit reread recognizes the submitted snapshot without reviving the form")
+
+            // Return crosses a staging barrier, never claims success on a failed or conflicting draft.
+            db(root) { execSQL("CREATE TRIGGER editor_exit_fail BEFORE INSERT ON editor_drafts BEGIN SELECT RAISE(FAIL,'injected'); END") }
+            withContext(Dispatchers.Main.immediate) { workspace.editPendingForm(p, b, invalid) }
+            withTimeout(10_000) { workspace.state.first { it.stepDraft?.recoveryStatus == DraftRecoveryStatus.FAILED } }
+            command(workspace) { leaveEditor() }
+            check(workspace.state.value.route == ProjectRoute.EDIT && workspace.state.value.editorExitIssue != null)
+            check(workspace.state.value.stepDraft?.pendingForm == invalid)
+            db(root) { execSQL("DROP TRIGGER editor_exit_fail") }
+            command(workspace) { leaveEditor() }
+            check(workspace.state.value.route == ProjectRoute.STEPS && workspace.state.value.editorExitIssue == null)
+            check(store.readEditorDrafts(p).getValue(b).pendingForm == invalid)
+            command(workspace) { openStep(b) }
+            val beforeInvalid = store.readProject(p)
+            command(workspace) { savePendingStepForm() }
+            check(workspace.state.value.stepDraft?.pendingForm == invalid && store.readProject(p) == beforeInvalid)
+            command(workspace) { discardStepDraft() }; settled(workspace)
+            writeLock.lock()
+            val awaitingStage = oneTap.copy(title = "Return while staging")
+            withContext(Dispatchers.Main.immediate) { workspace.editPendingForm(p, b, awaitingStage); workspace.leaveEditor() }
+            check(workspace.state.value.route == ProjectRoute.EDIT)
+            writeLock.unlock(); idle(workspace); settled(workspace)
+            check(workspace.state.value.route == ProjectRoute.STEPS)
+            check(store.readEditorDrafts(p).getValue(b).pendingForm == awaitingStage)
+            command(workspace) { openStep(b) }
+            store.updateStep(p, b, "External saved title", "External description")
+            command(workspace) { reload() }; settled(workspace)
+            check(workspace.state.value.stepDraft?.conflicts?.isNotEmpty() == true)
+            command(workspace) { leaveEditor() }
+            check(workspace.state.value.route == ProjectRoute.EDIT && workspace.state.value.editorExitIssue != null)
+            command(workspace) { discardStepDraftAndLeave() }; settled(workspace)
+            check(workspace.state.value.route == ProjectRoute.STEPS && b !in store.readEditorDrafts(p))
+            check(a in workspace.state.value.dirtyStepIds && a in store.readEditorDrafts(p))
+            status("PASS return barrier: in-flight staging waits; failed staging blocks and retries; invalid/conflicted input is never formally saved; explicit discard leaves other drafts intact")
+
             command(workspace) { openStep(a) }
             withContext(Dispatchers.Main.immediate) { workspace.editTitle("Keep this text") }
             staged(workspace)

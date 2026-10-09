@@ -57,7 +57,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     var renaming by remember { mutableStateOf<ProjectSummary?>(null) }
     var deletingProject by remember { mutableStateOf<ProjectSummary?>(null) }
     var deletingStep by remember { mutableStateOf<ProjectStep?>(null) }
-    var confirmLeave by rememberSaveable { mutableStateOf(false) }
+    var showUnsavedSteps by rememberSaveable { mutableStateOf(false) }
     var projectMore by rememberSaveable { mutableStateOf(false) }
     var transitionEdgeId by rememberSaveable { mutableStateOf<String?>(null) }
     var correctionStartsWithMask by rememberSaveable { mutableStateOf(false) }
@@ -255,9 +255,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
         }
     }
     val closeEditor: () -> Unit = {
-        if (!state.busy) {
-            if (state.stepDraft?.dirty == true) confirmLeave = true else projects.back()
-        }
+        if (!state.busy) projects.leaveEditor()
     }
     val importVideo = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val expected = pickerProjectId
@@ -510,14 +508,17 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                             }
                             "path" -> state.project?.let { snapshot ->
                                 if (state.route == ProjectRoute.EDIT && state.stepDraft != null) {
-                                    EditorWorkspaceContent(snapshot, requireNotNull(state.stepDraft), state.bitmap, unavailable, EditorCallbacks(
+                                    val editorDraft = requireNotNull(state.stepDraft)
+                                    EditorWorkspaceContent(snapshot, editorDraft, state.bitmap, unavailable, EditorCallbacks(
                                         closeEditor, projects::editTitle, projects::editDescription, projects::editTerminal,
                                         projects::putHotspot, projects::removeHotspot, projects::saveStepDraft, projects::discardStepDraft,
                                         {}, { id -> projects.saveBeforeTransition { transitionEdgeId = id; push("transition") } }, projects::putNextAction, projects::removeNextAction,
                                         onOpenRegions = { if (state.dirtyStepIds.isEmpty()) push("regions") }, onCorrectImage = openStepCorrection,
-                                        onPendingFormChange = { form -> projects.editPendingForm(snapshot.project.id, requireNotNull(state.stepDraft).stepId, form) }, onRetryStaging = projects::retryDraftStaging,
-                                        onResolveConflict = projects::resolveDraftConflict),
-                                        previewEnabled = false, regionsEnabled = state.dirtyStepIds.isEmpty(), correctionEnabled = scopeReady && !mediaState.busy)
+                                        onPendingFormChange = { form -> projects.editPendingForm(snapshot.project.id, editorDraft.stepId, form) }, onRetryStaging = projects::retryDraftStaging,
+                                        onResolveConflict = projects::resolveDraftConflict,
+                                        onSavePendingForm = { projects.savePendingStepForm(snapshot.project.id, editorDraft.stepId) }, onResolveUnsavedSteps = { showUnsavedSteps = true }),
+                                        previewEnabled = false, regionsEnabled = state.dirtyStepIds.isEmpty(), correctionEnabled = scopeReady && !mediaState.busy,
+                                dirtyStepCount = state.dirtyStepIds.size, formMessage = state.message)
                                 } else AuthoredPathScreen(snapshot, pathStepIds, unavailable || mediaState.busy,
                                     { if (!state.busy) pop() },
                                     { ids, terminal, revision ->
@@ -599,10 +600,12 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 { projects.startPreview(true) }, { id -> projects.saveBeforeTransition { transitionEdgeId = id; push("transition") } },
                                 projects::putNextAction, projects::removeNextAction,
                                 onOpenRegions = { if (state.dirtyStepIds.isEmpty()) push("regions") }, onCorrectImage = openStepCorrection,
-                                        onPendingFormChange = { form -> projects.editPendingForm(snapshot.project.id, requireNotNull(state.stepDraft).stepId, form) }, onRetryStaging = projects::retryDraftStaging,
-                                        onResolveConflict = projects::resolveDraftConflict),
+                                        onPendingFormChange = { form -> projects.editPendingForm(snapshot.project.id, draft.stepId, form) }, onRetryStaging = projects::retryDraftStaging,
+                                        onResolveConflict = projects::resolveDraftConflict,
+                                        onSavePendingForm = { projects.savePendingStepForm(snapshot.project.id, draft.stepId) }, onResolveUnsavedSteps = { showUnsavedSteps = true }),
                                 previewEnabled = state.dirtyStepIds.isEmpty(), regionsEnabled = state.dirtyStepIds.isEmpty(),
-                                correctionEnabled = scopeReady && !mediaState.busy)
+                                correctionEnabled = scopeReady && !mediaState.busy,
+                                dirtyStepCount = state.dirtyStepIds.size, formMessage = state.message)
                         } }
                         state.route == ProjectRoute.PREVIEW -> state.project?.let { snapshot -> state.preview?.let { preview ->
                             DraftPreviewContent(snapshot, preview, state.bitmap, unavailable, projects::chooseHotspot,
@@ -695,10 +698,32 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                     }) { Text("重新生成") } },
                     dismissButton = { TextButton(onClick = { replacingCandidate = null }) { Text("保留现有候选") } })
             }
-            if (confirmLeave) AlertDialog(onDismissRequest = { confirmLeave = false }, title = { Text("保留这次修改？") },
-                text = { Text("返回后可继续编辑。尚未保存的修改只在本次应用运行中保留，关闭应用后可能丢失。") },
-                confirmButton = { TextButton(onClick = { confirmLeave = false; projects.back() }) { Text("保留并返回") } },
-                dismissButton = { TextButton(onClick = { confirmLeave = false }) { Text("继续编辑") } })
+            state.editorExitIssue?.let { issue ->
+                AlertDialog(onDismissRequest = projects::dismissEditorExitIssue, title = { Text("修改尚未安全保留") },
+                    text = { Text(issue) },
+                    confirmButton = {
+                        TextButton(onClick = projects::leaveEditor, enabled = !state.busy && !state.loadFailed && state.stepDraft?.conflicts?.isEmpty() == true) {
+                            Text("重试暂存并返回")
+                        }
+                    },
+                    dismissButton = {
+                        Column {
+                            TextButton(onClick = projects::dismissEditorExitIssue, enabled = !state.busy) { Text("继续编辑") }
+                            TextButton(onClick = projects::discardStepDraftAndLeave, enabled = !state.busy && !state.loadFailed) { Text("放弃本步修改并返回") }
+                        }
+                    })
+            }
+            if (showUnsavedSteps) AlertDialog(onDismissRequest = { showUnsavedSteps = false },
+                title = { Text("${state.dirtyStepIds.size} 步待保存") },
+                text = {
+                    Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+                        Text("逐步核对后保存。未完成的输入与冲突不会自动提交。", style = MaterialTheme.typography.bodySmall)
+                        state.project?.steps?.forEachIndexed { index, step ->
+                            if (step.id in state.dirtyStepIds) ShellActionRow("${index + 1}  ${step.title}", "打开并处理", enabled = !state.busy,
+                                onClick = { showUnsavedSteps = false; projects.openStep(step.id) })
+                        }
+                    }
+                }, confirmButton = { TextButton(onClick = { showUnsavedSteps = false }) { Text("关闭") } })
             if (projectMore) AlertDialog(onDismissRequest = { projectMore = false }, title = { Text("项目") }, text = {
                 Column {
                     ShellActionRow("重命名", onClick = { projectMore = false; renaming = state.project?.project })
