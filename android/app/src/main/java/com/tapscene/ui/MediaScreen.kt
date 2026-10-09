@@ -96,7 +96,7 @@ fun MediaScreen(workspace: MediaWorkspace) {
             ) {
                 Text("TapScene", style = MaterialTheme.typography.headlineMedium)
                 Text("素材与遮挡", style = MaterialTheme.typography.titleLarge)
-                Text("MP4 / H.264 或 H.265 / 8 位 SDR 竖屏，单段不超过 3 分钟、200 MiB。原片只保存在本机。",
+                Text("H.264 / H.265 录屏，单段不超过 3 分钟、200 MiB。按本机能力解码，原片只保存在本机。",
                     style = MaterialTheme.typography.bodyMedium)
                 Button(onClick = { import.launch(arrayOf("video/mp4")) }, enabled = !state.busy && !savePending && !state.loadFailed && !state.unsavedEdits,
                     modifier = Modifier.fillMaxWidth()) { Text("选择录屏") }
@@ -135,7 +135,7 @@ fun MediaScreen(workspace: MediaWorkspace) {
                             enabled = !state.busy && !savePending, modifier = Modifier.fillMaxWidth()) { Text("取这一帧") }
                     }
                     state.frame?.let { frame ->
-                        Text("原片编辑 · 实际帧 ${frame.presentationTimeUs} µs", style = MaterialTheme.typography.labelLarge)
+                        Text("原片编辑 · 画面时间 ${frame.presentationTimeUs / 1000} ms（毫秒精度）", style = MaterialTheme.typography.labelLarge)
                         Text("在画面拖出黑色遮挡，或按比例添加。这里仍是本机原片，生成后才能复核和保存。",
                             style = MaterialTheme.typography.bodySmall)
                         FrameEditor(frame.bitmap, selected.masks, !state.busy && !savePending, workspace::addMask)

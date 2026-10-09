@@ -102,39 +102,10 @@ internal object SafeMediaWriterValidation {
         }
     }
 
-    fun verifyVideoInput(file: File, endUs: Long): VideoInfo {
-        requireMp4(file)
-        val extractor = MediaExtractor()
-        try {
-            extractor.setDataSource(file.absolutePath)
-            val format = videoTrack(extractor).second
-            // Apply the same input bit-depth / profile gate as import and frame decoding.
-            // HEVC input is allowed; the generated output below remains strictly AVC-only.
-            requireSupportedVideoBitstream(format)
-            check(format.containsKey(MediaFormat.KEY_DURATION) &&
-                format.getLong(MediaFormat.KEY_DURATION) >= endUs
-            ) { "裁剪区间超出实际视频时长。" }
-            val rotation = format.intOrZero(MediaFormat.KEY_ROTATION)
-            check(rotation in setOf(0, 90, 180, 270)) { "视频方向无效。" }
-            val width = visibleSize(format, horizontal = true)
-            val height = visibleSize(format, horizontal = false)
-            val displayWidth = if (rotation % 180 == 0) width else height
-            val displayHeight = if (rotation % 180 == 0) height else width
-            check(displayWidth in 1..1080 && displayHeight in 1..2400 && displayWidth < displayHeight) {
-                "只支持最高 1080 × 2400 的固定竖屏视频。"
-            }
-            // Imported sources also pass the full decoder's strict SDR checks. Explicit HDR
-            // signals are rejected here as defense in depth before starting Transformer.
-            check(!format.containsKey(MediaFormat.KEY_HDR_STATIC_INFO)) { "暂不支持 HDR 视频。" }
-            if (format.containsKey(MediaFormat.KEY_COLOR_TRANSFER)) {
-                check(format.getInteger(MediaFormat.KEY_COLOR_TRANSFER) == MediaFormat.COLOR_TRANSFER_SDR_VIDEO) {
-                    "暂不支持 HDR 或无法判定传递函数的视频。"
-                }
-            }
-            return VideoInfo(displayWidth, displayHeight, format.getLong(MediaFormat.KEY_DURATION))
-        } finally {
-            extractor.release()
-        }
+    fun verifyVideoInput(file: File, endUs: Long): InputVideoInfo {
+        val input = MediaInputPolicy.inspect(file)
+        check(input.metadata.durationUs >= endUs) { "裁剪区间超出实际视频时长。" }
+        return input
     }
 
     data class VideoInfo(val width: Int, val height: Int, val durationUs: Long)
@@ -144,10 +115,18 @@ internal object SafeMediaWriterValidation {
         file: File,
         selectedDurationUs: Long,
         masks: List<OpaqueMask>,
+        expectedWidth: Int,
+        expectedHeight: Int,
+        expectedFrameCount: Int,
     ): VideoInfo {
         currentCoroutineContext().ensureActive()
         requireMp4(file)
         val extractor = MediaExtractor()
+        val samplePts = mutableListOf<Long>()
+        // Bound verification work by the real selected duration, not nominal-fps metadata.
+        // This is a 120 fps equivalent resource budget, not an enforced frame cadence; keep
+        // sparse VFR frames and their final state rather than dropping or inventing samples.
+        val frameBudget = ((selectedDurationUs * 120 + 999_999) / 1_000_000 + 3).toInt()
         val info = try {
             extractor.setDataSource(file.absolutePath)
             check(extractor.trackCount == 1) { "输出含有音频或其他额外轨道，已丢弃。" }
@@ -158,26 +137,48 @@ internal object SafeMediaWriterValidation {
             check(format.intOrZero(MediaFormat.KEY_ROTATION) == 0) {
                 "输出依赖旋转元数据，无法确认遮挡坐标。"
             }
+            check(format.intOrZero(MediaFormat.KEY_COLOR_TRANSFER) !in setOf(
+                MediaFormat.COLOR_TRANSFER_ST2084, MediaFormat.COLOR_TRANSFER_HLG,
+            )) { "输出仍标为 HDR，无法确认已完成真实 SDR 色调映射。" }
+            // An omitted container color field is valid: controlled AVC output uses the same
+            // BT.709/limited/SDR defaults as Media3. Do not demand a complete container whitelist.
+            val sarWidth = format.intOrZero("sar-width")
+            val sarHeight = format.intOrZero("sar-height")
+            check(sarWidth <= 0 || sarHeight <= 0 || sarWidth == sarHeight) {
+                "输出仍依赖非方形像素比例，无法确认遮挡坐标。"
+            }
+            check(format.containsKey(MediaFormat.KEY_DURATION)) { "输出缺少有效时长。" }
             val durationUs = format.getLong(MediaFormat.KEY_DURATION)
-            check(durationUs in 1..selectedDurationUs && durationUs <= 10_000_000L) {
+            check(durationUs in 1..selectedDurationUs + MediaLimits.TIMESTAMP_TOLERANCE_US &&
+                durationUs <= 10_000_000L + MediaLimits.TIMESTAMP_TOLERANCE_US
+            ) {
                 "输出时长无效或超过选择的区间。"
             }
             val width = visibleSize(format, horizontal = true)
             val height = visibleSize(format, horizontal = false)
-            check(width in 1..1080 && height in 1..2400 && width < height) { "输出画面尺寸无效。" }
+            check(width > 0 && height > 0 && minOf(width, height) <= 1080 && maxOf(width, height) <= 2400) {
+                "输出画面超出长边 2400、短边 1080 的预算。"
+            }
+            check(width == expectedWidth && height == expectedHeight) {
+                "输出尺寸与遮挡前协商的画布不一致，已丢弃。"
+            }
             extractor.selectTrack(0)
-            var samples = 0
             while (extractor.sampleTime >= 0) {
                 currentCoroutineContext().ensureActive()
-                check(extractor.sampleTime < selectedDurationUs) { "输出包含裁剪区间外的视频样本。" }
+                check(extractor.sampleTime < selectedDurationUs + MediaLimits.TIMESTAMP_TOLERANCE_US &&
+                    extractor.sampleTime < durationUs + MediaLimits.TIMESTAMP_TOLERANCE_US
+                ) { "输出包含裁剪区间外的视频样本。" }
                 check(extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_ENCRYPTED == 0) {
                     "输出含有加密样本。"
                 }
-                samples++
-                check(samples <= 601) { "10 秒输出的视频帧数超过限额。" }
+                samplePts += extractor.sampleTime
+                check(samplePts.size <= frameBudget) { "输出的实际视频帧数超过所选时长的处理预算。" }
                 if (!extractor.advance()) break
             }
-            check(samples > 0) { "输出没有视频样本。" }
+            check(samplePts.isNotEmpty()) { "输出没有视频样本。" }
+            check(samplePts.size == expectedFrameCount && samplePts.distinct().size == samplePts.size) {
+                "实际输出的样本数或 PTS 与编码结果不一致，已丢弃。"
+            }
             VideoInfo(width, height, durationUs)
         } finally {
             extractor.release()
@@ -185,7 +186,7 @@ internal object SafeMediaWriterValidation {
 
         // Decode ALL output frames to EOS with actual PTS / crop / YUV checks. This is a new
         // decoder of the actual saved bytes, not an encoder callback or a preview overlay.
-        VideoFrameDecoder(context).validate(
+        val decodedPts = VideoFrameDecoder(context).validateOutput(
             file,
             SourceMetadata(
                 mime = "video/mp4", byteLength = file.length(), sha256 = "",
@@ -193,6 +194,9 @@ internal object SafeMediaWriterValidation {
                 durationUs = info.durationUs,
             ),
         ) { image -> verifyMasksOnDecodedFrame(image, masks) }
+        check(decodedPts == samplePts.sorted()) {
+            "输出没有逐帧完整解码，或实际解码 PTS 与封装样本不一致，已丢弃。"
+        }
         verifyDecodedVideoSamples(file, info, masks)
         return info
     }

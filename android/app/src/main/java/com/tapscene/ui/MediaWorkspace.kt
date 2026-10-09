@@ -337,6 +337,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
                 val safe = when (error) {
                     is com.tapscene.media.MediaImportException -> error.message
                     is com.tapscene.media.FrameDecodeException -> error.message
+                    is com.tapscene.media.MediaExportException -> error.message
                     is SaveDocumentException -> error.message
                     else -> null
                 }

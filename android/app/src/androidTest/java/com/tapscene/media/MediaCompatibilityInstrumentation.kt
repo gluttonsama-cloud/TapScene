@@ -5,13 +5,17 @@ import android.app.Instrumentation
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.media.Image
+import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.os.Build
 import android.os.Bundle
 import android.os.Looper
 import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
+import kotlin.math.abs
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -23,9 +27,9 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 
 /**
- * Platform-only device smoke checks. Run with adb am instrument -w; no test framework is needed.
- * Assets are synthetic CI fixtures, never user media. This deliberately bypasses the system picker
- * and SourceImporter's content-provider copy/registration flow; those still need separate coverage.
+ * Platform-only device smoke checks. Run with adb am instrument -w; no extra test framework.
+ * Synthetic fixtures bypass the system picker and SourceImporter's provider-copy/registration
+ * flow. Those flows and phone-specific hardware support still need separate device checks.
  */
 class MediaCompatibilityInstrumentation : Instrumentation() {
     override fun onCreate(arguments: Bundle?) {
@@ -37,12 +41,9 @@ class MediaCompatibilityInstrumentation : Instrumentation() {
         super.onStart()
         val result = Bundle()
         try {
-            // Instrumentation's worker must not occupy the main looper: Transformer switches there.
             check(Looper.myLooper() != Looper.getMainLooper()) { "Checks must not block the main looper" }
-            runBlocking(Dispatchers.IO) {
-                withTimeout(180_000) { runChecks() }
-            }
-            result.putString("stream", "TAPSCENE_MEDIA_CHECKS_OK")
+            runBlocking(Dispatchers.IO) { withTimeout(240_000) { runChecks() } }
+            result.putString("stream", "TAPSCENE_MEDIA_CHECKS_OK (read individual capability results)")
             finish(Activity.RESULT_OK, result)
         } catch (failure: Throwable) {
             result.putString("stream", "TAPSCENE_MEDIA_CHECKS_FAILED")
@@ -52,45 +53,47 @@ class MediaCompatibilityInstrumentation : Instrumentation() {
     }
 
     private suspend fun runChecks() {
-        val privateRoot = targetContext.noBackupFilesDir
-        val outputRoot = File(privateRoot, "media-checks-${UUID.randomUUID()}")
+        val outputRoot = File(targetContext.noBackupFilesDir, "media-checks-${UUID.randomUUID()}")
         check(outputRoot.mkdir()) { "Could not reserve private smoke-check directory" }
         val sources = mutableListOf<Fixture>()
         val ownedSources = mutableListOf<File>()
         var failure: Throwable? = null
         try {
-            // Record each exclusively-created path before reading bytes, so failed copies clean up.
-            val hevc = copyFixture("hevc-sdr.mp4", ownedSources).also(sources::add)
-            val avc = copyFixture("avc-sdr.mp4", ownedSources).also(sources::add)
-            val tenBit = copyFixture("hevc-10bit-sdr.mp4", ownedSources).also(sources::add)
-            val hdr = copyFixture("hevc-hdr.mp4", ownedSources).also(sources::add)
-            val unknownColour = copyFixture("hevc-unknown-colour.mp4", ownedSources).also(sources::add)
-            checkFixture(hevc, MediaFormat.MIMETYPE_VIDEO_HEVC, hasAudio = true)
-            checkFixture(avc, MediaFormat.MIMETYPE_VIDEO_AVC, hasAudio = false)
-            checkFixture(tenBit, MediaFormat.MIMETYPE_VIDEO_HEVC, hasAudio = false)
-            checkFixture(hdr, MediaFormat.MIMETYPE_VIDEO_HEVC, hasAudio = false)
-            checkFixture(unknownColour, MediaFormat.MIMETYPE_VIDEO_HEVC, hasAudio = false)
-
             val writer = SafeMediaWriter(targetContext)
             val decoder = VideoFrameDecoder(targetContext)
-            checkSupported(hevc, writer, decoder, File(outputRoot, "hevc"))
-            checkSourcesUnchanged(sources)
-            status("HEVC Main 8-bit SDR: full decode, PTS, masked PNG and silent H.264 passed")
-            checkSupported(avc, writer, decoder, File(outputRoot, "avc"))
-            checkSourcesUnchanged(sources)
-            status("AVC baseline regression: full decode, PTS, masked PNG and video passed")
-
-            checkRejected(tenBit, decoder, writer, File(outputRoot, "reject-10bit"))
-            checkRejected(hdr, decoder, writer, File(outputRoot, "reject-hdr"))
-            checkRejected(unknownColour, decoder, writer, File(outputRoot, "reject-unknown-colour"))
-            checkSourcesUnchanged(sources)
-            status("HEVC Main 10 SDR, Main 8 HDR and unknown colour were rejected without output")
+            for (spec in fixtureSpecs()) {
+                val fixture = copyFixture(spec, ownedSources).also(sources::add)
+                checkFixture(fixture)
+                val output = File(outputRoot, spec.name.removeSuffix(".mp4"))
+                when {
+                    spec.hdr && Build.VERSION.SDK_INT < 29 -> {
+                        checkHdrApiGuard(fixture, decoder, writer, output)
+                        status("NOT_SUPPORTED ${spec.name}: API ${Build.VERSION.SDK_INT} < 29; explicit HDR guard and cleanup passed")
+                    }
+                    spec.optionalProfile != null && advertisedDecoder(fixture, spec.optionalProfile) == null -> {
+                        status("NOT_SUPPORTED ${spec.name}: no decoder advertises profile=${spec.optionalProfile} at ${spec.width}x${spec.height}; no decode/export pass claimed")
+                    }
+                    else -> {
+                        // An advertised decoder is only a prerequisite. Runtime failures fail the
+                        // check; never relabel arbitrary exceptions as an unsupported device.
+                        if (spec.hdr) status("CHECK ${spec.name}: API ${Build.VERSION.SDK_INT}; actual Surface/GL tone mapping is required")
+                        checkSupported(fixture, writer, decoder, output, checkCancellation = spec.name == "avc-sdr.mp4")
+                        status("PASS ${spec.name}: sampled Surface decode, actual millisecond PTS, geometry, PNG and every silent H.264 output frame")
+                    }
+                }
+                checkSourcesUnchanged(sources)
+            }
         } catch (error: Throwable) {
             failure = error
             throw error
         } finally {
-            // Only paths created by this run; never sweep the app's shared sources folder.
             var cleanupError: Throwable? = null
+            try {
+                checkSourcesUnchanged(sources)
+            } catch (error: Throwable) {
+                cleanupError = error
+            }
+            // Only paths exclusively created by this run, never sweep the shared sources folder.
             for (file in ownedSources + outputRoot) {
                 try {
                     check(file.deleteRecursively() && !file.exists()) { "Synthetic fixture cleanup failed" }
@@ -104,66 +107,84 @@ class MediaCompatibilityInstrumentation : Instrumentation() {
         }
     }
 
-    private data class Fixture(val source: ImportedSource, val file: File)
+    /** PTS are fixture facts from FFprobe, not frame-index / nominal-fps calculations. */
+    private data class FixtureSpec(
+        val name: String,
+        val mime: String,
+        val width: Int = 160,
+        val height: Int = 288,
+        val rotation: Int = 0,
+        val sar: Float = 1f,
+        val surfaceWidth: Int = 160,
+        val surfaceHeight: Int = 288,
+        val durationUs: Long = 1_000_000L,
+        val ptsUs: List<Long> = listOf(0, 100_000, 200_000, 300_000, 400_000, 500_000, 600_000, 700_000, 800_000, 900_000),
+        val hasAudio: Boolean = false,
+        val optionalProfile: Int? = null,
+        val hdr: Boolean = false,
+        val fullClip: Boolean = false,
+    )
 
-    private fun copyFixture(assetName: String, ownedSources: MutableList<File>): Fixture {
+    private fun fixtureSpecs() = listOf(
+        FixtureSpec("avc-sdr.mp4", MediaFormat.MIMETYPE_VIDEO_AVC),
+        FixtureSpec("hevc-sdr.mp4", MediaFormat.MIMETYPE_VIDEO_HEVC, hasAudio = true),
+        FixtureSpec("hevc-unknown-colour.mp4", MediaFormat.MIMETYPE_VIDEO_HEVC),
+        FixtureSpec("hevc-10bit-sdr.mp4", MediaFormat.MIMETYPE_VIDEO_HEVC,
+            optionalProfile = MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10),
+        FixtureSpec("avc-long-screen-unknown-colour.mp4", MediaFormat.MIMETYPE_VIDEO_AVC,
+            width = 1440, height = 3200, surfaceWidth = 1080, surfaceHeight = 2400,
+            ptsUs = listOf(0, 250_000, 500_000, 750_000), fullClip = true),
+        FixtureSpec("avc-rotated-sar-vfr.mp4", MediaFormat.MIMETYPE_VIDEO_AVC,
+            width = 180, height = 320, rotation = 270, sar = 1.5f,
+            surfaceWidth = 320, surfaceHeight = 270, durationUs = 933_333,
+            ptsUs = listOf(0, 66_667, 233_333, 466_667, 500_000, 900_000), fullClip = true),
+        FixtureSpec("hevc-hdr.mp4", MediaFormat.MIMETYPE_VIDEO_HEVC,
+            optionalProfile = MediaCodecInfo.CodecProfileLevel.HEVCProfileMain, hdr = true),
+    )
+
+    private data class Fixture(val source: ImportedSource, val file: File, val spec: FixtureSpec, val ptsUs: List<Long>)
+
+    private fun copyFixture(spec: FixtureSpec, ownedSources: MutableList<File>): Fixture {
         val id = UUID.randomUUID().toString()
         val relativePath = "sources/$id.mp4"
         val file = File(targetContext.noBackupFilesDir, relativePath)
         check(file.parentFile!!.isDirectory || file.parentFile!!.mkdirs())
         check(file.createNewFile()) { "Synthetic source UUID collision" }
         ownedSources.add(file)
-        context.assets.open(assetName).use { input ->
-            file.outputStream().use { output -> input.copyTo(output) }
-        }
-        check(file.length() > 0) { "Empty fixture: $assetName" }
-        val extractor = MediaExtractor()
-        val metadata = try {
-            extractor.setDataSource(file.absolutePath)
-            val format = videoTrack(extractor).second
-            SourceMetadata(
-                mime = "video/mp4", byteLength = file.length(), sha256 = sha256(file),
-                width = visibleSize(format, horizontal = true),
-                height = visibleSize(format, horizontal = false),
-                rotationDeg = format.intOrZero(MediaFormat.KEY_ROTATION),
-                durationUs = format.getLong(MediaFormat.KEY_DURATION),
-            )
-        } finally {
-            extractor.release()
-        }
-        return Fixture(ImportedSource(id, relativePath, assetName, metadata), file)
+        context.assets.open(spec.name).use { input -> file.outputStream().use { input.copyTo(it) } }
+        check(file.length() > 0) { "Empty fixture: ${spec.name}" }
+        val metadata = MediaInputPolicy.inspect(file, file.length(), sha256(file)).metadata
+        return Fixture(ImportedSource(id, relativePath, spec.name, metadata), file, spec, samplePts(file))
     }
 
-    private fun checkFixture(fixture: Fixture, mime: String, hasAudio: Boolean) {
+    private fun checkFixture(fixture: Fixture) {
         val metadata = fixture.source.metadata
-        check(metadata.width == 160 && metadata.height == 288 && metadata.rotationDeg == 0)
-        check(metadata.durationUs == 1_000_000L) { "Fixture must have a one-second video track" }
+        val spec = fixture.spec
+        check(metadata.width == spec.width && metadata.height == spec.height && metadata.rotationDeg == spec.rotation)
+        check(abs(metadata.pixelWidthHeightRatio - spec.sar) < 0.0001f)
+        check(abs(metadata.durationUs - spec.durationUs) <= 1) { "Fixture duration differs from its probed track" }
+        // FFprobe rounds a 1/30000 timebase to microseconds; Android may truncate by one us.
+        check(fixture.ptsUs.size == spec.ptsUs.size && fixture.ptsUs.zip(spec.ptsUs).all { (a, b) -> abs(a - b) <= 1 }) {
+            "Actual fixture PTS differ from recorded FFprobe sample times"
+        }
         val extractor = MediaExtractor()
         try {
             extractor.setDataSource(fixture.file.absolutePath)
-            val (track, format) = videoTrack(extractor)
-            check(format.getString(MediaFormat.KEY_MIME) == mime)
+            check(videoTrack(extractor).second.getString(MediaFormat.KEY_MIME) == spec.mime)
             val audioMimes = (0 until extractor.trackCount).mapNotNull { index ->
                 extractor.getTrackFormat(index).getString(MediaFormat.KEY_MIME)?.takeIf { it.startsWith("audio/") }
             }
-            check(audioMimes == if (hasAudio) listOf(MediaFormat.MIMETYPE_AUDIO_AAC) else emptyList<String>()) {
-                "Unexpected fixture audio tracks"
-            }
-            check(extractor.trackCount == if (hasAudio) 2 else 1)
-            extractor.selectTrack(track)
-            val times = mutableListOf<Long>()
-            while (extractor.sampleTime >= 0) {
-                times.add(extractor.sampleTime)
-                check(times.size <= 10) { "Fixture contains extra video samples" }
-                if (!extractor.advance()) break
-            }
-            // Extractor reads decoding order; HEVC B-frame input PTS may legitimately be reordered.
-            check(times.distinct().size == 10 && times.sorted() == List(10) { it * 100_000L }) {
-                "Fixture must contain ten distinct exact 10 fps PTS values"
-            }
+            check(audioMimes == if (spec.hasAudio) listOf(MediaFormat.MIMETYPE_AUDIO_AAC) else emptyList<String>())
+            check(extractor.trackCount == if (spec.hasAudio) 2 else 1)
         } finally {
             extractor.release()
         }
+    }
+
+    private fun advertisedDecoder(fixture: Fixture, profile: Int): String? {
+        val format = MediaFormat.createVideoFormat(fixture.spec.mime, fixture.spec.width, fixture.spec.height)
+        format.setInteger(MediaFormat.KEY_PROFILE, profile)
+        return MediaCodecList(MediaCodecList.REGULAR_CODECS).findDecoderForFormat(format)
     }
 
     private suspend fun checkSupported(
@@ -171,51 +192,63 @@ class MediaCompatibilityInstrumentation : Instrumentation() {
         writer: SafeMediaWriter,
         decoder: VideoFrameDecoder,
         outputDirectory: File,
+        checkCancellation: Boolean,
     ) {
         val metadata = fixture.source.metadata
-        var decodedFrames = 0
-        decoder.validate(fixture.file, metadata) { decodedFrames++ }
-        check(decodedFrames == 10) { "Full input decoding did not reach all ten frames" }
-        val frame = decoder.decode(fixture.source, 123_456)
-        try {
-            check(frame.presentationTimeUs == 200_000L) { "Decoder substituted requested time for real PTS" }
-            check(frame.bitmap.width == 160 && frame.bitmap.height == 288)
-            val last = decoder.decode(fixture.source, metadata.durationUs)
+        decoder.validate(fixture.file, metadata) // First/middle/last Surface samples, not full source decode.
+        for (timeUs in listOf(0L, metadata.durationUs)) {
+            val edge = decoder.decode(fixture.source, timeUs)
             try {
-                check(last.presentationTimeUs == 900_000L) { "EOS must return the real last frame's PTS" }
+                checkFrameIdentity(edge, fixture, timeUs)
+                val expected = if (timeUs == 0L) fixture.ptsUs.first() else fixture.ptsUs.last()
+                check(edge.presentationTimeUs == expected / 1_000 * 1_000) { "First/last frame lost its actual PTS" }
             } finally {
-                last.bitmap.recycle()
+                edge.bitmap.recycle()
             }
+        }
+        val requestedUs = 123_456L
+        val frame = decoder.decode(fixture.source, requestedUs)
+        try {
+            checkFrameIdentity(frame, fixture, requestedUs)
+            check(frame.presentationTimeUs != requestedUs) { "Decoder relabeled a frame with the requested time" }
             val stages = mutableListOf<SafeMediaWriter.Stage>()
-            val masks = listOf(OpaqueMask(0.20f, 0.25f, 0.70f, 0.65f))
+            val mask = OpaqueMask(0.20f, 0.25f, 0.70f, 0.65f)
+            val masks = listOf(mask)
             val png = writer.writePng(frame.bitmap, masks, outputDirectory) { stages.add(it) }
             check(stages == SafeMediaWriter.Stage.entries.toList())
             checkCandidate(png, "image/png")
-            check(png.durationUs == null)
-            checkPngPixels(png.file, masks.single())
+            check(png.durationUs == null && png.width == fixture.spec.surfaceWidth && png.height == fixture.spec.surfaceHeight)
+            checkPngPixels(png.file, mask)
 
+            val startUs = if (fixture.spec.fullClip) 0L else 100_000L
+            val endUs = if (fixture.spec.fullClip) metadata.durationUs else 900_000L
             stages.clear()
-            val video = writer.writeVideo(fixture.file, 100_000, 900_000, masks, outputDirectory) {
-                stages.add(it)
-            }
+            val video = writer.writeVideo(fixture.file, startUs, endUs, masks, outputDirectory) { stages.add(it) }
             check(stages == SafeMediaWriter.Stage.entries.toList())
             checkCandidate(video, "video/mp4")
-            checkVideoTracks(video)
+            check(video.width <= fixture.spec.surfaceWidth && video.height <= fixture.spec.surfaceHeight)
+            checkVideoTracks(video, endUs - startUs)
+            val outputMask = fittedMask(mask, fixture.spec.surfaceWidth, fixture.spec.surfaceHeight, video.width, video.height)
             var outputFrames = 0
-            decoder.validate(
+            val decodedPts = decoder.validateOutput(
                 video.file,
                 SourceMetadata("video/mp4", video.file.length(), video.sha256, video.width,
                     video.height, 0, checkNotNull(video.durationUs)),
             ) { image ->
-                checkMaskedPixels(image, masks.single())
+                checkMaskedPixels(image, outputMask)
                 outputFrames++
             }
-            check(outputFrames == 8) { "Trim must decode all eight selected frames" }
-            checkCancelledWrite(outputDirectory) { onStage ->
-                writer.writePng(frame.bitmap, masks, outputDirectory, onStage)
+            val writtenPts = samplePts(video.file)
+            check(outputFrames == writtenPts.size && decodedPts == writtenPts) { "Every written output frame must be decoded and inspected" }
+            // Preserve the actual selected VFR samples, including the final sparse frame.
+            // The encoder rate hint is not a frame-index clock or permission to drop frames.
+            val selectedPts = fixture.ptsUs.filter { it >= startUs && it < endUs }.map { it - startUs }
+            check(decodedPts.size == selectedPts.size && decodedPts.zip(selectedPts).all { (actual, expected) -> abs(actual - expected) < 1_000 }) {
+                "Trimmed output lost a fixture frame or changed its actual presentation time"
             }
-            checkCancelledWrite(outputDirectory) { onStage ->
-                writer.writeVideo(fixture.file, 100_000, 900_000, masks, outputDirectory, onStage)
+            if (checkCancellation) {
+                checkCancelledWrite(outputDirectory) { onStage -> writer.writePng(frame.bitmap, masks, outputDirectory, onStage) }
+                checkCancelledWrite(outputDirectory) { onStage -> writer.writeVideo(fixture.file, startUs, endUs, masks, outputDirectory, onStage) }
             }
             check(!frame.bitmap.isRecycled) { "Writer recycled caller-owned input" }
             checkCandidate(png, "image/png")
@@ -225,10 +258,27 @@ class MediaCompatibilityInstrumentation : Instrumentation() {
         }
     }
 
+    private fun checkFrameIdentity(frame: DecodedFrame, fixture: Fixture, requestedUs: Long) {
+        check(frame.timePrecisionUs == 1_000L && frame.presentationTimeUs % 1_000L == 0L) {
+            "Media3 Frame.presentationTimeMs must be represented with explicit millisecond precision"
+        }
+        val actualSample = fixture.ptsUs.firstOrNull { it / 1_000 * 1_000 == frame.presentationTimeUs }
+        check(actualSample != null && actualSample - frame.presentationTimeUs in 0L..999L) {
+            "Frame timestamp does not identify an actual source PTS at the advertised precision"
+        }
+        val requestMs = requestedUs.coerceAtMost(fixture.source.metadata.durationUs - 1) / 1_000
+        val before = fixture.ptsUs.lastOrNull { it / 1_000 <= requestMs }
+        val after = fixture.ptsUs.firstOrNull { it / 1_000 >= requestMs }
+        check(actualSample == before || actualSample == after) { "Frame is not adjacent to the requested position" }
+        check(frame.bitmap.width == fixture.spec.surfaceWidth && frame.bitmap.height == fixture.spec.surfaceHeight) {
+            "Surface did not apply source rotation/SAR and bounded aspect-preserving geometry"
+        }
+    }
+
     private fun checkCandidate(candidate: SafeMediaWriter.CandidateMedia, mime: String) {
         check(candidate.file.isFile && candidate.file.length() > 0)
         check(candidate.file.canonicalFile.toPath().startsWith(targetContext.noBackupFilesDir.canonicalFile.toPath()))
-        check(candidate.mimeType == mime && candidate.width == 160 && candidate.height == 288)
+        check(candidate.mimeType == mime && minOf(candidate.width, candidate.height) in 1..1080 && maxOf(candidate.width, candidate.height) <= 2400)
         check(candidate.sha256 == sha256(candidate.file)) { "Candidate digest does not describe actual bytes" }
     }
 
@@ -249,7 +299,7 @@ class MediaCompatibilityInstrumentation : Instrumentation() {
         }
     }
 
-    private fun checkVideoTracks(candidate: SafeMediaWriter.CandidateMedia) {
+    private fun checkVideoTracks(candidate: SafeMediaWriter.CandidateMedia, maxDurationUs: Long) {
         val extractor = MediaExtractor()
         try {
             extractor.setDataSource(candidate.file.absolutePath)
@@ -257,8 +307,10 @@ class MediaCompatibilityInstrumentation : Instrumentation() {
             val format = extractor.getTrackFormat(0)
             check(format.getString(MediaFormat.KEY_MIME) == MediaFormat.MIMETYPE_VIDEO_AVC)
             check(format.intOrZero(MediaFormat.KEY_ROTATION) == 0)
+            check(visibleSize(format, true) == candidate.width && visibleSize(format, false) == candidate.height)
+            check(format.intOrZero(MediaFormat.KEY_COLOR_TRANSFER) !in setOf(MediaFormat.COLOR_TRANSFER_ST2084, MediaFormat.COLOR_TRANSFER_HLG))
             val actualDuration = format.getLong(MediaFormat.KEY_DURATION)
-            check(actualDuration in 1..800_000L && candidate.durationUs == actualDuration) {
+            check(actualDuration in 1..(maxDurationUs + 1_000L) && candidate.durationUs == actualDuration) {
                 "Candidate duration must match its actual trimmed video track"
             }
         } finally {
@@ -266,9 +318,18 @@ class MediaCompatibilityInstrumentation : Instrumentation() {
         }
     }
 
+    private fun fittedMask(mask: OpaqueMask, contentWidth: Int, contentHeight: Int, width: Int, height: Int): OpaqueMask {
+        val scale = minOf(width.toDouble() / contentWidth, height.toDouble() / contentHeight)
+        val w = contentWidth * scale / width
+        val h = contentHeight * scale / height
+        return OpaqueMask(((1 - w) / 2 + mask.left * w).toFloat(), ((1 - h) / 2 + mask.top * h).toFloat(),
+            ((1 - w) / 2 + mask.right * w).toFloat(), ((1 - h) / 2 + mask.bottom * h).toFloat())
+    }
+
     private fun checkMaskedPixels(image: Image, mask: OpaqueMask) {
         val crop = image.cropRect
         val rect = mask.toPixelRect(crop.width(), crop.height()).apply { inset(3, 3) }
+        check(!rect.isEmpty) { "Mask inspection must contain actual output pixels" }
         for (planeIndex in 0..2) {
             val plane = image.planes[planeIndex]
             val data = plane.buffer.duplicate()
@@ -311,34 +372,38 @@ class MediaCompatibilityInstrumentation : Instrumentation() {
         check(snapshot(outputDirectory) == before) { "Cancellation left partial output or changed an older candidate" }
     }
 
-    private suspend fun checkRejected(
-        fixture: Fixture,
-        decoder: VideoFrameDecoder,
-        writer: SafeMediaWriter,
-        outputDirectory: File,
-    ) {
-        var frames = 0
+    private suspend fun checkHdrApiGuard(fixture: Fixture, decoder: VideoFrameDecoder, writer: SafeMediaWriter, directory: File) {
         try {
-            decoder.validate(fixture.file, fixture.source.metadata) { frames++ }
-            error("Unsupported fixture decoded successfully: ${fixture.source.displayName}")
-        } catch (_: FrameDecodeException) {
-            check(frames == 0) { "Unsupported format reached decoded output" }
+            decoder.validate(fixture.file, fixture.source.metadata)
+            error("API <29 decoded explicit HDR without supported tone mapping")
+        } catch (expected: FrameDecodeException) {
+            check(expected.message.orEmpty().contains("hdr_capability")) { "Wrong HDR failure stage: ${expected.message}" }
         }
-        var rejected = false
-        var startedRendering = false
         try {
-            writer.writeVideo(fixture.file, 0, 1_000_000, emptyList(), outputDirectory) {
-                if (it == SafeMediaWriter.Stage.RENDERING) startedRendering = true
+            writer.writeVideo(fixture.file, 0, fixture.source.metadata.durationUs, emptyList(), directory)
+            error("API <29 exported explicit HDR without supported tone mapping")
+        } catch (expected: MediaExportException) {
+            check(expected.message.orEmpty().contains("HDR 色调映射准备")) { "Wrong HDR export failure stage: ${expected.message}" }
+        }
+        check(snapshot(directory).isEmpty()) { "Unsupported HDR left an unpublished output" }
+    }
+
+    private fun samplePts(file: File): List<Long> {
+        val extractor = MediaExtractor()
+        try {
+            extractor.setDataSource(file.absolutePath)
+            extractor.selectTrack(videoTrack(extractor).first)
+            val times = mutableListOf<Long>()
+            while (extractor.sampleTime >= 0) {
+                times.add(extractor.sampleTime)
+                check(times.size <= 100) { "Synthetic fixture/output has unexpected extra samples" }
+                if (!extractor.advance()) break
             }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: FrameDecodeException) {
-            rejected = true
-        } catch (_: IllegalStateException) {
-            rejected = true
+            check(times.isNotEmpty() && times.distinct().size == times.size)
+            return times.sorted() // Container packets can be in decode order for B frames.
+        } finally {
+            extractor.release()
         }
-        check(rejected && !startedRendering) { "Writer did not reject unsupported input before rendering" }
-        check(snapshot(outputDirectory).isEmpty()) { "Rejected input left a candidate or partial file" }
     }
 
     private fun snapshot(directory: File): Map<String, String> =
@@ -349,8 +414,7 @@ class MediaCompatibilityInstrumentation : Instrumentation() {
 
     private fun checkSourcesUnchanged(sources: List<Fixture>) {
         for (fixture in sources) {
-            check(fixture.file.isFile && fixture.file.length() == fixture.source.metadata.byteLength &&
-                sha256(fixture.file) == fixture.source.metadata.sha256) {
+            check(fixture.file.isFile && fixture.file.length() == fixture.source.metadata.byteLength && sha256(fixture.file) == fixture.source.metadata.sha256) {
                 "A writer operation changed or removed the source fixture"
             }
         }

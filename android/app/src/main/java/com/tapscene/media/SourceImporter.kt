@@ -3,12 +3,10 @@ package com.tapscene.media
 import android.content.Context
 import android.media.MediaExtractor
 import android.media.MediaFormat
-import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.OpenableColumns
 import java.io.File
 import java.io.FileOutputStream
-import java.io.RandomAccessFile
 import java.security.MessageDigest
 import java.util.UUID
 import kotlin.coroutines.CoroutineContext
@@ -47,7 +45,7 @@ class SourceImporter(context: Context) {
                 val ownerContext = currentCoroutineContext()
                 val copied = runInterruptible { copy(uri, file, ownerContext) }
                 ownerContext.ensureActive()
-                val metadata = inspect(file, copied.first, copied.second)
+                val metadata = runInterruptible { inspect(file, copied.first, copied.second) }
                 VideoFrameDecoder(appContext).validate(file, metadata)
                 ownerContext.ensureActive()
                 val source = ImportedSource(
@@ -120,55 +118,8 @@ class SourceImporter(context: Context) {
         return length to digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }
 
-    private fun inspect(file: File, byteLength: Long, sha256: String): SourceMetadata {
-        requireMp4Header(file)
-        val retriever = MediaMetadataRetriever()
-        try {
-            retriever.setDataSource(file.absolutePath)
-            if (retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE) != "video/mp4") {
-                throw MediaImportException("只支持 MP4 容器的 H.264 或 H.265/HEVC 8 位 SDR 录屏。")
-            }
-        } finally {
-            retriever.release()
-        }
-        val extractor = MediaExtractor()
-        try {
-            extractor.setDataSource(file.absolutePath)
-            val format = videoTrack(extractor).second
-            val videoMime = format.getString(MediaFormat.KEY_MIME)
-            if (!VideoBitstreamParser.isSupportedMime(videoMime)) {
-                throw MediaImportException("不支持视频编码 ${videoMime ?: "未知"}。请选择 H.264 或 HEVC Main 8 位 SDR；也可关闭录屏的高效编码后重新录制。")
-            }
-            val width = visibleSize(format, horizontal = true)
-            val height = visibleSize(format, horizontal = false)
-            val rotation = format.intOrZero(MediaFormat.KEY_ROTATION)
-            if (rotation !in setOf(0, 90, 180, 270)) throw MediaImportException("不支持此录屏的旋转方式。")
-            val duration = format.getLong(MediaFormat.KEY_DURATION)
-            if (duration <= 0 || duration > MediaLimits.MAX_DURATION_US) {
-                throw MediaImportException("单段录屏须有有效时长，且不能超过 3 分钟。")
-            }
-            val metadata = SourceMetadata("video/mp4", byteLength, sha256, width, height, rotation, duration)
-            if (width <= 0 || height <= 0 || metadata.displayWidth >= metadata.displayHeight ||
-                metadata.displayWidth > MediaLimits.MAX_WIDTH || metadata.displayHeight > MediaLimits.MAX_HEIGHT
-            ) throw MediaImportException("只支持固定竖屏，最高 1080 × 2400。")
-            if (format.containsKey(MediaFormat.KEY_FRAME_RATE)) {
-                val fps = try {
-                    format.getInteger(MediaFormat.KEY_FRAME_RATE).toDouble()
-                } catch (_: ClassCastException) {
-                    format.getFloat(MediaFormat.KEY_FRAME_RATE).toDouble()
-                }
-                if (!fps.isFinite() || fps <= 0 || fps > 60.0) throw MediaImportException("录屏帧率不能超过 60 fps。")
-            }
-            val sarWidth = format.intOrZero("sar-width")
-            val sarHeight = format.intOrZero("sar-height")
-            if ((sarWidth != 0 || sarHeight != 0) && (sarWidth <= 0 || sarWidth != sarHeight)) {
-                throw MediaImportException("暂不支持非方形像素的录屏。")
-            }
-            return metadata
-        } finally {
-            extractor.release()
-        }
-    }
+    private fun inspect(file: File, byteLength: Long, sha256: String): SourceMetadata =
+        MediaInputPolicy.inspect(file, byteLength, sha256).metadata
 
     private fun displayName(uri: Uri): String {
         return try {
@@ -182,18 +133,7 @@ class SourceImporter(context: Context) {
         }
     }
 
-    private fun requireMp4Header(file: File) {
-        RandomAccessFile(file, "r").use { input ->
-            if (input.length() < 16) throw MediaImportException("录屏不是有效的 MP4 文件。")
-            val size = input.readInt().toLong() and 0xffffffffL
-            val boxType = ByteArray(4).also(input::readFully).toString(Charsets.US_ASCII)
-            val brand = ByteArray(4).also(input::readFully).toString(Charsets.US_ASCII)
-            val accepted = setOf("isom", "iso2", "iso3", "iso4", "iso5", "iso6", "iso7", "iso8", "iso9", "mp41", "mp42", "avc1", "hvc1", "hev1", "M4V ")
-            if (boxType != "ftyp" || size < 16 || size > input.length() || brand !in accepted) {
-                throw MediaImportException("只支持标准 MP4 录屏，请在系统录屏设置中选择 MP4 后重新录制。")
-            }
-        }
-    }
+
 }
 
 internal fun videoTrack(extractor: MediaExtractor): Pair<Int, MediaFormat> {

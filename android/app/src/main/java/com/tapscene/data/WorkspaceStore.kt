@@ -64,6 +64,7 @@ class WorkspaceStore(context: Context) {
                         height = metadata.getInt("height"),
                         rotationDeg = metadata.getInt("rotation"),
                         durationUs = metadata.getLong("durationUs"),
+                        pixelWidthHeightRatio = metadata.optDouble("pixelWidthHeightRatio", 1.0).toFloat(),
                     ),
                 ),
                 frameTimeUs = item.getLong("frameTimeUs"),
@@ -111,6 +112,7 @@ class WorkspaceStore(context: Context) {
                     put("height", meta.height)
                     put("rotation", meta.rotationDeg)
                     put("durationUs", meta.durationUs)
+                    put("pixelWidthHeightRatio", meta.pixelWidthHeightRatio)
                 })
             })
         }
