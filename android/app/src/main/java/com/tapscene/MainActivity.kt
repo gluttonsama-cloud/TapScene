@@ -13,6 +13,6 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         RecordingCoordinator.recover(applicationContext)
-        setContent { TapSceneApp(projects = viewModel(), media = viewModel(), candidates = viewModel()) }
+        setContent { TapSceneApp(projects = viewModel(), media = viewModel(), candidates = viewModel(), releases = viewModel()) }
     }
 }

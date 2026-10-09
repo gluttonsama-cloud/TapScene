@@ -56,6 +56,7 @@ class MediaCompatibilityInstrumentation : Instrumentation() {
         com.tapscene.data.ProjectEditingChecks.run(targetContext, ::status)
         com.tapscene.data.AuthoredPathChecks.run(targetContext, ::status)
         com.tapscene.ui.AuthoredPreviewChecks.run(targetContext, ::status)
+        com.tapscene.data.ReleaseStoreChecks.run(targetContext, ::status)
         com.tapscene.data.SourceRegistrationChecks.run(targetContext, ::status)
         CandidateAnalysisChecks.run(targetContext, ::status)
         com.tapscene.recording.RecordingRecoveryTest.run(targetContext, ::status)

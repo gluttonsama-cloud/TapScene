@@ -516,6 +516,55 @@ class ProjectStore(context: Context) {
         file
     }
 
+    /**
+     * Copy only persisted, reviewed PNG inputs while holding the SAME process lock as edits and
+     * deletion. The returned revision and every copied byte therefore describe one snapshot.
+     * Destination is an existing, empty app-private assets directory owned by ReleaseStore.
+     * Caller owns partial output on failure; this method never deletes or moves draft/source data.
+     */
+    fun copyReleaseInputs(projectId: String, expectedRevision: Long, destination: File): ProjectSnapshot = access { db ->
+        val current = requireSnapshot(db, projectId)
+        check(current.project.revision == expectedRevision) { "草稿修订已改变，请重新检查后生成。" }
+        val target = destination.absoluteFile
+        check(target.canonicalFile == target && target.isDirectory &&
+            target.path.startsWith(root.path + File.separator) &&
+            target.listFiles()?.isEmpty() == true) { "成品复制目标必须是空的本机私有目录。" }
+        var total = 0L
+        current.steps.forEach { step ->
+            val asset = step.asset
+            validId(asset.id)
+            val source = checkedAssetFile(projectId, asset.privateRelativePath)
+            check(source.isFile && source.length() == asset.byteLength && sha256(source) == asset.sha256) {
+                "步骤画面缺失或改变，请返回编辑。"
+            }
+            total += asset.byteLength
+            check(total <= MAX_PNG_BYTES) { "成品图片合计超过 50 MiB。" }
+            val output = File(target, "${asset.id}.png")
+            check(!output.exists() && output.canonicalFile == output.absoluteFile) { "成品图片标识重复。" }
+            source.inputStream().use { input ->
+                FileOutputStream(output).use { sink ->
+                    var copied = 0L
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        check(count > 0) { "步骤画面无法继续读取。" }
+                        copied += count
+                        check(copied <= asset.byteLength) { "步骤画面在复制期间改变。" }
+                        sink.write(buffer, 0, count)
+                    }
+                    check(copied == asset.byteLength) { "步骤画面复制不完整。" }
+                    sink.fd.sync()
+                }
+            }
+            check(output.length() == asset.byteLength && sha256(output) == asset.sha256) {
+                "成品实际图片摘要不匹配。"
+            }
+        }
+        syncDirectory(target)
+        current
+    }
+
     fun isSourceReferenced(sourceId: String): Boolean = access { db ->
         count(db, "states", "source_id=?", sourceId) > 0
     }

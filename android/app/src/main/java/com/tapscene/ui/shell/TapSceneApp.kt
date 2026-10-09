@@ -27,10 +27,11 @@ import kotlinx.coroutines.withContext
 
 /** The shell routes existing capabilities; unavailable services never manufacture project data. */
 @Composable
-fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: CandidateWorkspace) {
+fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: CandidateWorkspace, releases: ReleaseWorkspace) {
     val state by projects.state.collectAsStateWithLifecycle()
     val mediaState by media.state.collectAsStateWithLifecycle()
     val candidateState by candidates.state.collectAsStateWithLifecycle()
+    val releaseState by releases.state.collectAsStateWithLifecycle()
     val recording by RecordingCoordinator.state.collectAsStateWithLifecycle()
     val context = LocalContext.current.applicationContext
     var library by rememberSaveable { mutableStateOf(false) }
@@ -66,8 +67,72 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     var pendingPathTerminal by rememberSaveable { mutableStateOf(false) }
     var reviewIndex by rememberSaveable { mutableStateOf(0) }
     var preparedCandidate by remember { mutableStateOf<String?>(null) }
+    var reviewCandidateId by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingSealId by rememberSaveable { mutableStateOf<String?>(null) }
+    var replacingCandidate by remember { mutableStateOf<ReleaseCandidate?>(null) }
+    var deletingRelease by remember { mutableStateOf<ReleaseSummary?>(null) }
+    var discardingCandidate by remember { mutableStateOf<ReleaseCandidate?>(null) }
+    var exportPickerPending by rememberSaveable { mutableStateOf(false) }
     val projectId = state.project?.project?.id
-    val unavailable = state.busy || state.loadFailed || candidateState.busy
+    val unavailable = state.busy || state.loadFailed || candidateState.busy || releaseState.busy
+    val openReleaseReview: () -> Unit = {
+        if (!releaseState.busy) { reviewCandidateId = null; push("review") }
+    }
+    val openPackageImport: () -> Unit = {
+        if (!releaseState.busy) { releases.clearMessage(); releases.clearImportResult(); push("import") }
+    }
+    val buildRelease: () -> Unit = {
+        val snapshot = state.project
+        if (snapshot != null && !unavailable && !mediaState.busy) {
+            if (state.dirtyStepIds.isNotEmpty()) projects.message("先保存或放弃步骤修改，再生成固定成品。")
+            else {
+                val existing = releaseState.pendingCandidates.firstOrNull { it.projectId == snapshot.project.id }
+                if (existing != null) replacingCandidate = existing
+                else {
+                    reviewCandidateId = null
+                    releases.createCandidate(snapshot.project.id, snapshot.project.revision)
+                    push("review")
+                }
+            }
+        }
+    }
+    LaunchedEffect(page, projectId, reviewCandidateId) {
+        if (page == "review" && !releaseState.busy) {
+            if (reviewCandidateId != null) releases.openReviewById(requireNotNull(reviewCandidateId))
+            else if (projectId != null) releases.openReview(requireNotNull(projectId))
+        }
+    }
+    LaunchedEffect(pendingSealId, releaseState.lastSealedId, releaseState.busy) {
+        val expected = pendingSealId
+        if (expected != null && !releaseState.busy) {
+            pendingSealId = null
+            if (releaseState.lastSealedId == expected && releaseState.candidate == null) {
+                if (page == "review") { pop(); push("delivery") }
+            }
+        }
+    }
+    val packagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) releases.importPackage(uri)
+    }
+    val packageSaver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        exportPickerPending = false
+        if (uri != null) releases.saveExport(uri) else releases.cancelExportPicker()
+    }
+    LaunchedEffect(releaseState.exportFile, releaseState.busy) {
+        val ready = releaseState.exportFile
+        if (ready != null && !releaseState.busy && !exportPickerPending && releases.beginExportPicker()) {
+            exportPickerPending = true
+            try { packageSaver.launch("TapScene-${ready.nameWithoutExtension}.tapscene") }
+            catch (_: android.content.ActivityNotFoundException) {
+                exportPickerPending = false; releases.cancelExportPicker()
+                releases.message("系统没有可用的文件保存工具。")
+            }
+        }
+    }
+    val closeReleasePlayer: () -> Unit = {
+        if (releaseState.busy) releases.cancel()
+        else { releases.closePlayer(); pop() }
+    }
     LaunchedEffect(page, projectId, state.busy) {
         if ((page == "transition" || page == "path") && projectId == null && !state.busy) pop()
     }
@@ -213,6 +278,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
         }
     }
     BackHandler(enabled = page != null && !retainedMedia) { pop() }
+    BackHandler(enabled = page in setOf("review", "delivery", "import") && releaseState.busy) { releases.cancel() }
+    BackHandler(enabled = page == "player") { closeReleasePlayer() }
     BackHandler(enabled = page == "path" && state.route != ProjectRoute.EDIT) { if (!state.busy) pop() }
     BackHandler(enabled = page == null && !retainedMedia && state.route == ProjectRoute.STEPS) {
         if (!state.busy && !mediaState.busy) projects.back()
@@ -222,6 +289,19 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     TapSceneTheme {
         Surface(Modifier.fillMaxSize(), color = ShellColors.Background) {
             Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
+                if (releaseState.busy) {
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                    Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(releaseState.stage.orEmpty(), Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
+                        TextButton(onClick = releases::cancel) { Text("取消") }
+                    }
+                }
+                releaseState.message?.takeIf { page !in setOf("review", "player", "import") && !library }?.let { text ->
+                    Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(text, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = ShellColors.Accent)
+                        TextButton(onClick = releases::clearMessage) { Text("关闭") }
+                    }
+                }
                 if (recording.isBusy && page != "record") Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(if (recording.phase == RecordingPhase.Recording) "录制中" else "录屏处理中", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = ShellColors.Accent)
                     TextButton(onClick = { push("record") }) { Text("查看") }
@@ -332,13 +412,33 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                     initialMarkLastTerminal = pathMarkLastTerminal,
                                     onDraftChanged = { ids, terminal -> pathStepIds = ArrayList(ids); pathMarkLastTerminal = terminal })
                             }
-                            "review" -> ReleaseReviewScreen(pop)
-                            "delivery" -> DeliveryOptionsScreen(pop, { push("review") }, { push("ai") }, { push("account") }, { push("versions") })
+                            "review" -> ReleaseReviewContent(releaseState,
+                                releaseState.candidate?.projectId?.let { id ->
+                                    state.project?.project?.takeIf { it.id == id }?.revision
+                                        ?: state.projects.firstOrNull { it.id == id }?.revision
+                                },
+                                pop, releases::selectReviewState, releases::confirmReviewState,
+                                releases::confirmSummary, releases::confirmFileList,
+                                { releases.startCandidatePreview(); push("player") },
+                                { pendingSealId = releaseState.candidate?.scene?.releaseId; releases.seal() },
+                                { replacingCandidate = releaseState.candidate })
+                            "delivery" -> {
+                                val sealed = releaseState.releases.firstOrNull { it.id == releaseState.lastSealedId }
+                                DeliveryOptionsScreen(pop, openReleaseReview, { push("ai") }, { push("account") }, { push("versions") },
+                                    sealedSummary = sealed, onExport = sealed?.let { item -> { releases.prepareExport(item.id) } }, busy = releaseState.busy)
+                            }
                             "ai" -> AiPackageScreen(pop)
                             "account" -> HostingAccountScreen(pop, { push("versions") })
                             "versions" -> HostedVersionsScreen(pop, { push("account") })
-                            "import" -> ExternalImportScreen(pop)
-                            "player" -> FormalPlayerScreen(pop)
+                            "import" -> OfflineImportContent(releaseState, pop) {
+                                if (!releaseState.busy) {
+                                    releases.clearImportResult(); releases.clearMessage()
+                                    try { packagePicker.launch(arrayOf("*/*")) }
+                                    catch (_: android.content.ActivityNotFoundException) { releases.message("系统没有可用的文件选择工具。") }
+                                }
+                            }
+                            "player" -> ReleasePlayerContent(releaseState, closeReleasePlayer,
+                                releases::tapPlayer, releases::chooseEdge, releases::previous, releases::restart, releases::dismissMatches)
                             "task" -> TaskDetailsScreen(
                                 if (state.busy || mediaState.busy) ShellTaskInfo("本机处理", if (state.busy) state.stage.orEmpty() else mediaState.stage.orEmpty(), state.project?.project?.title) else null,
                                 pop, { pages.clear() }, { push("settings") })
@@ -393,14 +493,20 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 }
                                 ProjectTab.CHECKS -> DeliveryCheckScreen(state.project, state.issues, { tab = ProjectTab.STEPS },
                                     { issue -> issue.stepId?.let(projects::openStep) ?: run { tab = ProjectTab.STEPS } },
-                                    { projects.startPreview() }, { push("review") }, { push("delivery") }, showTopBar = false)
+                                    { projects.startPreview() }, openReleaseReview, { push("delivery") }, showTopBar = false,
+                                    onBuildCandidate = buildRelease, busy = unavailable || mediaState.busy,
+                                    buildEnabled = state.dirtyStepIds.isEmpty())
                             }
                         }
                         library -> Column(Modifier.fillMaxSize()) {
-                            Box(Modifier.weight(1f)) { DemoLibraryScreen({ push("import") }, { push("settings") }) }
+                            Box(Modifier.weight(1f)) { ReleaseLibraryContent(releaseState, openPackageImport,
+                                { id -> releases.openRelease(id); push("player") }, releases::prepareExport,
+                                { deletingRelease = it }, { push("settings") },
+                                onReviewCandidate = { id -> reviewCandidateId = id; push("review") },
+                                onDiscardCandidate = { discardingCandidate = it }) }
                             GlobalNavigation(true, { library = false }, {})
                         }
-                        else -> ProjectHomeFrame({ push("record") }, requestImport, { push("settings") }, { library = true }) {
+                        else -> ProjectHomeFrame({ push("record") }, requestImport, { push("settings") }, { library = true; releases.reloadLibrary() }) {
                             ProjectHomeContent(state, { tab = ProjectTab.STEPS; projects.openProject(it) }, { renaming = it }, { deletingProject = it })
                         }
                     }
@@ -422,6 +528,26 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
             deletingStep?.let { step -> ConfirmDelete("删除“${step.title}”？",
                 "步骤、图片及 ${projects.deletionHotspotCount(step.id)} 个关联热点将删除，包括未保存草稿中指向它的热点。${projects.deletionNextActionCount(step.id)} 个下一步动作受影响；指向此步的下一步保留为待补目标。原录屏保留。${if (state.project?.project?.startStepId == step.id) "删除后需要重新设置起点。" else ""}", !state.busy,
                 { deletingStep = null }, { deletingStep = null; projects.deleteStep(step.id) }) }
+            deletingRelease?.let { item -> ConfirmDelete("删除本机观看副本？",
+                "“${item.title}”及本机观看资产将删除，无法撤销。创作项目和已导出的文件保留。", !releaseState.busy,
+                { deletingRelease = null }, { deletingRelease = null; releases.deleteRelease(item.id) }) }
+            discardingCandidate?.let { item -> ConfirmDelete("删除未封存副本？",
+                "“${item.scene.title}”修订 ${item.projectRevision} 的固定图片和复核记录将删除。创作项目与封存版本保留。", !releaseState.busy,
+                { discardingCandidate = null }, { discardingCandidate = null; releases.discardCandidate(item.id) }) }
+            replacingCandidate?.let { item ->
+                val latest = state.project?.project?.takeIf { it.id == item.projectId }
+                    ?: state.projects.firstOrNull { it.id == item.projectId }
+                AlertDialog(onDismissRequest = { replacingCandidate = null }, title = { Text("重新生成固定成品？") },
+                    text = { Text(if (latest == null) "原项目已不可用；现有固定候选仍可继续复核。"
+                        else "用草稿修订 ${latest.revision} 替换未封存的修订 ${item.projectRevision}，需要重新复核。已封存版本保持不变。") },
+                    confirmButton = { TextButton(enabled = latest != null && !releaseState.busy && state.dirtyStepIds.isEmpty(), onClick = {
+                        latest?.let { source ->
+                            replacingCandidate = null; reviewCandidateId = null
+                            releases.createCandidate(source.id, source.revision, replaceExisting = true); push("review")
+                        }
+                    }) { Text("重新生成") } },
+                    dismissButton = { TextButton(onClick = { replacingCandidate = null }) { Text("保留现有候选") } })
+            }
             if (confirmLeave) AlertDialog(onDismissRequest = { confirmLeave = false }, title = { Text("保留这次修改？") },
                 text = { Text("返回后可继续编辑。尚未保存的修改只在本次应用运行中保留，关闭应用后可能丢失。") },
                 confirmButton = { TextButton(onClick = { confirmLeave = false; projects.back() }) { Text("保留并返回") } },
