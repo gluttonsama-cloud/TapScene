@@ -31,7 +31,7 @@ data class ClickPlaybackUi(
     val run: ClickRun? = null,
     val overlayVisible: Boolean = false,
 )
-internal data class ClickConsentRequest(val nonce: String, val plan: ClickPlan, val resume: Boolean)
+internal data class ClickConsentRequest(val nonce: String, val plan: ClickPlan, val resume: Boolean, val viewport: ClickViewport)
 
 /** Process-local capability owner. No boot resume, retained grant or automatic gesture retry. */
 object ClickPlayback {
@@ -44,6 +44,7 @@ object ClickPlayback {
     private var editorPlan: ClickPlan? = null
     private var consentRequest: ClickConsentRequest? = null
     private var engine: ClickRunEngine? = null
+    private var runViewport: ClickViewport? = null
     private var guard = ClickGuard.Unknown
     private var requiredWindowAfter = Long.MAX_VALUE
     private var freshTarget = false
@@ -169,12 +170,12 @@ object ClickPlayback {
             val context = requireNotNull(app)
             check(ClickDevice.matches(context, plan) && guard == ClickGuard.Allowed)
             val updated = plan.copy(revision = plan.revision + 1, actions = plan.actions + ClickAction(x = x, y = y))
-            require(ClickDevice.pointsInsideSafeArea(context, updated))
+            require(service?.currentViewport()?.contains(updated) == true)
             ClickPlanStore(context).savePlan(updated, plan.revision)
             editorPlan = updated
             service?.showEditor(updated)
         } catch (_: Exception) {
-            val message = "点位未保存：需远离屏幕四边 48dp，最多 40 点且总计划不超过 120 秒。"
+            val message = "点位未保存：请在 App 内容区定位，避开系统栏；最多 40 点且总计划不超过 120 秒。"
             mutable.value = mutable.value.copy(message = message)
             service?.notice(message)
             runCatching { service?.showEditor(plan) }
@@ -185,12 +186,14 @@ object ClickPlayback {
         val plan = editorPlan ?: return
         if (mutable.value.busy) return
         try {
-            check(plan.actions.isNotEmpty() && ClickDevice.matches(context, plan) && ClickDevice.pointsInsideSafeArea(context, plan) && ClickDevice.shortPressesAllowed(plan))
+            val viewport = checkNotNull(service?.currentViewport())
+            check(service?.canPreparePlayback == true)
+            check(plan.actions.isNotEmpty() && ClickDevice.matches(context, plan) && viewport.contains(plan) && ClickDevice.shortPressesAllowed(plan))
             check(guard == ClickGuard.Allowed)
             check(ClickPlanStore(context).getPlan(plan.projectId)?.digest == plan.digest)
             service?.hideEditor { detached ->
                 if (!detached) { failEditor("定位窗口尚未完全关闭，请返回应用停止并重试。"); return@hideEditor }
-                val request = ClickConsentRequest(UUID.randomUUID().toString(), plan, false)
+                val request = ClickConsentRequest(UUID.randomUUID().toString(), plan, false, viewport)
                 consentRequest = request; editorPlan = null
                 mutable.value = mutable.value.copy(busy = true, message = "点位已关闭，请确认目标起始页并授权整屏录制。")
                 launchConfirmation(context, request)
@@ -216,7 +219,12 @@ object ClickPlayback {
     }
     internal fun resumeRequest(): ClickConsentRequest? {
         val run = engine?.state?.takeIf { it.phase == ClickRunPhase.Paused } ?: return null
-        return ClickConsentRequest(UUID.randomUUID().toString(), run.plan, true).also { consentRequest = it }
+        val viewport = runViewport ?: return null
+        if (service?.currentViewport() != viewport) {
+            engine?.stop(ClickStopReason.DisplayChanged)
+            return null
+        }
+        return ClickConsentRequest(UUID.randomUUID().toString(), run.plan, true, viewport).also { consentRequest = it }
     }
     internal fun request(nonce: String?): ClickConsentRequest? = consentRequest?.takeIf { it.nonce == nonce }
     internal fun cancelConsent(nonce: String) {
@@ -230,7 +238,7 @@ object ClickPlayback {
         val context = app ?: return false
         try {
             check(service != null && !mutable.value.overlayVisible && ClickDevice.matches(context, request.plan))
-            check(ClickDevice.pointsInsideSafeArea(context, request.plan) && ClickDevice.shortPressesAllowed(request.plan))
+            check(service?.currentViewport() == request.viewport && request.viewport.contains(request.plan) && ClickDevice.shortPressesAllowed(request.plan))
             guard = ClickGuard.Unknown; freshTarget = false; requiredWindowAfter = SystemClock.uptimeMillis()
             val nextArm = ClickTargetArm(requiredWindowAfter)
             arm = nextArm
@@ -247,6 +255,7 @@ object ClickPlayback {
                     SystemClock.uptimeMillis(), System.currentTimeMillis())
                 val store = ClickPlanStore(context)
                 store.beginRun(run)
+                runViewport = request.viewport
                 engine = ClickRunEngine(run, persist = store::saveRun,
                     dispatch = { token, action, callback -> service?.dispatch(token, action, callback) ?: false },
                     schedule = { delay, action -> check(main.postDelayed({ action() }, delay)) },
@@ -313,6 +322,12 @@ object ClickPlayback {
             return ClickGuard.Blocked
         }
         if (service == null || mutable.value.overlayVisible || !ClickDevice.matches(context, plan)) return ClickGuard.Blocked
+        val viewport = service?.currentViewport() ?: return ClickGuard.Unknown
+        if (viewport != runViewport || !viewport.contains(plan)) {
+            val current = engine
+            main.post { if (engine === current) current?.takeIf { it.state.isActive }?.stop(ClickStopReason.DisplayChanged) }
+            return ClickGuard.Blocked
+        }
         if (context.getSystemService(KeyguardManager::class.java)?.isKeyguardLocked != false) return ClickGuard.Blocked
         return if (freshTarget) guard else ClickGuard.Unknown
     }

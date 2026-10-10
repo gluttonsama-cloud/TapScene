@@ -21,10 +21,7 @@ fun ClickPlanPopulatedSmallPreview() {
                 width = 1080,
                 height = 2400,
                 revision = 3,
-                points = listOf(
-                    ClickPointInput("layout-point-one", "540", "1720", "80", "800"),
-                    ClickPointInput("layout-point-two", "720", "960", "120", "1500"),
-                ),
+                points = List(40) { index -> ClickPointInput("layout-point-$index", "540", "1720", "80", "800") },
                 connected = true,
                 dirty = true,
                 canLocate = true,
@@ -36,15 +33,24 @@ fun ClickPlanPopulatedSmallPreview() {
 }
 
 @PreviewTest
-@Preview(name = "click_plan_permission_empty", widthDp = 360, heightDp = 800, locale = "zh-rCN", showBackground = true)
+@Preview(name = "click_plan_single_expanded", widthDp = 360, heightDp = 800, locale = "zh-rCN", showBackground = true)
 @Composable
-fun ClickPlanPermissionEmptyPreview() {
+fun ClickPlanSingleExpandedPreview() {
     ClickPlanPreviewSurface {
         ClickPlanContent(
             ClickPlanUiState(
+                targetLabel = "演示样例 App",
+                targetPackage = "com.example.demo",
                 width = 1080,
                 height = 2400,
-                validationMessage = "请选择目标 App。",
+                points = listOf(
+                    ClickPointInput("layout-point-one", "540", "1720", "80", "800"),
+                    ClickPointInput("layout-point-two", "720", "960", "120", "1500"),
+                ),
+                expandedActionId = "layout-point-one",
+                connected = true,
+                canLocate = true,
+                canSave = true,
             ),
             ClickPlanCallbacks(),
         )

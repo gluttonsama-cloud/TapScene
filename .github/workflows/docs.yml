@@ -261,6 +261,7 @@ jobs:
             --tests com.tapscene.clickplan.ClickPlanStoreHostTest \
             --tests com.tapscene.clickplan.ClickWindowPolicyTest \
             --tests com.tapscene.clickplan.ClickTargetArmTest \
+            --tests com.tapscene.clickplan.ClickViewportTest \
             --tests com.tapscene.recording.RecordingClickGateTest \
             2>&1 | tee "$RUNNER_TEMP/host-data-checks.txt"
       - name: Verify the exact host checks executed without failures or skips
@@ -275,6 +276,9 @@ jobs:
           root = Path("android/app/build/test-results/testDebugUnitTest")
           files = sorted(root.glob("TEST-*.xml"))
           expected = {
+              ("com.tapscene.clickplan.ClickViewportTest", "actualSystemInsetsLeaveAppNavigationAvailable"): 1,
+              ("com.tapscene.clickplan.ClickViewportTest", "actualOverlayOriginMustAgreeWithRawScreenCoordinates"): 1,
+              ("com.tapscene.clickplan.ClickViewportTest", "browsingOnlyRestoresEditorAndOldControlsCannotReopenClosedSession"): 1,
               ("com.tapscene.clickplan.ClickRunEngineTest", "queuedWindowPauseAndStopAfterIntentAreObservedBeforeAtMostOnceDispatch"): 1,
               ("com.tapscene.recording.RecordingClickGateTest", "cancellingNewerRequestNeverRevivesQueuedOlderStart"): 1,
               ("com.tapscene.clickplan.ClickRunEngineTest", "pauseBeforeStartRequiresExplicitResumeAndRechecksTheGuards"): 1,

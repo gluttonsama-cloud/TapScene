@@ -5,6 +5,7 @@ import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -127,6 +128,7 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit) {
     var showReload by rememberSaveable(projectId) { mutableStateOf(false) }
     var showResetGeometry by rememberSaveable(projectId) { mutableStateOf(false) }
     var pendingTarget by remember { mutableStateOf<ClickTargetApp?>(null) }
+    var expandedActionId by rememberSaveable(projectId) { mutableStateOf<String?>(null) }
     val canEdit = !loading && !loadFailed && !saving && !playback.busy && !playback.overlayVisible && !conflict
     val currentSaving by rememberUpdatedState(saving)
 
@@ -219,6 +221,7 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit) {
             rotation = draft.rotation,
             revision = draft.revision,
             points = draft.points,
+            expandedActionId = expandedActionId,
             connected = playback.connected,
             loading = loading,
             saving = saving,
@@ -241,9 +244,13 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit) {
             onBack = leave,
             onChooseTarget = { if (canEdit) showApps = true },
             onAddPoint = {
-                if (draft.points.size < 40 && draft.width > 0 && draft.height > 0) change(draft.copy(points = draft.points +
-                    ClickPointInput(UUID.randomUUID().toString(), (draft.width / 2).toString(), (draft.height / 2).toString())))
+                if (canEdit && draft.points.size < 40 && draft.width > 0 && draft.height > 0) {
+                    val point = ClickPointInput(UUID.randomUUID().toString(), (draft.width / 2).toString(), (draft.height / 2).toString())
+                    change(draft.copy(points = draft.points + point))
+                    expandedActionId = point.actionId
+                }
             },
+            onTogglePoint = { id -> expandedActionId = id.takeIf { expandedActionId != id } },
             onPointChange = { updated -> change(draft.copy(points = draft.points.map { if (it.actionId == updated.actionId) updated else it })) },
             onMovePoint = { id, delta ->
                 val index = draft.points.indexOfFirst { it.actionId == id }
@@ -252,7 +259,10 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit) {
                     add(next, removeAt(index))
                 }))
             },
-            onRemovePoint = { id -> change(draft.copy(points = draft.points.filterNot { it.actionId == id })) },
+            onRemovePoint = { id ->
+                change(draft.copy(points = draft.points.filterNot { it.actionId == id }))
+                if (expandedActionId == id) expandedActionId = null
+            },
             onSave = { save(false, false) },
             onLocate = { showNotice = true },
             onOpenAccessibility = {
@@ -317,6 +327,7 @@ data class ClickPlanUiState(
     val rotation: Int = 0,
     val revision: Long = 0,
     val points: List<ClickPointInput> = emptyList(),
+    val expandedActionId: String? = null,
     val connected: Boolean = false,
     val loading: Boolean = false,
     val saving: Boolean = false,
@@ -339,6 +350,7 @@ data class ClickPlanCallbacks(
     val onBack: () -> Unit = {},
     val onChooseTarget: () -> Unit = {},
     val onAddPoint: () -> Unit = {},
+    val onTogglePoint: (String) -> Unit = {},
     val onPointChange: (ClickPointInput) -> Unit = {},
     val onMovePoint: (String, Int) -> Unit = { _, _ -> },
     val onRemovePoint: (String) -> Unit = {},
@@ -355,6 +367,7 @@ data class ClickPlanCallbacks(
 /** Production content shared by the route and layout-only screenshot previews. */
 @Composable
 fun ClickPlanContent(state: ClickPlanUiState, callbacks: ClickPlanCallbacks) {
+    var showDetails by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         ShellTopBar("编排点击链", callbacks.onBack)
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp),
@@ -365,16 +378,23 @@ fun ClickPlanContent(state: ClickPlanUiState, callbacks: ClickPlanCallbacks) {
                         Column(Modifier.weight(1f)) {
                             Text(state.targetLabel ?: if (state.targetPackage.isBlank()) "先选择目标 App" else "目标 App 不可用",
                                 style = MaterialTheme.typography.titleMedium)
-                            if (state.targetPackage.isNotBlank()) Text(state.targetPackage,
-                                style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                            Text("固定方向 · 主屏幕全屏", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                         }
                         TextButton(onClick = callbacks.onChooseTarget, enabled = state.editingEnabled,
                             modifier = Modifier.heightIn(min = 48.dp)) { Text(if (state.targetPackage.isBlank()) "选择 App" else "更换") }
                     }
-                    Text(if (state.width > 0 && state.height > 0)
-                        "${state.width} × ${state.height} px · 方向 ${state.rotation * 90}° · ${if (state.revision == 0L) "未保存" else "修订 ${state.revision}"}"
-                    else "正在读取屏幕尺寸", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-                    Text("固定方向、全屏使用；点位须离屏幕四边至少 48dp，不会自动适配页面。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    TextButton(onClick = { showDetails = !showDetails }, modifier = Modifier.heightIn(min = 48.dp)) {
+                        Text(if (showDetails) "收起设备与使用说明" else "设备与使用说明")
+                    }
+                    if (showDetails) {
+                        Text("${state.width} × ${state.height} px · 方向 ${state.rotation * 90}° · 修订 ${state.revision}",
+                            style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                        if (state.targetPackage.isNotBlank()) Text(state.targetPackage,
+                            style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                        Text("定位会避开系统提供的状态栏、导航栏和屏幕缺口区域；无法判断 App 内的所有敏感操作。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                        TextButton(onClick = callbacks.onAddPoint, enabled = state.editingEnabled && state.points.size < 40 && state.width > 0,
+                            modifier = Modifier.heightIn(min = 48.dp)) { Text("手动添加坐标点") }
+                    }
                 }
             }
             if (state.loading || state.saving) item("loading") { LinearProgressIndicator(Modifier.fillMaxWidth()) }
@@ -413,17 +433,15 @@ fun ClickPlanContent(state: ClickPlanUiState, callbacks: ClickPlanCallbacks) {
             item("points_heading") {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text("按顺序执行 · ${state.points.size} / 40 点", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-                    TextButton(onClick = callbacks.onAddPoint, enabled = state.editingEnabled && state.points.size < 40 && state.width > 0,
-                        modifier = Modifier.heightIn(min = 48.dp)) { Text("加中心点") }
                 }
             }
             if (state.points.isEmpty()) item("empty") {
-                Text("还没有点位。可先前往目标 App，在定位浮层中添加；也可添加中心点后输入坐标。执行至少需要 1 个点。",
+                Text("还没有点位。前往目标 App 添加，浏览到下一页后继续定位；播放前手动回到起始页。",
                     style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
             }
             itemsIndexed(state.points, key = { _, point -> point.actionId }) { index, point ->
                 ClickPointCard(point, index, state.points.size, state.width, state.height, state.editingEnabled,
-                    state.pointStatuses[point.actionId], callbacks)
+                    state.expandedActionId == point.actionId, state.pointStatuses[point.actionId], callbacks)
             }
             item("limits") {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -474,33 +492,50 @@ private fun ClickAccessibilityNotice(onSettings: () -> Unit) {
 
 @Composable
 private fun ClickPointCard(point: ClickPointInput, index: Int, count: Int, width: Int, height: Int,
-    enabled: Boolean, status: String?, callbacks: ClickPlanCallbacks) {
+    enabled: Boolean, expanded: Boolean, status: String?, callbacks: ClickPlanCallbacks) {
+    var advanced by rememberSaveable(point.actionId) { mutableStateOf(false) }
+    val xValid = point.x.toIntOrNull()?.let { it in 0 until width } == true
+    val yValid = point.y.toIntOrNull()?.let { it in 0 until height } == true
+    val pressValid = point.pressDurationMs.toLongOrNull()?.let { it in 40L..500L } == true
+    val waitValid = point.waitAfterMs.toLongOrNull()?.let { it in 0L..10_000L } == true
+    val waitText = point.waitAfterMs.toLongOrNull()?.takeIf { waitValid }?.let { "${it / 1000.0} 秒" } ?: "待填写"
     Card(colors = CardDefaults.cardColors(containerColor = ShellColors.Surface)) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("点 ${index + 1} · 点击", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-                TextButton(onClick = { callbacks.onMovePoint(point.actionId, -1) }, enabled = enabled && index > 0,
-                    contentPadding = PaddingValues(horizontal = 8.dp), modifier = Modifier.heightIn(min = 48.dp)
-                        .semantics { contentDescription = "上移点 ${index + 1}" }) { Text("上移") }
-                TextButton(onClick = { callbacks.onMovePoint(point.actionId, 1) }, enabled = enabled && index < count - 1,
-                    contentPadding = PaddingValues(horizontal = 8.dp), modifier = Modifier.heightIn(min = 48.dp)
-                        .semantics { contentDescription = "下移点 ${index + 1}" }) { Text("下移") }
-                TextButton(onClick = { callbacks.onRemovePoint(point.actionId) }, enabled = enabled,
-                    contentPadding = PaddingValues(horizontal = 8.dp), modifier = Modifier.heightIn(min = 48.dp)
-                        .semantics { contentDescription = "移除点 ${index + 1}" }) { Text("移除") }
+        Column(Modifier.padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).clickable { callbacks.onTogglePoint(point.actionId) },
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("${index + 1}", style = MaterialTheme.typography.titleMedium)
+                Column(Modifier.weight(1f)) {
+                    Text("点击 · 等待 $waitText", style = MaterialTheme.typography.titleSmall)
+                    Text(if (xValid && yValid && pressValid && waitValid) "位置 ${point.x}, ${point.y}" else "参数待补全",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (xValid && yValid && pressValid && waitValid) ShellColors.Muted else MaterialTheme.colorScheme.error)
+                    status?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted) }
+                }
+                Text(if (expanded) "收起" else "编辑", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
             }
-            status?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted) }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ClickNumberField(point.x, "X / px", enabled, point.x.toIntOrNull()?.let { it in 0 until width } == true,
-                    Modifier.weight(1f)) { callbacks.onPointChange(point.copy(x = it)) }
-                ClickNumberField(point.y, "Y / px", enabled, point.y.toIntOrNull()?.let { it in 0 until height } == true,
-                    Modifier.weight(1f)) { callbacks.onPointChange(point.copy(y = it)) }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ClickNumberField(point.pressDurationMs, "按下 / ms", enabled, point.pressDurationMs.toLongOrNull()?.let { it in 40L..500L } == true,
-                    Modifier.weight(1f)) { callbacks.onPointChange(point.copy(pressDurationMs = it)) }
-                ClickNumberField(point.waitAfterMs, "之后等待 / ms", enabled, point.waitAfterMs.toLongOrNull()?.let { it in 0L..10_000L } == true,
-                    Modifier.weight(1f)) { callbacks.onPointChange(point.copy(waitAfterMs = it)) }
+            if (expanded) {
+                ClickNumberField(point.waitAfterMs, "点击后等待 / ms", enabled, waitValid, Modifier.fillMaxWidth()) {
+                    callbacks.onPointChange(point.copy(waitAfterMs = it))
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = { callbacks.onMovePoint(point.actionId, -1) }, enabled = enabled && index > 0,
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp).semantics { contentDescription = "上移点 ${index + 1}" }) { Text("上移") }
+                    TextButton(onClick = { callbacks.onMovePoint(point.actionId, 1) }, enabled = enabled && index < count - 1,
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp).semantics { contentDescription = "下移点 ${index + 1}" }) { Text("下移") }
+                    TextButton(onClick = { callbacks.onRemovePoint(point.actionId) }, enabled = enabled,
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp).semantics { contentDescription = "移除点 ${index + 1}" }) { Text("移除") }
+                }
+                TextButton(onClick = { advanced = !advanced }, modifier = Modifier.heightIn(min = 48.dp)) {
+                    Text(if (advanced) "收起高级参数" else "高级参数 · 坐标与按压时长")
+                }
+                if (advanced) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ClickNumberField(point.x, "X / px", enabled, xValid, Modifier.weight(1f)) { callbacks.onPointChange(point.copy(x = it)) }
+                        ClickNumberField(point.y, "Y / px", enabled, yValid, Modifier.weight(1f)) { callbacks.onPointChange(point.copy(y = it)) }
+                    }
+                    ClickNumberField(point.pressDurationMs, "按压时长 / ms", enabled, pressValid,
+                        Modifier.fillMaxWidth().padding(bottom = 12.dp)) { callbacks.onPointChange(point.copy(pressDurationMs = it)) }
+                }
             }
         }
     }
