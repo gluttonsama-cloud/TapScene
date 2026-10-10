@@ -34,10 +34,12 @@
 
 [第二次精确 CI](https://github.com/gluttonsama-cloud/TapScene/actions/runs/38061310417) 已真正启动 Android，日志为 `Boot completed in 427082 ms`。首个 APK 安装尚未完成即触及原 120 秒部署限额，未进入测试；保留的 logcat 显示 PackageInstaller 校验路径 `streamValidateAndCommit` 持锁 44.233 秒。该证据说明未完成和锁争用，不单独证明安装健康推进。部署限额因此调整为主 APK 360 秒、harness 180 秒、轻量目标 120 秒，仍共用原 22 分钟总预算。每个部署阶段保留 UTC 起始时间、APK 大小和 adb 输出；不跳过签名/包校验、不自动重试安装，也不延长任何产品运行时限。
 
+[第三次精确 CI](https://github.com/gluttonsama-cloud/TapScene/actions/runs/38062731254) 的三个 APK 已全部安装，主 APK 用时约 132 秒。专用 runner 在写出 `onStart` 首份报告和进入 EGL 探针前被系统以启动 ANR 杀死，`exit-info` 明确为 `failed to complete startup`；EGL 探针尚未运行。当时首启 `BOOT_COMPLETED` 广播仍在派发，CPU pressure 的 10 秒均值为 88.38，系统 Phone/MediaProvider 也在 ANR/重启。下一轮只在安装后用 [Android 15 自带的广播队列同步](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/core/java/com/android/server/am/ActivityManagerService.java)最多等待 180 秒，要求实际返回 `All broadcast queues are idle!`，并保存 CPU/应用 ANR 诊断。此标准测试同步会在等待期间促进可运行广播处理，不能称为完全被动观察；成功仅确认广播队列，不证明整个系统已空闲或排除应用自身启动问题。不使用 `--flush-broadcast-loopers` 选项、不预编译或重启应用、不调大 OS/产品时限，仍受原总预算约束；等待超时即退出并销毁 AVD，不继续运行测试。
+
 [首次精确 CI](https://github.com/gluttonsama-cloud/TapScene/actions/runs/38060445119) 已完成三个 APK 构建，但在模拟器加载阶段发现 `libpulse.so.0` 缺失，未启动 AVD。独立 lane 因此只从 [Ubuntu 官方仓库](https://packages.ubuntu.com/noble/libpulse0)安装 `libpulse0` 及其必要依赖，保存 `ldd` 诊断并用官方启动器的 `-version` 实际加载结果把关；裸 `ldd` 不代表启动器设置的内置库路径。`-no-audio` 不能免除 ELF 加载依赖。没有安装音频服务、全套桌面或新的模拟器版本。
 
 无论通过、断言失败还是进程崩溃，保留 7 天的 `android-runtime-smoke` artifact：准确提交/tree、SDK/构建日志、emulator 全日志、运行期全 buffer logcat、crash buffer、app exit-info、服务状态，以及由 `run-as` 只读取本次合成测试目录的 `app-evidence.tar`。它包含真实视频和测试断言，未包含 SDK/AVD 用户盘或 ADB 私钥。
 
 退出处理先取诊断，再停止测试 app、关闭模拟器/ADB，最后只删除本轮固定临时目录。超时不报告成功；只有专用 runner 完成全部断言的 `TAPSCENE_RUNTIME_SMOKE_OK` 才通过。GitHub 强制终止整机时无法保证退出钩子运行，runner 销毁仍会清除一次性设备；不能把缺失清理日志称作已核验清理。
 
-当前状态：三个 APK 编译和隔离 Android 启动已通过；安装准备后的 EGL 探针与生产场景仍待验证。源码/构建/启动通过不等于 runtime 通过，也不替代实体手机 120 秒静态录制、生命周期和 OEM 兼容检查。
+当前状态：三个 APK 编译、安装和隔离 Android 启动已通过；专用 runner 启动 ANR 已留存证据，EGL 探针与生产场景仍待验证。源码/构建/启动通过不等于 runtime 通过，也不替代实体手机 120 秒静态录制、生命周期和 OEM 兼容检查。

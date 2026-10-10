@@ -40,6 +40,8 @@ collect_and_destroy() {
     timeout 10 "$ADB" -s "$serial" logcat -b crash -d -v threadtime > "$out/crash-logcat.txt" 2>&1
     timeout 10 "$ADB" -s "$serial" shell dumpsys activity processes > "$out/activity-processes.txt" 2>&1
     timeout 10 "$ADB" -s "$serial" shell dumpsys activity exit-info "$app" > "$out/app-exit-info.txt" 2>&1
+    timeout 10 "$ADB" -s "$serial" shell dumpsys dropbox --print data_app_anr > "$out/app-anr-traces.txt" 2>&1
+    timeout 10 "$ADB" -s "$serial" shell dumpsys cpuinfo > "$out/device-cpuinfo.txt" 2>&1
     timeout 10 "$ADB" -s "$serial" shell dumpsys media_projection > "$out/media-projection.txt" 2>&1
     timeout 10 "$ADB" -s "$serial" shell dumpsys accessibility > "$out/accessibility.txt" 2>&1
     timeout 10 "$ADB" -s "$serial" shell dumpsys media.codec > "$out/media-codec.txt" 2>&1
@@ -143,6 +145,13 @@ printf '%s install: synthetic target (maximum 120 seconds)\n' "$(date -u +%FT%TZ
 stat -c '%n %s bytes' android/runtime-target/build/outputs/apk/debug/runtime-target-debug.apk >> "$out/apk-sizes.txt"
 bounded 120 "$ADB" -s "$serial" install -t android/runtime-target/build/outputs/apk/debug/runtime-target-debug.apk \
   2>&1 | tee "$out/install-target.txt"
+# sys.boot_completed preceded the actual first-boot broadcasts by minutes in run 38062731254.
+# Synchronize the existing queue without --flush-broadcast-loopers or changed system/app deadlines.
+printf '%s readiness: wait for broadcast queues (maximum 180 seconds)\n' "$(date -u +%FT%TZ)" >> "$out/runtime-stages.txt"
+bounded 180 "$ADB" -s "$serial" shell am wait-for-broadcast-idle \
+  2>&1 | tee "$out/broadcast-idle.txt"
+grep -q 'All broadcast queues are idle!' "$out/broadcast-idle.txt"
+bounded 15 "$ADB" -s "$serial" shell dumpsys cpuinfo > "$out/cpuinfo-before-test.txt"
 printf '%s instrumentation: dedicated EGL probe and click scenario\n' "$(date -u +%FT%TZ)" >> "$out/runtime-stages.txt"
 # No adb input business clicks, pm grant, appops, settings put, adb root, or test token reuse.
 bounded 480 "$ADB" -s "$serial" shell am instrument -w -e syntheticOnly true \
