@@ -267,6 +267,9 @@ jobs:
             --tests com.tapscene.data.ClickChainImportHostTest \
             --tests com.tapscene.recording.RecordingClickGateTest \
             --tests com.tapscene.recording.RecordingFrameLedgerTest \
+            --tests com.tapscene.recording.RecordingPresentationClockTest \
+            --tests com.tapscene.recording.RecordingPresentationLedgerTest \
+            --tests com.tapscene.recording.RecordingDrainGateTest \
             --tests com.tapscene.recording.FrameLeasePoolTest \
             --tests com.tapscene.recording.FrameBoundaryWindowTest \
             --tests com.tapscene.recording.FrameEvidenceStoreHostTest \
@@ -283,6 +286,32 @@ jobs:
           root = Path("android/app/build/test-results/testDebugUnitTest")
           files = sorted(root.glob("TEST-*.xml"))
           expected = {
+              ("com.tapscene.recording.RecordingDrainGateTest", "unsolicitedEndIsFaultEvenBeforeFirstReadinessOrWithFinalData"): 1,
+              ("com.tapscene.recording.RecordingDrainGateTest", "captureClosureAndStopRequestDoNotReleaseTheStillOwnedGlSurface"): 1,
+              ("com.tapscene.recording.RecordingDrainGateTest", "failedGlCleanupStillPermitsCodecCleanupWithoutPretendingAllResourcesReleased"): 1,
+              ("com.tapscene.recording.RecordingDrainGateTest", "normalLateEosCanFinishOnlyAfterTeardownAndSignal"): 1,
+              ("com.tapscene.recording.RecordingPresentationClockTest", "static120SecondDisplayHasNewPresentationsButOnlyOneObservation"): 1,
+              ("com.tapscene.recording.RecordingPresentationClockTest", "aNewObservationIsDistinctFromItsLaterRepeatedDisplaySamples"): 1,
+              ("com.tapscene.recording.RecordingPresentationClockTest", "collisionsBackwardsAndLateWakeNeverInventPlusOneOrCatchupFrames"): 1,
+              ("com.tapscene.recording.RecordingPresentationClockTest", "deadlinesAvoidThirtyHzQuantizationPollingAndDoNotIncludeCleanupTime"): 1,
+              ("com.tapscene.recording.RecordingPresentationClockTest", "closingBeforeFirstFrameOrWithoutPositiveFinalDurationIsExplicitlyUnavailable"): 1,
+              ("com.tapscene.recording.RecordingPresentationLedgerTest", "evidenceRequiresPlanSuccessfulSubmissionAndExactSuccessfulWrite"): 1,
+              ("com.tapscene.recording.RecordingPresentationLedgerTest", "codecWriteBeforeEglReturnIsJoinedWhenSubmissionArrives"): 1,
+              ("com.tapscene.recording.RecordingPresentationLedgerTest", "writtenBeforeAnyPlanRemainsPermanentlyUnknown"): 1,
+              ("com.tapscene.recording.RecordingPresentationLedgerTest", "rewrittenFuturePtsCannotBeClaimedByALaterObservedFrame"): 1,
+              ("com.tapscene.recording.RecordingPresentationLedgerTest", "planAddedDuringNativeMuxWriteCannotClaimPreviouslyUnknownOutput"): 1,
+              ("com.tapscene.recording.RecordingPresentationLedgerTest", "seenOutputWithoutSuccessfulWriteCannotCreateOrdinalOrReadiness"): 1,
+              ("com.tapscene.recording.RecordingPresentationLedgerTest", "foreignForgedReusedAndReorderedOutputTokensAreRejected"): 1,
+              ("com.tapscene.recording.RecordingPresentationLedgerTest", "canonicalUnwrittenSampleIsNeverReplacedBySuccessfulRepeats"): 1,
+              ("com.tapscene.recording.RecordingPresentationLedgerTest", "canonicalFailedSubmissionCannotBeRescuedByWrittenRepeats"): 1,
+              ("com.tapscene.recording.RecordingPresentationLedgerTest", "repeatsCountAsVideoSamplesButKeepSourceIdentityAndCanonicalOrdinal"): 1,
+              ("com.tapscene.recording.RecordingPresentationLedgerTest", "observationFieldsMustAllStayIdenticalOnRepeat"): 1,
+              ("com.tapscene.recording.RecordingPresentationLedgerTest", "repeatFlagCannotInventObservationOrRevisitStaleSource"): 1,
+              ("com.tapscene.recording.RecordingPresentationLedgerTest", "duplicateReorderedAndInvalidOutputsFailWithoutChangingOrdinals"): 1,
+              ("com.tapscene.recording.RecordingPresentationLedgerTest", "duplicateOrUnplannedSubmissionAndReorderedPlansAreRejected"): 1,
+              ("com.tapscene.recording.RecordingPresentationLedgerTest", "plannedIntentsAreBoundedEvenWithoutAnyCodecOutput"): 1,
+              ("com.tapscene.recording.RecordingPresentationLedgerTest", "actualWrittenSamplesHaveIndependentBoundIncludingUnknownOutputs"): 1,
+              ("com.tapscene.recording.RecordingPresentationLedgerTest", "outputTokensAreBoundedEvenIfNativeWritesNeverFinish"): 1,
               ("com.tapscene.recording.FrameBoundaryWindowTest", "missingBeforeDoesNotSuppressRealCompletionAndAfterSelection"): 1,
               ("com.tapscene.recording.FrameBoundaryWindowTest", "cancelledEpochCannotReuseOldSelectionOrBackfillCompletion"): 1,
               ("com.tapscene.recording.FrameBoundaryWindowTest", "anotherRunGenerationOrSourceCannotClaimCurrentBoundary"): 1,

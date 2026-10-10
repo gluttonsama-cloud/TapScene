@@ -474,6 +474,7 @@ object RecordingCoordinator {
         }
         try {
             val sealed = current.store.seal(current.journal.sessionId)
+            (current.backend as? FrameRecordingBackend)?.validateVideo(sealed)
             // Optional evidence never turns a healthy MP4 into a screenshot-only capture.
             runCatching { (current.backend as? FrameRecordingBackend)?.validateEvidence(sealed) }
             current.journal = current.journal.copy(phase = JournalPhase.Sealed)

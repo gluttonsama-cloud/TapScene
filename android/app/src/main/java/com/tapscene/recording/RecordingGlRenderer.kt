@@ -28,10 +28,10 @@ internal class RecordingGlRenderer(
     private val onFrame: () -> Unit,
 ) {
     internal class Slot(val texture: Int, val framebuffer: Int)
-    internal class PinnedSlot(val slot: Slot, val lease: FrameLeasePool.Read<RecordedSourceFrame>) {
-        val frame: RecordedSourceFrame get() = lease.frame
+    internal class PinnedSlot(val slot: Slot, val lease: FrameLeasePool.Read<VideoSourceObservation>) {
+        val frame: VideoSourceObservation get() = lease.frame
     }
-    private val pool = FrameLeasePool<RecordedSourceFrame>()
+    private val pool = FrameLeasePool<VideoSourceObservation>()
     val slotLock: Any get() = pool.lock
     private val slots = ArrayList<Slot>()
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
@@ -109,7 +109,7 @@ internal class RecordingGlRenderer(
         return checkNotNull(sourceTexture).timestamp
     }
 
-    fun drawAndSubmit(frame: RecordedSourceFrame) {
+    fun drawObservation(frame: VideoSourceObservation) {
         val write = checkNotNull(pool.claim()) { "Frame leases exhausted" }
         val slot = slots[write.index]
         try {
@@ -118,17 +118,23 @@ internal class RecordingGlRenderer(
             GLES20.glClearColor(0f, 0f, 0f, 1f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             draw(oesProgram, GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTexture, sourceTransform, fitMatrix)
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-            GLES20.glViewport(0, 0, frameWidth, frameHeight)
-            draw(flatProgram, GLES20.GL_TEXTURE_2D, slot.texture, identity, identity)
             checkGl()
-            check(EGLExt.eglPresentationTimeANDROID(display, surface, Math.multiplyExact(frame.submittedPtsUs, 1_000L)))
-            check(EGL14.eglSwapBuffers(display, surface)) { "Encoder surface submission failed" }
             pool.publish(write, frame)
         } catch (failure: Throwable) {
             pool.abandon(write)
             throw failure
         }
+    }
+
+    /** Repeats present the exact normalized FBO, without latching or inventing a new observation. */
+    fun submitPinned(slot: PinnedSlot, presentationPtsUs: Long) {
+        check(pool.isPinned(slot.lease))
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        GLES20.glViewport(0, 0, frameWidth, frameHeight)
+        draw(flatProgram, GLES20.GL_TEXTURE_2D, slot.slot.texture, identity, identity)
+        checkGl()
+        check(EGLExt.eglPresentationTimeANDROID(display, surface, Math.multiplyExact(presentationPtsUs, 1_000L)))
+        check(EGL14.eglSwapBuffers(display, surface)) { "Encoder surface submission failed" }
     }
 
     /** Caller may hold slotLock, so pinning remains atomic with the action boundary. */
