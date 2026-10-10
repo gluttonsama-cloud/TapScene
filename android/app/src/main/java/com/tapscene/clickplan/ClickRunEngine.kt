@@ -1,5 +1,9 @@
 package com.tapscene.clickplan
 
+import com.tapscene.recording.FrameAnchorAction
+import com.tapscene.recording.FrameAnchorPort
+import com.tapscene.recording.FrameMissingReason
+
 /**
  * Pure single-threaded executor. The Android owner serializes every entry point on its main Looper.
  * All transitions are persisted before publication, and intent is durable BEFORE dispatch. A platform
@@ -17,6 +21,8 @@ class ClickRunEngine(
     /** Must match this run's project, recording session and source, in the Recording phase. */
     private val recordingReady: (ClickRun) -> Boolean,
     private val onState: (ClickRun) -> Unit = {},
+    /** Optional evidence only. Every call must select/enqueue without waiting for pixels or IO. */
+    private val frames: FrameAnchorPort = FrameAnchorPort.None,
 ) {
     var state: ClickRun = initial.copy(outcomes = frozenClickList(initial.outcomes), events = frozenClickList(initial.events))
         private set
@@ -26,6 +32,8 @@ class ClickRunEngine(
     private var synchronousResult: Pair<ClickCallbackToken, ClickGestureResult>? = null
     private var nextReadyAtUptimeMs = 0L
     private var wakeGeneration = 0L
+    private var inFlightFrameAction: FrameAnchorAction? = null
+    private var afterWaitFrameAction: FrameAnchorAction? = null
 
     init {
         state.validate()
@@ -43,6 +51,7 @@ class ClickRunEngine(
     fun pause(): Boolean {
         if (state.phase != ClickRunPhase.Running && state.phase != ClickRunPhase.Ready) return false
         wakeGeneration++
+        cancelFrameEpoch(FrameMissingReason.Interrupted)
         return commit(state.copy(phase = ClickRunPhase.Paused), ClickRunEventType.Paused)
     }
 
@@ -59,6 +68,7 @@ class ClickRunEngine(
         if (state.terminal) return
         pendingDispatchToken = null
         wakeGeneration++
+        cancelFrameEpoch(if (reason == ClickStopReason.User) FrameMissingReason.CaptureStopped else FrameMissingReason.Interrupted)
         val interrupted = reason != ClickStopReason.User
         val outcomes = state.outcomes.map {
             if (it.status == ClickActionStatus.Intent || it.status == ClickActionStatus.Accepted) it.copy(status = ClickActionStatus.Unknown) else it
@@ -73,7 +83,12 @@ class ClickRunEngine(
         if (!matchesInFlight(token)) return
         if (dispatching == token) {
             // Fake dispatchers and platform wrappers may call back before returning acceptance.
-            if (synchronousResult == null) synchronousResult = token to result
+            if (synchronousResult == null) {
+                // Observe the sequence boundary at callback arrival, before acceptance fsync.
+                // This mark is provisional until dispatch returns true; rejection closes its epoch.
+                if (result == ClickGestureResult.Completed) markFrameGestureCompleted(token)
+                synchronousResult = token to result
+            }
             return
         }
         if (state.outcomes[state.nextActionIndex].status != ClickActionStatus.Accepted) return
@@ -81,6 +96,9 @@ class ClickRunEngine(
             ClickGestureResult.Completed -> {
                 val index = state.nextActionIndex
                 nextReadyAtUptimeMs = uptimeMs() + state.plan.actions[index].waitAfterMs
+                // Capture the lower bound before completion fsync; diagnostic time is never PTS.
+                markFrameGestureCompleted(token)
+                if (!matchesInFlight(token)) return
                 val next = index + 1
                 val updated = outcome(ClickActionStatus.Completed).copy(nextActionIndex = next)
                 if (!commit(updated, ClickRunEventType.GestureCompleted, token.actionId)) return
@@ -107,7 +125,10 @@ class ClickRunEngine(
             return
         }
         if (state.nextActionIndex == state.plan.actions.size) {
-            commit(state.copy(phase = ClickRunPhase.Completed), ClickRunEventType.Completed)
+            // Preserve completion semantics at the final wait, but never anchor an unsafe window.
+            if (readGuard() == ClickGuard.Allowed) finishFrameWait()
+            else cancelFrameEpoch(FrameMissingReason.Interrupted)
+            if (state.phase == ClickRunPhase.Running) commit(state.copy(phase = ClickRunPhase.Completed), ClickRunEventType.Completed)
             return
         }
         when (readGuard()) {
@@ -115,6 +136,8 @@ class ClickRunEngine(
             ClickGuard.Unknown -> { pauseForGuard(ClickRunEventType.GuardUnknown); return }
             ClickGuard.Allowed -> Unit
         }
+        finishFrameWait()
+        if (state.phase != ClickRunPhase.Running) return
         val action = state.plan.actions[state.nextActionIndex]
         if (state.outcomes[state.nextActionIndex].status != ClickActionStatus.Pending) { stop(ClickStopReason.DispatchUnknown); return }
         val token = ClickCallbackToken(state.runId, action.actionId, state.generation)
@@ -142,10 +165,16 @@ class ClickRunEngine(
             ClickGuard.Allowed -> Unit
         }
         if (pendingDispatchToken != token || state.phase != ClickRunPhase.Running || !matchesInFlight(token)) return
-        // Consume the uncalled capability before entering external code. Duplicate queued
+        val action = state.plan.actions[state.nextActionIndex]
+        val frameAction = FrameAnchorAction(state.runId, action.actionId, state.recordingSessionId, state.sourceId, state.generation)
+        inFlightFrameAction = frameAction
+        frameSafely { frames.before(frameAction) }
+        // A reentrant owner pause/stop still wins. A pause retains the uncalled dispatch capability
+        // for explicit resume; its old frame epoch has already been closed.
+        if (pendingDispatchToken != token || state.phase != ClickRunPhase.Running || !matchesInFlight(token)) return
+        // Consume the uncalled capability before entering platform code. Duplicate queued
         // continuations and synchronous callbacks can never dispatch this action a second time.
         pendingDispatchToken = null
-        val action = state.plan.actions[state.nextActionIndex]
         dispatching = token
         synchronousResult = null
         val accepted = try {
@@ -180,6 +209,7 @@ class ClickRunEngine(
 
     private fun pauseForGuard(type: ClickRunEventType) {
         wakeGeneration++
+        cancelFrameEpoch(FrameMissingReason.Interrupted)
         commit(state.copy(phase = ClickRunPhase.Paused), type)
     }
 
@@ -195,10 +225,38 @@ class ClickRunEngine(
     private fun failAction(status: ClickActionStatus, reason: ClickStopReason, event: ClickRunEventType) {
         if (state.terminal || state.nextActionIndex >= state.outcomes.size) return
         wakeGeneration++
+        cancelFrameEpoch(FrameMissingReason.Interrupted)
         commit(outcome(status).copy(
             phase = if (status == ClickActionStatus.Rejected) ClickRunPhase.Failed else ClickRunPhase.Interrupted,
             stopReason = reason,
         ), event, state.outcomes[state.nextActionIndex].actionId)
+    }
+
+    private fun markFrameGestureCompleted(token: ClickCallbackToken) {
+        val action = inFlightFrameAction?.takeIf {
+            it.runId == token.runId && it.actionId == token.actionId && it.generation == token.generation
+        } ?: return
+        // Consume before external code, including the buffered synchronous-completion path.
+        inFlightFrameAction = null
+        afterWaitFrameAction = action
+        frameSafely { frames.markGestureCompleted(action) }
+    }
+
+    private fun finishFrameWait() {
+        val action = afterWaitFrameAction ?: return
+        afterWaitFrameAction = null
+        frameSafely { frames.afterWait(action) }
+    }
+
+    private fun cancelFrameEpoch(reason: FrameMissingReason) {
+        inFlightFrameAction = null
+        afterWaitFrameAction = null
+        frameSafely { frames.cancelEpoch(reason) }
+    }
+
+    private inline fun frameSafely(block: () -> Unit) {
+        // Auxiliary evidence failure must never retry a gesture or rewrite its durable outcome.
+        try { block() } catch (_: Exception) { }
     }
 
     private fun scheduleSafely(delayMs: Long, callback: () -> Unit) {
@@ -223,6 +281,7 @@ class ClickRunEngine(
             // The disk may contain either revision. Never roll it back or dispatch another gesture.
             wakeGeneration++
             pendingDispatchToken = null
+            cancelFrameEpoch(FrameMissingReason.Interrupted)
             state = state.copy(phase = ClickRunPhase.Failed, stopReason = ClickStopReason.DurabilityFailure,
                 outcomes = frozenClickList(state.outcomes.map {
                     if (it.status == ClickActionStatus.Intent || it.status == ClickActionStatus.Accepted) it.copy(status = ClickActionStatus.Unknown) else it

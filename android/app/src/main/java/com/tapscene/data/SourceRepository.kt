@@ -11,6 +11,9 @@ import com.tapscene.media.MediaImportException
 import com.tapscene.media.MediaInputPolicy
 import com.tapscene.media.MediaLimits
 import com.tapscene.media.VideoFrameDecoder
+import com.tapscene.recording.FrameSourceAccessor
+import com.tapscene.recording.FrameRegisteredSource
+import com.tapscene.recording.FrameRecordingBackend
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.file.Files
@@ -185,6 +188,28 @@ class SourceRepository(context: Context) {
                 if (!registered && ownsDestination) runCatching { destination.delete() }
             }
         }
+    }
+
+    /** Private bridge for frame evidence. Each read checks current ownership and actual MP4 bytes. */
+    internal fun frameEvidenceSourceAccessor(): FrameSourceAccessor = FrameSourceAccessor { projectId, sessionId, sourceId ->
+        try {
+            require(projectId.matches(UUID_PATTERN) && sourceId.matches(UUID_PATTERN) && sessionId.matches(UUID_PATTERN))
+            requireProject(projectId)
+            val source = WorkspaceStore(app, projectId).read().singleOrNull { it.source.sourceId == sourceId }?.source
+            if (source == null) null else {
+                val path = "${MediaLimits.SOURCE_DIRECTORY}/$sourceId.mp4"
+                check(source.privateRelativePath == path)
+                val file = File(root, path)
+                requirePrivateSource(file)
+                val ownership = readOwnership(File(file.parentFile, ".recording-$sourceId.json"))
+                check(ownership == RecordingOwnership(projectId, sourceId, sessionId,
+                    source.metadata.byteLength, source.metadata.sha256))
+                check(file.length() == source.metadata.byteLength && FrameRecordingBackend.sha256(file) == source.metadata.sha256)
+                val samples = FrameRecordingBackend.readContainerSamples(file, source.metadata.width, source.metadata.height)
+                FrameRegisteredSource(projectId, sessionId, sourceId, source.metadata.sha256,
+                    source.metadata.width, source.metadata.height, samples)
+            }
+        } catch (_: Exception) { null }
     }
 
     private fun requireProject(projectId: String) {

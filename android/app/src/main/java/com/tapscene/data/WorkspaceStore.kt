@@ -120,6 +120,13 @@ class WorkspaceStore(context: Context, projectId: String? = null) {
         }
     }
 
+    /** A visible deletion is not durable until its directory entry has been confirmed. */
+    internal fun confirmSourceAbsent(sourceId: String): Boolean = synchronized(lock) {
+        if (read().any { it.source.sourceId == sourceId }) return@synchronized false
+        confirmDirectoryDurability()
+        true
+    }
+
     /** Finish an interrupted registration before its caller may discard the journal's original. */
     fun confirmRegistration(source: ImportedSource): ImportedSource = synchronized(lock) {
         val existing = read().firstOrNull { it.source.sourceId == source.sourceId }

@@ -70,7 +70,7 @@ internal object RecordingEncoder {
         throw RecordingStartException("本机暂时无法配置无声 H.264 录制，请关闭其他录制应用后重试。")
     }
 
-    private fun candidates(canvas: RecordingCanvas, durationMs: Int, maxBytes: Long): List<RecordingEncoding> {
+    internal fun candidates(canvas: RecordingCanvas, durationMs: Int, maxBytes: Long): List<RecordingEncoding> {
         val scale = min(1.0, min(
             MediaLimits.MAX_WIDTH.toDouble() / min(canvas.width, canvas.height),
             MediaLimits.MAX_HEIGHT.toDouble() / max(canvas.width, canvas.height),

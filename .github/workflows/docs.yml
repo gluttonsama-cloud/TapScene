@@ -263,6 +263,10 @@ jobs:
             --tests com.tapscene.clickplan.ClickTargetArmTest \
             --tests com.tapscene.clickplan.ClickViewportTest \
             --tests com.tapscene.recording.RecordingClickGateTest \
+            --tests com.tapscene.recording.RecordingFrameLedgerTest \
+            --tests com.tapscene.recording.FrameLeasePoolTest \
+            --tests com.tapscene.recording.FrameBoundaryWindowTest \
+            --tests com.tapscene.recording.FrameEvidenceStoreHostTest \
             2>&1 | tee "$RUNNER_TEMP/host-data-checks.txt"
       - name: Verify the exact host checks executed without failures or skips
         if: always() && steps.host_data.outcome != 'skipped' && steps.scope.outputs.android == 'true'
@@ -276,6 +280,32 @@ jobs:
           root = Path("android/app/build/test-results/testDebugUnitTest")
           files = sorted(root.glob("TEST-*.xml"))
           expected = {
+              ("com.tapscene.recording.FrameBoundaryWindowTest", "missingBeforeDoesNotSuppressRealCompletionAndAfterSelection"): 1,
+              ("com.tapscene.recording.FrameBoundaryWindowTest", "cancelledEpochCannotReuseOldSelectionOrBackfillCompletion"): 1,
+              ("com.tapscene.recording.FrameBoundaryWindowTest", "anotherRunGenerationOrSourceCannotClaimCurrentBoundary"): 1,
+              ("com.tapscene.recording.RecordingFrameLedgerTest", "sourceDeltasAndExactMuxMappingNeverGuess"): 1,
+              ("com.tapscene.recording.RecordingFrameLedgerTest", "repeatedBackwardsAndQuantizedTimesAreExplicitSkips"): 1,
+              ("com.tapscene.recording.RecordingFrameLedgerTest", "duplicateAndReorderedCodecOutputsFailInsteadOfSorting"): 1,
+              ("com.tapscene.recording.FrameLeasePoolTest", "pinnedFramesRemainImmutableWhileOtherSlotsCycle"): 1,
+              ("com.tapscene.recording.FrameLeasePoolTest", "drawingAndFailedPublicationNeverBecomeLatest"): 1,
+              ("com.tapscene.recording.FrameLeasePoolTest", "exhaustionAndStaleReleaseCannotFreeReusedSlot"): 1,
+              ("com.tapscene.recording.FrameEvidenceStoreHostTest", "durableImmutableTicketAndValidatedPixelsSurviveRecordingTemporaryCleanup"): 1,
+              ("com.tapscene.recording.FrameEvidenceStoreHostTest", "incompleteRecoveryNeverResumesPngOrRewritesLegacyJournals"): 1,
+              ("com.tapscene.recording.FrameEvidenceStoreHostTest", "committedDeletionRevokesLateWritersAndNeverTouchesForeignSourcesOrFiles"): 1,
+              ("com.tapscene.recording.FrameEvidenceStoreHostTest", "actualPartialBytesAndTicketCountAreBoundedAndRegisteredOwnershipCannotBeDiscarded"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "frameHooksBracketDispatchAndEachLogicalWaitIncludingTheLast"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "missingAndThrowingFrameHooksNeverDelayOrFailHealthyGestureOutcomes"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "frameCallbacksIgnoreDuplicateLateAndWrongIdentityResults"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "pauseDuringGestureOrWaitClosesFrameEpochAndResumeCannotRetrofill"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "pauseOnLastWaitDoesNotRetrofillAfterOnExplicitResume"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "unsafeNextOrFinalWindowClosesFrameEpochWithoutCapturingAfter"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "stopOrRecordingLossDuringWaitCancelsAfterAndNeverDispatchesNext"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "synchronousCompletionObservesFrameBoundaryBeforeAcceptancePersistenceOnce"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "failedCompletionOrAcceptancePersistenceInvalidatesProvisionalFrames"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "rejectedSynchronousCompletionCannotPublishAnAfterFrame"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "frameHookReentrantPauseOrStopCannotBypassDispatchGates"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "auxiliaryHookCannotOverwriteReentrantTerminalGestureState"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "cancellationHookFailureCannotPreventPauseStopOrAtMostOnceResume"): 1,
               ("com.tapscene.clickplan.ClickViewportTest", "actualSystemInsetsLeaveAppNavigationAvailable"): 1,
               ("com.tapscene.clickplan.ClickViewportTest", "actualOverlayOriginMustAgreeWithRawScreenCoordinates"): 1,
               ("com.tapscene.clickplan.ClickViewportTest", "browsingOnlyRestoresEditorAndOldControlsCannotReopenClosedSession"): 1,

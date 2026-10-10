@@ -109,7 +109,7 @@ internal class RecordingJournalStore(context: Context) {
     fun part(sessionId: String): File = child(sessionId, "capture.part.mp4")
     fun sealed(sessionId: String): File = child(sessionId, "sealed.mp4")
 
-    /** Call only after MediaRecorder.stop() returned successfully and released its file handle. */
+    /** Call only after the recording backend stopped successfully and released all output handles. */
     fun seal(sessionId: String): File {
         val input = part(sessionId)
         if (!input.isFile || input.length() <= 0) throw IOException("Empty recording")
