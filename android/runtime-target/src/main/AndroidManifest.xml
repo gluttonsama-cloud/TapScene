@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- No permissions, services, networking, accounts, or production dependencies. -->
+    <application
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
+        android:label="TapScene Runtime Target"
+        android:supportsRtl="true"
+        android:testOnly="true"
+        android:theme="@style/RuntimeTargetTheme">
+        <activity
+            android:name=".TargetActivity"
+            android:exported="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <!-- Every read checks the caller's actual signing certificate; no write IPC. -->
+        <provider
+            android:name=".TargetControlProvider"
+            android:authorities="com.tapscene.runtime.target.control"
+            android:exported="true"
+            android:grantUriPermissions="false" />
+    </application>
+</manifest>

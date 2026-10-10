@@ -41,6 +41,6 @@ withDecodedFrameSuspending 提供自动回收的 Bitmap 作用域，供现有 Sa
 
 只增加三组必要检查：真实时间差/精确匹配/样本序号；动作窗口/静态 Missing/迟到回调/至多一次及有限租约；私有存储/旧日志兼容/崩溃与归属删除。Android 构建、lint、主机原生 PNG/SQLite 及必要合成检查以最终 PR 精确 CI 为准。
 
-无真机/KVM 时，实际 OES→Codec、静态首帧、长屏方向/颜色、坐标/system bars、读回延迟/温度/内存、锁屏/系统停止、驱动 EOS 和进程断电均未验证。云端不会开启无障碍或投影权限，不执行真实外部点击，不生成新的交付签名或上传 APK。
+实体手机的长屏方向/颜色、坐标/system bars、读回延迟/温度/内存、锁屏/系统停止、驱动 EOS 和进程断电仍未验证。新增[有限云端运行入口](../tools/runtime-checks/README.md) 只在一次性软件模拟器里，按正常系统 UI 授权，向无网络合成目标执行真实点击并检查生产录制；结果以该入口实际产物为准，不外推用户设备。它不生成新的手机交付签名或向用户设备安装 APK。
 
 官方接口依据：[MediaProjection](https://developer.android.com/media/grow/media-projection)、[SurfaceTexture](https://developer.android.com/reference/android/graphics/SurfaceTexture)、[MediaCodec](https://developer.android.com/reference/android/media/MediaCodec)、[MediaMuxer](https://developer.android.com/reference/android/media/MediaMuxer)、[EGL 时间戳](https://registry.khronos.org/EGL/extensions/ANDROID/EGL_ANDROID_presentation_time.txt)。

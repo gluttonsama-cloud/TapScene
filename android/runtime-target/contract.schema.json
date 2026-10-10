@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tapscene:runtime-target:snapshot:1",
+  "title": "TapScene synthetic runtime target snapshot, schema 1",
+  "type": "object",
+  "required": ["schema", "sessionId", "ready", "static", "clickCount", "renderedCounter", "geometry", "events", "ioError"],
+  "properties": {
+    "schema": {"const": 1},
+    "sessionId": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$"},
+    "generation": {"type": "integer", "minimum": 0},
+    "ready": {"type": "boolean"},
+    "attached": {"type": "boolean"},
+    "focused": {"type": "boolean"},
+    "static": {"type": "boolean"},
+    "clickCount": {"type": "integer", "minimum": 0},
+    "state": {"type": "integer", "minimum": 0},
+    "renderedCounter": {"type": "integer", "minimum": 0},
+    "button1Count": {"type": "integer", "minimum": 0},
+    "button2Count": {"type": "integer", "minimum": 0},
+    "drawnUptimeMs": {"type": "integer", "minimum": 0},
+    "drawnElapsedRealtimeNs": {"type": "integer", "minimum": 0},
+    "geometry": {"$ref": "#/$defs/geometry"},
+    "events": {"type": "array", "items": {"$ref": "#/$defs/event"}},
+    "ioError": {"type": "string"}
+  },
+  "$defs": {
+    "rect": {
+      "type": "object",
+      "required": ["left", "top", "right", "bottom", "centerX", "centerY"],
+      "properties": {
+        "left": {"type": "integer"}, "top": {"type": "integer"},
+        "right": {"type": "integer"}, "bottom": {"type": "integer"},
+        "centerX": {"type": "integer"}, "centerY": {"type": "integer"}
+      }
+    },
+    "geometry": {
+      "type": "object",
+      "description": "Empty before layout; ready snapshots have the screen_raw_px fields below.",
+      "properties": {
+        "schema": {"const": 1},
+        "coordinateSpace": {"const": "screen_raw_px"},
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1},
+        "rotation": {"type": "integer", "minimum": 0, "maximum": 3},
+        "displayId": {"type": "integer", "minimum": 0},
+        "fullScreen": {"type": "boolean"},
+        "insets": {"type": "object", "required": ["left", "top", "right", "bottom"]},
+        "button1": {"$ref": "#/$defs/rect"},
+        "button2": {"$ref": "#/$defs/rect"},
+        "stateRegion": {"$ref": "#/$defs/rect"},
+        "staticRegion": {"$ref": "#/$defs/rect"},
+        "centerColorArgb": {"const": -526345},
+        "centerRadiusPx": {"type": "integer", "minimum": 0},
+        "centerStableRoiHalfSizePx": {"type": "integer", "minimum": 1},
+        "drawDelayAfterUpMs": {"const": 150}
+      }
+    },
+    "event": {
+      "type": "object",
+      "required": ["schema", "sessionId", "sequence", "action", "rawX", "rawY", "eventTimeMs", "downTimeMs", "receivedUptimeMs", "receivedElapsedRealtimeNs", "button", "counter", "clickCount", "stateChanged", "static", "renderedCounter"],
+      "properties": {
+        "schema": {"const": 1},
+        "sessionId": {"type": "string"},
+        "sequence": {"type": "integer", "minimum": 1},
+        "action": {"enum": [0, 1, 3, 5, 6]},
+        "actionName": {"type": "string"},
+        "rawX": {"type": "number"}, "rawY": {"type": "number"},
+        "eventTimeMs": {"type": "integer", "minimum": 0},
+        "downTimeMs": {"type": "integer", "minimum": 0},
+        "receivedUptimeMs": {"type": "integer", "minimum": 0},
+        "receivedElapsedRealtimeNs": {"type": "integer", "minimum": 0},
+        "receivedElapsedRealtimeNanos": {"type": "integer", "minimum": 0},
+        "button": {"enum": [0, 1, 2]},
+        "counter": {"type": "integer", "minimum": 0},
+        "clickCount": {"type": "integer", "minimum": 0},
+        "button1Count": {"type": "integer", "minimum": 0},
+        "button2Count": {"type": "integer", "minimum": 0},
+        "stateChanged": {"type": "boolean"},
+        "static": {"type": "boolean"},
+        "renderedCounter": {"type": "integer", "minimum": 0}
+      }
+    }
+  },
+  "allOf": [{
+    "if": {"properties": {"ready": {"const": true}}},
+    "then": {"properties": {"geometry": {"required": ["schema", "coordinateSpace", "width", "height", "insets", "button1", "button2", "stateRegion", "staticRegion", "centerColorArgb", "centerRadiusPx", "centerStableRoiHalfSizePx"]}}}
+  }]
+}

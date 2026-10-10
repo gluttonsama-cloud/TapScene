@@ -11,6 +11,7 @@
 - 验证基线：Android 8.0 / API 26 起；compile / target API 36；JDK 17、Gradle 8.13、AGP 8.13.2、Kotlin 2.2.21、Media3 1.9.4。正式兼容设备范围待实测。
 - 已装上述工具和已接受许可的 Android SDK 时，运行 `gradle -p android :app:assembleDebug :app:lintDebug`；APK 在 `android/app/build/outputs/apk/debug/`。当前未附 Gradle Wrapper 二进制。
 - `ci/gate` 核对合成 AVC/HEVC 素材与项目 SQLite 约束、离线包安全反例及共用播放器状态机、构建 APK、运行 Android lint 与权限检查；有可用硬件加速时才运行模拟器媒体冒烟，否则明确记录 `NOT_RUN`。构建通过不代表设备检查通过；成功产物保留 7 天。
+- 独立[云端 Android 运行入口](tools/runtime-checks/README.md) 在固定 API35 软件模拟器中检查合成目标的真实点击、录屏和静态等待时长，专用 harness 不执行旧全量媒体 suite。实际结果以独立 `ci/android-runtime-smoke` 的精确提交和产物为准；不代表实体手机验收，产品版本仍为 31。
 - CI 以 `-PcompatibilityPreview=true` 构建现有 `com.tapscene.preview.hevc` 包名（名称“TapScene 开发版”）；不再增加包名。CI 原始 APK 使用临时调试签名，交付前须按 [本地重签说明](tools/signing/README.md) 使用同一专用开发证书并核对实际输出。首次换签不能覆盖旧版；不要为签名冲突卸载有数据的旧版或清除数据。长期私钥备份尚未完成，开发环境重建后仍有丢失风险。
 - 当前路径：录制或导入 → 整理候选 → 批量选择 → 同页调帧/按需遮挡/确认实际输出并下一张 → 步骤标题、说明与热点 → 本机点击预览。候选最多 30 个，实际采样最多 361 次，可能遗漏短暂变化；帧时间为毫秒精度。选择候选不等于隐私复核，只有真实生成并确认的派生 PNG 进入步骤。无敏感信息可不加遮挡。
 - 录制每会话请求系统授权，使用有停止入口的前台服务；不录声音。手动模式不采集点击；点击链只保存作者编排及执行回调，服务在编排/播放期间读取窗口包名、类名和全屏状态，不读取节点内容、键盘文本或通知。可见敏感输入仍可能被录入，后续必须复核。锁屏/系统停止结束会话；进程中断不自动重新录制，封口成功但登记未完成的本机片段可显式重试或删除。

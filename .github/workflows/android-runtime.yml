@@ -1,0 +1,120 @@
+name: Android runtime smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/android-runtime.yml'
+      - 'tools/runtime-checks/**'
+      - 'android/runtime-target/**'
+      - 'android/*.kts'
+      - 'android/gradle.properties'
+      - 'android/app/build.gradle.kts'
+      - 'android/app/src/main/AndroidManifest.xml'
+      - 'android/app/src/main/java/com/tapscene/clickplan/**'
+      - 'android/app/src/main/java/com/tapscene/recording/**'
+      - 'android/app/src/main/java/com/tapscene/media/**'
+      - 'android/app/src/main/java/com/tapscene/data/ProjectStore.kt'
+      - 'android/app/src/main/java/com/tapscene/data/SourceRepository.kt'
+      - 'android/app/src/main/java/com/tapscene/data/WorkspaceStore.kt'
+      - 'android/app/src/main/res/xml/click_accessibility_service.xml'
+      - 'android/app/src/androidTest/java/com/tapscene/runtime/**'
+      - 'android/app/src/runtimeSmoke/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-runtime-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  smoke:
+    name: ci/android-runtime-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, same as ci/gate
+        with:
+          persist-credentials: false
+      - name: Reuse the runner's JDK and SDK
+        run: |
+          mkdir -p "$RUNNER_TEMP/runtime-results"
+          test -x "$JAVA_HOME_17_X64/bin/javac"
+          test -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+          echo "$JAVA_HOME_17_X64/bin" >> "$GITHUB_PATH"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/runtime-results/revision.txt"
+      - uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+        with:
+          gradle-version: '8.13'
+          cache-disabled: true
+      - name: Reuse the same official SDK packages without accepting new licenses
+        timeout-minutes: 5
+        run: |
+          python3 tools/runtime-checks/sdk-lock.py remote | tee "$RUNNER_TEMP/runtime-results/sdk-remote.txt"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --channel=0 --install \
+            'ndk;28.2.13676358' 'cmake;3.22.1' 'emulator' 'system-images;android-35;default;x86_64' \
+            </dev/null 2>&1 | tee "$RUNNER_TEMP/runtime-results/sdk-install.txt"
+          python3 tools/runtime-checks/sdk-lock.py installed | tee "$RUNNER_TEMP/runtime-results/sdk-installed.txt"
+      - name: Install the emulator's shared-library dependency from Ubuntu
+        timeout-minutes: 3
+        run: |
+          # The minimal lane does not install ffmpeg or a desktop audio stack. Even -no-audio
+          # needs the official emulator's dynamically linked libpulse.so.0 to load.
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes libpulse0 \
+            2>&1 | tee "$RUNNER_TEMP/runtime-results/ubuntu-library-install.txt"
+          ldd "$ANDROID_HOME/emulator/qemu/linux-x86_64/qemu-system-x86_64" \
+            | tee "$RUNNER_TEMP/runtime-results/emulator-libraries.txt" || true
+          # The official launcher establishes its bundled-library search paths. Its real load
+          # result is authoritative; bare ldd is retained only as diagnostic context.
+          "$ANDROID_HOME/emulator/emulator" -version \
+            2>&1 | tee "$RUNNER_TEMP/runtime-results/emulator-version.txt"
+      - name: Build only the x86_64 app, dedicated harness and synthetic target
+        timeout-minutes: 15
+        run: |
+          python3 tools/ocr-native/prepare.py
+          gradle -p android --no-daemon --max-workers=2 \
+            -PcompatibilityPreview=true -PtapsceneAbi=x86_64 -PtapsceneRuntimeSmoke=true \
+            :app:assembleDebug :app:assembleDebugAndroidTest :runtime-target:assembleDebug \
+            </dev/null 2>&1 | tee "$RUNNER_TEMP/runtime-results/build.txt"
+          python3 - <<'PY' | tee "$RUNNER_TEMP/runtime-results/dex-packaging.json"
+          import hashlib, json, re, zipfile
+          paths = ['android/app/build/outputs/apk/debug/app-debug.apk',
+                   'android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk',
+                   'android/runtime-target/build/outputs/apk/debug/runtime-target-debug.apk']
+          records = []
+          for path in paths:
+              with zipfile.ZipFile(path) as apk:
+                  dex = [entry for entry in apk.infolist() if re.fullmatch(r'classes(?:[0-9]+)?\.dex', entry.filename)]
+                  records.append({'apk': path, 'dex': [
+                      {'name': entry.filename, 'compression': entry.compress_type, 'bytes': entry.file_size,
+                       'sha256': hashlib.sha256(apk.read(entry)).hexdigest()} for entry in dex]})
+          print(json.dumps(records, sort_keys=True))
+          assert records[0]['dex'] and all(entry['compression'] == zipfile.ZIP_STORED for entry in records[0]['dex']), 'Runtime app DEX must be stored without compression'
+          PY
+          "$ANDROID_HOME/build-tools/35.0.0/aapt2" dump xmltree \
+            android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk \
+            --file AndroidManifest.xml 2>&1 | tee "$RUNNER_TEMP/runtime-results/runtime-test-manifest.txt"
+          grep -Fq 'com.tapscene.runtime.ClickRuntimeInstrumentation' "$RUNNER_TEMP/runtime-results/runtime-test-manifest.txt"
+          if grep -Eq 'android[.]test[.](runner|mock|base)' "$RUNNER_TEMP/runtime-results/runtime-test-manifest.txt"; then
+            echo 'The dedicated platform Instrumentation must not load unused JUnit3 shared libraries' >&2
+            exit 1
+          fi
+      - name: Run one isolated software Android instance
+        timeout-minutes: 25
+        run: bash tools/runtime-checks/run.sh "$RUNNER_TEMP/runtime-results"
+      - name: Keep the result and crash diagnostics even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: android-runtime-smoke
+          path: ${{ runner.temp }}/runtime-results/
+          retention-days: 7
+          if-no-files-found: error
