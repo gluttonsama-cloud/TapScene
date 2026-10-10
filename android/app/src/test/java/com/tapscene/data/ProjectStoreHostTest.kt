@@ -2,6 +2,7 @@ package com.tapscene.data
 
 import android.app.Application
 import android.content.Context
+import android.database.sqlite.SQLiteConstraintException
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import android.os.Build
@@ -102,6 +103,30 @@ class ProjectStoreHostTest {
             } finally { fixture.database { execSQL("DROP TRIGGER reject_editor_save") } }
             check(fixture.snapshot() == before) { "Failed save changed formal graph/revision" }
             check(store.readEditorDrafts(fixture.project) == mapOf(fixture.a to a, fixture.b to b))
+            // Exercise production endTransaction failure, not just a statement-level ABORT.
+            // An uncommitted cleanup journal must never delete bytes on the next store read.
+            val cleanupPath = "project-assets/${fixture.project}/${fixture.id()}.png"
+            val sentinel = File(fixture.root, cleanupPath)
+            check(sentinel.parentFile!!.mkdirs())
+            sentinel.writeText("Synthetic cleanup sentinel, not media")
+            fixture.database { execSQL("""CREATE TRIGGER reject_editor_commit AFTER UPDATE OF draft_revision ON projects
+                BEGIN
+                    INSERT INTO asset_cleanup(project_id,relative_path) VALUES(NEW.project_id,'$cleanupPath');
+                    UPDATE projects SET start_state_id='${fixture.id()}' WHERE project_id=NEW.project_id;
+                END""") }
+            val commitFailure = runCatching { fixture.save(store, fixture.a, a, session) }.exceptionOrNull()
+            check(commitFailure is SQLiteConstraintException && commitFailure.message.orEmpty().contains("FOREIGN KEY", ignoreCase = true))
+            // Do not close/reopen from the test: this exact store must discard its failed pool.
+            check(store.readProject(fixture.project) == before) { "Failed commit leaked an uncommitted graph" }
+            check(store.readEditorDrafts(fixture.project) == mapOf(fixture.a to a, fixture.b to b))
+            check(sentinel.readText() == "Synthetic cleanup sentinel, not media") { "Cleanup consumed an uncommitted journal" }
+            fixture.database {
+                rawQuery("SELECT COUNT(*) FROM asset_cleanup WHERE relative_path=?", arrayOf(cleanupPath)).use {
+                    check(it.moveToFirst() && it.getInt(0) == 0)
+                }
+                execSQL("DROP TRIGGER reject_editor_commit")
+            }
+            println("HOST_COMMIT_FAILURE same-store graph/draft recovery and uncommitted cleanup isolation")
             val saved = fixture.save(store, fixture.a, a, session)
             check(saved.project.revision == before.project.revision + 1)
             check(saved.steps.single { it.id == fixture.a }.editorFields() == a.edit)

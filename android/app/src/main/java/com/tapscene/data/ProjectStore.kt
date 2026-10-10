@@ -40,6 +40,7 @@ class ProjectStore(context: Context) {
     private val app = context.applicationContext
     private val root = context.applicationContext.noBackupFilesDir.canonicalFile
     private val helper = Database(context.applicationContext, File(root, "projects.sqlite").path)
+    private var databaseCloseFailure: Throwable? = null
 
     fun readDraftAiConfig(projectId: String): DraftAiConfig? = access { db ->
         val project = requireSnapshot(db, projectId)
@@ -173,7 +174,7 @@ class ProjectStore(context: Context) {
             }
             currentCoroutineContext().ensureActive()
             return withContext(NonCancellable) { synchronized(lock) {
-                val db = helper.writableDatabase
+                val db = database()
                 val result = transaction(db) {
                     val current = readAiImport(db, sessionId) ?: error("导入会话已不存在。")
                     if (current.status == "committed") return@transaction aiResult(db, current)
@@ -244,7 +245,7 @@ class ProjectStore(context: Context) {
         finally {
             val cleanup = synchronized(lock) {
                 copies.forEach { activeImports.remove(importKey(it.assetId)) }
-                runCatching { copies.forEach { cleanupImport(helper.writableDatabase, projectId, it.assetId) } }.exceptionOrNull()
+                runCatching { copies.forEach { cleanupImport(database(), projectId, it.assetId) } }.exceptionOrNull()
             }
             if (cleanup != null && !committed) { if (failure != null) failure.addSuppressed(cleanup) else throw cleanup }
         }
@@ -512,7 +513,7 @@ class ProjectStore(context: Context) {
             owner.ensureActive()
             return withContext(NonCancellable) {
                 synchronized(lock) {
-                    val db = helper.writableDatabase
+                    val db = database()
                     val saved = transaction(db) {
                         if (newProjectTitle != null && snapshot(db, projectId) == null) {
                             val now = System.currentTimeMillis()
@@ -615,7 +616,7 @@ class ProjectStore(context: Context) {
                 activeImports.remove(importKey(assetId))
                 // Consult the durable reference, including when endTransaction's result was
                 // uncertain. Cleanup errors retain the journal for the next store operation.
-                runCatching { cleanupImport(helper.writableDatabase, projectId, assetId) }.exceptionOrNull()
+                runCatching { cleanupImport(database(), projectId, assetId) }.exceptionOrNull()
             }
             // Never falsely report that the graph save failed after its commit point.
             if (cleanup != null && !committed) {
@@ -700,7 +701,7 @@ class ProjectStore(context: Context) {
             owner.ensureActive()
             return withContext(NonCancellable) {
                 synchronized(lock) {
-                    val db = helper.writableDatabase
+                    val db = database()
                     val result = transaction(db) {
                         val current = requireSnapshot(db, projectId)
                         requireEdge(current, edgeId)
@@ -748,8 +749,8 @@ class ProjectStore(context: Context) {
             val cleanup = synchronized(lock) {
                 activeImports.remove(importKey(assetId))
                 runCatching {
-                    cleanupImport(helper.writableDatabase, projectId, assetId, "mp4")
-                    cleanupPending(helper.writableDatabase)
+                    cleanupImport(database(), projectId, assetId, "mp4")
+                    cleanupPending(database())
                 }.exceptionOrNull()
             }
             if (cleanup != null && !committed) {
@@ -1223,7 +1224,7 @@ class ProjectStore(context: Context) {
             require(length in 1..MAX_PNG_BYTES) { "裁片为空或超过限制。" }
             currentCoroutineContext().ensureActive()
             return withContext(NonCancellable) { synchronized(lock) {
-                val db = helper.writableDatabase
+                val db = database()
                 val result = transaction(db) {
                     val current = requireSnapshot(db, projectId)
                     check(current.project.revision == expectedRevision) { "草稿已改变，裁片未替换，请重新生成。" }
@@ -1255,7 +1256,7 @@ class ProjectStore(context: Context) {
         finally {
             val cleanup = synchronized(lock) {
                 activeImports.remove(importKey(assetId))
-                runCatching { cleanupImport(helper.writableDatabase, projectId, assetId); cleanupPending(helper.writableDatabase) }.exceptionOrNull()
+                runCatching { cleanupImport(database(), projectId, assetId); cleanupPending(database()) }.exceptionOrNull()
             }
             if (cleanup != null && !committed) { if (failure != null) failure.addSuppressed(cleanup) else throw cleanup }
         }
@@ -1325,8 +1326,14 @@ class ProjectStore(context: Context) {
             count(db, "edge_transitions", "source_id=?", sourceId) > 0
     }
 
+    /** All callers hold lock, including import cleanup after a failed commit. */
+    private fun database(): SQLiteDatabase {
+        databaseCloseFailure?.let { throw IllegalStateException("数据库未能安全关闭，请保留本机数据并重新打开应用。", it) }
+        return helper.writableDatabase
+    }
+
     private fun <T> access(block: (SQLiteDatabase) -> T): T = synchronized(lock) {
-        val db = helper.writableDatabase
+        val db = database()
         recoverImports(db)
         cleanupPending(db)
         block(db)
@@ -1354,12 +1361,28 @@ class ProjectStore(context: Context) {
 
     private fun <T> transaction(db: SQLiteDatabase, block: () -> T): T {
         db.beginTransaction()
+        var failure: Throwable? = null
         try {
             val result = block()
             db.setTransactionSuccessful()
             return result
+        } catch (error: Throwable) {
+            failure = error
+            throw error
         } finally {
-            db.endTransaction()
+            try { db.endTransaction() }
+            catch (endFailure: Throwable) {
+                // Android can pop its transaction stack before a deferred-FK COMMIT fails,
+                // leaving the native transaction open in the reusable pool. Do not let later
+                // reads or file cleanup treat those uncommitted rows as durable. No raw SQL
+                // ROLLBACK: SQLiteSession would reinterpret it against the already empty stack.
+                databaseCloseFailure = endFailure
+                try {
+                    helper.close()
+                    databaseCloseFailure = null // A later access opens a fresh connection.
+                } catch (closeFailure: Throwable) { endFailure.addSuppressed(closeFailure) }
+                failure?.addSuppressed(endFailure) ?: throw endFailure
+            }
         }
     }
 

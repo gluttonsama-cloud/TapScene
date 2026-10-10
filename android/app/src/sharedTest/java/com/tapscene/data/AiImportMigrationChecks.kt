@@ -194,7 +194,19 @@ internal object AiImportMigrationChecks {
         // Close explicitly: SQLiteOpenHelper is not AutoCloseable on API 26.
         val helper = ProjectStore.Database(context, file.path)
         try {
-            val db = helper.writableDatabase
+            var db = helper.writableDatabase
+            fun rejected(block: () -> Unit) {
+                val before = snapshot(db)
+                val failure = runCatching { transaction(db, block) }.exceptionOrNull()
+                // A failed deferred-FK COMMIT can leave native work pending after Android
+                // has dropped its transaction stack. Close/reopen to check durable rollback;
+                // same-store recovery is separately exercised through production saveStepDraft.
+                helper.close()
+                db = helper.writableDatabase
+                verifyDatabase(db)
+                check(failure != null) { "Invalid v8 SQL accepted" }
+                check(snapshot(db) == before) { "Rejected v8 SQL changed durable data" }
+            }
             verifyDatabase(db)
             transaction(db) {
                 for (p in listOf("p", "other")) {
@@ -202,21 +214,21 @@ internal object AiImportMigrationChecks {
                     db.execSQL("INSERT INTO local_assets VALUES(?,?,?,?,4,1,1)", arrayOf("$p-asset",p,"$p/asset.png",sha))
                 }
             }
-            rejected(db) { packageState(db) }
-            rejected(db) { provenance(db) }
-            rejected(db) { packageState(db); provenance(db, importId = "mismatch") }
-            rejected(db) { packageState(db); provenance(db, project = "other") }
+            rejected { packageState(db) }
+            rejected { provenance(db) }
+            rejected { packageState(db); provenance(db, importId = "mismatch") }
+            rejected { packageState(db); provenance(db, project = "other") }
             transaction(db) {
                 if (reverse) { provenance(db); packageState(db) } else { packageState(db); provenance(db) }
             }
             for (change in listOf("package_import_id=NULL", "package_import_id='wrong'", "evidence_kind='recorded'", "source_id='video'",
                 "frame_pts_us=0", "time_precision_us=1", "image_source_id='raw'", "base_asset_id='base'", "base_revision=1", "base_width=1", "base_height=1")) {
-                rejected(db) { db.execSQL("UPDATE states SET $change WHERE project_id='p'") }
+                rejected { db.execSQL("UPDATE states SET $change WHERE project_id='p'") }
             }
-            rejected(db) { db.execSQL("UPDATE package_step_origins SET source_sha256=?", arrayOf(sha + "\u0000suffix")) }
-            rejected(db) { db.execSQL("DELETE FROM package_step_origins") }
+            rejected { db.execSQL("UPDATE package_step_origins SET source_sha256=?", arrayOf(sha + "\u0000suffix")) }
+            rejected { db.execSQL("DELETE FROM package_step_origins") }
             for (change in listOf("source_sha256='INVALID'", "declared_kind='videoFrame'", "import_id='wrong'", "source_state_id=''", "source_asset_id=''")) {
-                rejected(db) { db.execSQL("UPDATE package_step_origins SET $change") }
+                rejected { db.execSQL("UPDATE package_step_origins SET $change") }
             }
             transaction(db) {
                 packageState(db, "other"); provenance(db, "other")
@@ -227,13 +239,13 @@ internal object AiImportMigrationChecks {
             }
             check(scalar(db, "SELECT COUNT(*) FROM package_step_origins") == 2L)
             check(scalar(db, "SELECT COUNT(*) FROM states WHERE evidence_kind='imported'") == 2L)
-            rejected(db) { db.execSQL("UPDATE states SET package_import_id='import' WHERE project_id='p'") }
-            rejected(db) { db.execSQL("INSERT INTO ai_import_sessions VALUES('duplicate','preparing','p',NULL,NULL,NULL,1)") }
-            for (state in listOf("ready", "committed")) rejected(db) { db.execSQL("UPDATE ai_import_sessions SET state=? WHERE session_id='waiting'", arrayOf(state)) }
-            for (field in listOf("input_sha", "preview_digest", "prepared_json")) rejected(db) { db.execSQL("UPDATE ai_import_sessions SET $field=NULL WHERE session_id='session'") }
-            for (text in listOf("x".repeat(2097153), "界".repeat(699051))) rejected(db) { db.execSQL("UPDATE ai_import_sessions SET prepared_json=? WHERE session_id='session'", arrayOf(text)) }
-            for (change in listOf("bound_revision=0", "needs_repair=2", "config_json=''", "project_id='missing'")) rejected(db) { db.execSQL("UPDATE draft_ai_configs SET $change") }
-            for (text in listOf("x".repeat(524289), "界".repeat(174763))) rejected(db) { db.execSQL("UPDATE draft_ai_configs SET config_json=?", arrayOf(text)) }
+            rejected { db.execSQL("UPDATE states SET package_import_id='import' WHERE project_id='p'") }
+            rejected { db.execSQL("INSERT INTO ai_import_sessions VALUES('duplicate','preparing','p',NULL,NULL,NULL,1)") }
+            for (state in listOf("ready", "committed")) rejected { db.execSQL("UPDATE ai_import_sessions SET state=? WHERE session_id='waiting'", arrayOf(state)) }
+            for (field in listOf("input_sha", "preview_digest", "prepared_json")) rejected { db.execSQL("UPDATE ai_import_sessions SET $field=NULL WHERE session_id='session'") }
+            for (text in listOf("x".repeat(2097153), "界".repeat(699051))) rejected { db.execSQL("UPDATE ai_import_sessions SET prepared_json=? WHERE session_id='session'", arrayOf(text)) }
+            for (change in listOf("bound_revision=0", "needs_repair=2", "config_json=''", "project_id='missing'")) rejected { db.execSQL("UPDATE draft_ai_configs SET $change") }
+            for (text in listOf("x".repeat(524289), "界".repeat(174763))) rejected { db.execSQL("UPDATE draft_ai_configs SET config_json=?", arrayOf(text)) }
             transaction(db) { db.execSQL("DELETE FROM projects WHERE project_id='p'") }
             check(scalar(db, "SELECT COUNT(*) FROM package_step_origins WHERE project_id='p'") == 0L)
             check(scalar(db, "SELECT COUNT(*) FROM package_step_origins WHERE project_id='other'") == 1L)
@@ -253,10 +265,5 @@ internal object AiImportMigrationChecks {
     private fun transaction(db: SQLiteDatabase, block: () -> Unit) {
         db.beginTransaction()
         try { block(); db.setTransactionSuccessful() } finally { db.endTransaction() }
-    }
-    private fun rejected(db: SQLiteDatabase, block: () -> Unit) {
-        val before = snapshot(db)
-        check(runCatching { transaction(db, block) }.isFailure) { "Invalid v8 SQL accepted" }
-        check(snapshot(db) == before) { "Rejected v8 SQL changed persisted data" }
     }
 }
