@@ -5,6 +5,7 @@ import android.content.ContextWrapper
 import android.database.sqlite.SQLiteDatabase
 import android.graphics.Bitmap
 import android.graphics.Color
+import com.tapscene.packageformat.AiDraftImportPolicy
 import com.tapscene.packageformat.AiPackageCodec
 import com.tapscene.packageformat.RenderPlan
 import com.tapscene.packageformat.ViewerPackageCodec
@@ -27,16 +28,23 @@ object AiDraftImportChecks {
             invalidInputs(isolated, status)
         }
 
-    private suspend fun lifecycle(context: Context, status: (String) -> Unit) {
-        val fixture = AiDraftImportFixtures.complete(context)
+    /** One successful static round trip plus the existing cancel/stale/video rejection boundaries. */
+    suspend fun roundTrip(context: Context, output: File, status: (String) -> Unit) =
+        AiDraftImportFixtures.isolated(context, "ai-round-trip") { isolated ->
+            check(output.isDirectory && output.listFiles().orEmpty().isEmpty())
+            lifecycle(isolated, status, output)
+        }
+
+    private suspend fun lifecycle(context: Context, status: (String) -> Unit, output: File? = null) {
+        val originalFixture = AiDraftImportFixtures.complete(context)
         val projects = ProjectStore(context)
         var imports = AiDraftImportStore(context)
         val releases = ReleaseStore(context)
-        val first = fixture.zip.inputStream().use { imports.prepare(it) }
+        val first = originalFixture.zip.inputStream().use { imports.prepare(it) }
         val originalId = checkNotNull(imports.commit(first.sessionId, first.previewDigest).projectId)
         AiDraftImportFixtures.reviewDraftRegions(projects, originalId)
         val original = checkNotNull(projects.readProject(originalId))
-        val baseline = AiDraftImportFixtures.sealFixture(context, originalId, fixture)
+        val baseline = AiDraftImportFixtures.sealFixture(context, originalId, originalFixture)
         val editorSession = projects.beginEditorDraftSession(originalId)
         val originalStep = original.steps.first()
         val editorDraft = StoredEditorDraft(original.project.revision, originalStep.editorFields(),
@@ -46,7 +54,10 @@ object AiDraftImportChecks {
         val originalDraftRows = editorRows(context, originalId)
         val originalAssets = assetDigests(context, original)
         val originalReleaseBytes = treeDigests(File(context.noBackupFilesDir, "release-store/releases/${baseline.id}"))
-        val originalZipDigest = ViewerPackageCodec.sha256(fixture.zip)
+        val originalZipDigest = ViewerPackageCodec.sha256(originalFixture.zip)
+        val originalRows = projectRows(context, originalId)
+        val fixture = AiDraftImportFixtures.edited(context, originalFixture)
+        val incomingZipDigest = ViewerPackageCodec.sha256(fixture.zip)
 
         fun unchanged() {
             check(projects.readProject(originalId) == original) { "AI import changed the original project" }
@@ -54,7 +65,9 @@ object AiDraftImportChecks {
             check(projects.readEditorDrafts(originalId)[originalStep.id] == editorDraft)
             check(assetDigests(context, original) == originalAssets)
             check(treeDigests(File(context.noBackupFilesDir, "release-store/releases/${baseline.id}")) == originalReleaseBytes)
-            check(ViewerPackageCodec.sha256(fixture.zip) == originalZipDigest) { "Caller-owned package changed" }
+            check(projectRows(context, originalId) == originalRows) { "AI import changed original database row values" }
+            check(ViewerPackageCodec.sha256(originalFixture.zip) == originalZipDigest)
+            check(ViewerPackageCodec.sha256(fixture.zip) == incomingZipDigest) { "Caller-owned package changed" }
         }
 
         val beforeIds = projects.listProjects().map { it.id }.toSet()
@@ -77,6 +90,14 @@ object AiDraftImportChecks {
         check(pending.expandedByteLength == fixture.scene.states.sumOf { state ->
             fixture.scene.assets.single { it.id == state.imageAssetId }.byteLength
         } + fixture.scene.regions.sumOf { region -> fixture.scene.assets.single { it.id == region.assetId }.byteLength })
+        check(pending.differences.any { it.category == "text" && it.subjectId == fixture.branchId &&
+            it.field == "title" && it.before == "Unselected branch" && it.after == "Edited unselected branch" })
+        check(pending.differences.any { it.category == "text" && it.subjectId == fixture.branchEdgeId &&
+            it.field == "label" && it.after == "Alternate ending" })
+        check(pending.differences.any { it.category == "region" && it.field == "zIndex" && it.before == "-2" && it.after == "4" })
+        check(pending.differences.none { it.category == "path" }) // No exported baseline plan snapshot is claimed.
+        check(pending.summary.contains("Edited unselected branch") && pending.summary.contains("Alternate ending"))
+        check(pending.plan.toBytes().contentEquals(fixture.plan.toBytes()))
         val noBaseline = imports.preview(pending.sessionId, null)
         check(noBaseline.previewDigest != pending.previewDigest && noBaseline.baselineReleaseId == null)
         rejected { imports.commit(pending.sessionId, pending.previewDigest) }
@@ -93,7 +114,11 @@ object AiDraftImportChecks {
         unchanged()
         status("PASS AI import preview: full unselected branch retained, repeated visits stay a plan, cancel creates no project, resumed preview and changed comparison reject stale commit")
 
-        val result = imports.commit(noBaseline.sessionId, noBaseline.previewDigest)
+        // Re-select the explicit local baseline and acknowledge this exact complete comparison.
+        val confirmed = imports.preview(pending.sessionId, baseline.id)
+        check(confirmed.previewDigest == pending.previewDigest && confirmed.baselineReleaseId == baseline.id)
+        rejected { imports.commit(noBaseline.sessionId, noBaseline.previewDigest) }
+        val result = imports.commit(confirmed.sessionId, confirmed.previewDigest)
         val newId = checkNotNull(result.projectId)
         check(result.status == "committed" && result.projectExists && newId != originalId && newId == pending.newProjectId)
         val imported = checkNotNull(projects.readProject(newId))
@@ -124,7 +149,7 @@ object AiDraftImportChecks {
         check(region.reviewedAt == null && region.matchesBase(imported.steps.first().asset))
         check(region.baseAssetId == imported.steps.first().asset.id && checkNotNull(region.asset).id != fixture.scene.regions.single().assetId)
         check(region.name == "Visible crop" && region.group == "Header" && region.bbox == RegionBox(3, 4, 10, 12))
-        check(region.zIndex == -2 && region.anchorX == .25 && region.anchorY == .75 && region.sourceWidth == 32 && region.sourceHeight == 48)
+        check(region.zIndex == 4 && region.anchorX == .25 && region.anchorY == .75 && region.sourceWidth == 32 && region.sourceHeight == 48)
         imported.steps.first().hotspots.forEach { hotspot ->
             val expected = fixture.scene.edges.single { it.hotspotId == hotspot.id }
             check(hotspot.edgeId == expected.id && hotspot.label == expected.label && hotspot.targetStepId == expected.toStateId && hotspot.endLabel == expected.endLabel)
@@ -132,13 +157,59 @@ object AiDraftImportChecks {
         check(imported.steps.first().hotspots.map { it.edgeId }.toSet() == fixture.scene.edges.filter { it.trigger == "tap" }.map { it.id }.toSet())
         check(imported.steps.first().nextAction?.id == fixture.nextEdgeId)
         rejected { releases.createCandidate(newId, imported.project.revision) } // Regions never inherit review.
-        val retry = AiDraftImportStore(context).commit(pending.sessionId, noBaseline.previewDigest)
+        val retry = AiDraftImportStore(context).commit(pending.sessionId, confirmed.previewDigest)
         check(retry == result && imports.cancel(pending.sessionId) == result && imports.readResult(pending.sessionId) == result)
         check(imports.readPrepared(pending.sessionId) == null && pending.sessionId !in imports.pending())
         check(projects.listProjects().map { it.id }.toSet() == beforeIds + newId)
         check(!File(context.noBackupFilesDir, "ai-draft-imports/${pending.sessionId}").exists())
         unchanged()
         status("PASS AI import commit: distinct private PNG identities, complete graph, imported-only provenance, no PTS/raw sources, unreviewed regions, exactly-once retry and post-commit cancel preserve saved result and all original bytes")
+
+        val importedConfig = checkNotNull(projects.readDraftAiConfig(newId))
+        check(importedConfig.resolve(fixture.scene).toBytes().contentEquals(fixture.plan.toBytes()))
+        val configJson = DraftAiConfigCodec.encode(importedConfig)
+        val recoveredConfig = checkNotNull(ProjectStore(context).readDraftAiConfig(newId))
+        check(DraftAiConfigCodec.encode(recoveredConfig) == configJson)
+        check(recoveredConfig.effects.map { it.id } == importedConfig.effects.map { it.id })
+        AiDraftImportFixtures.reviewDraftRegions(projects, newId)
+        val reviewedProject = checkNotNull(projects.readProject(newId))
+        val candidate = releases.createCandidate(newId, reviewedProject.project.revision)
+        check(candidate.reviewedStateIds.isEmpty() && candidate.reviewedRegionIds.isEmpty() && candidate.visitedEdgeIds.isEmpty())
+        check(!candidate.summaryReviewed && !candidate.fileListReviewed && !candidate.completedPath)
+        rejected { releases.seal(candidate.id, candidate.contentDigest) }
+        val sealed = AiDraftImportFixtures.sealFixture(context, newId, fixture)
+        check(sealed.id == candidate.id && sealed.id != baseline.id && sealed.id != fixture.scene.releaseId)
+        val sealedScene = releases.loadRelease(sealed.id)
+        // Asset/release identities and external provenance deliberately change; all editable content must survive.
+        val differences = AiDraftImportPolicy.compare(sealedScene, fixture.scene)
+        check(differences.size == 2 && differences.all { it.category == "state" &&
+            it.field == "sourceKindDeclaration" && it.after == "imported" }) { "Round trip changed scene content: $differences" }
+        val sealedPlan = checkNotNull(releases.readAiPlan(sealed.id))
+        val expectedPlan = RenderPlan.build(sealedScene, fixture.plan.width, fixture.plan.height, fixture.plan.visits, fixture.plan.effects)
+        check(sealedPlan.toBytes().contentEquals(expectedPlan.toBytes()))
+        check(sealedPlan.releaseId == sealed.id && sealedPlan.contentDigest == sealed.contentDigest)
+        rejected { releases.exportAiRelease(sealed.id, fixture.plan) }
+        val exported = releases.exportAiRelease(sealed.id, sealedPlan)
+        val checkedRoot = File(context.noBackupFilesDir, "round-trip-java-reader").also { check(it.mkdir()) }
+        val readBack = AiPackageCodec.readPackage(exported, checkedRoot, {}, null)
+        check(readBack.contentDigest == sealed.contentDigest && readBack.renderPlan.toBytes().contentEquals(expectedPlan.toBytes()))
+        check(ViewerPackageCodec.writeScene(readBack.scene).contentEquals(ViewerPackageCodec.writeScene(sealedScene)))
+        unchanged()
+        status("PASS AI round trip: synthetic local review required, new release sealed, exact full graph/regions/visits/effects preserved, rebound exported package read by Java")
+
+        val beforeVideo = projects.listProjects().map { it.id }.toSet()
+        val video = AiDraftImportFixtures.videoOnUnselectedBranch(context, fixture)
+        val videoFailure = rejected { video.inputStream().use { imports.prepare(it) } }
+        check(videoFailure.message.orEmpty().contains("视频")) { "Expected explicit static-only video gate: $videoFailure" }
+        check(projects.listProjects().map { it.id }.toSet() == beforeVideo && imports.pending().isEmpty())
+        unchanged()
+        status("PASS AI round trip video gate: existing declared-video counterexample rejected before video decode; no project added")
+        output?.let {
+            fixture.zip.copyTo(File(it, "incoming.tapscene-ai"))
+            exported.copyTo(File(it, "round-trip.tapscene-ai"))
+            File(it, "expected-scene.json").writeBytes(ViewerPackageCodec.writeScene(sealedScene))
+            File(it, "expected-plan.json").writeBytes(expectedPlan.toBytes())
+        }
     }
 
     private suspend fun invalidInputs(context: Context, status: (String) -> Unit) {
@@ -176,6 +247,30 @@ object AiDraftImportChecks {
         check(File(context.noBackupFilesDir, "ai-draft-imports").listFiles().orEmpty().isEmpty())
         status("PASS AI import revalidation: altered ZIP rejected, altered preview PNG re-extracted and verified, declared video on an unselected branch and legal shared-PNG expansion over 50 MiB create no project")
     }
+
+    /** Compare every original project-scoped SQL value, including pending JSON and private plan IDs.
+     * The shared database file itself must change when another project is inserted. */
+    private fun projectRows(context: Context, projectId: String): Map<String, List<List<String?>>> =
+        SQLiteDatabase.openDatabase(File(context.noBackupFilesDir, "projects.sqlite").path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+            val tables = db.rawQuery("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name", null).use { cursor ->
+                buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
+            }
+            buildMap {
+                for (table in tables) {
+                    check(table.matches(Regex("[a-z_]+")))
+                    val scoped = db.rawQuery("PRAGMA table_info($table)", null).use { cursor ->
+                        var found = false
+                        while (cursor.moveToNext()) if (cursor.getString(1) == "project_id") found = true
+                        found
+                    }
+                    if (scoped) put(table, db.rawQuery("SELECT * FROM $table WHERE project_id=? ORDER BY rowid", arrayOf(projectId)).use { cursor ->
+                        buildList { while (cursor.moveToNext()) add((0 until cursor.columnCount).map { column ->
+                            if (cursor.isNull(column)) null else "${cursor.getType(column)}:${cursor.getString(column)}"
+                        }) }
+                    })
+                }
+            }
+        }
 
     private fun editorRows(context: Context, projectId: String): Map<String, String> =
         SQLiteDatabase.openDatabase(File(context.noBackupFilesDir, "projects.sqlite").path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
@@ -256,6 +351,29 @@ internal object AiDraftImportFixtures {
         val zip = File(context.noBackupFilesDir, "fixture-${id()}.tapscene-ai")
         AiPackageCodec.writePackage(scene, plan, root, zip, {}, null)
         return Fixture(scene, plan, root, zip, start, end, branch, loopEdge, nextEdge, branchEdge)
+    }
+
+    /** Legitimate external edits retain full branches and the same source release declaration. */
+    fun edited(context: Context, original: Fixture): Fixture {
+        val s = original.scene
+        val branchHotspot = s.edges.single { it.id == original.branchEdgeId }.hotspotId
+        val scene = ViewerScene(s.schemaVersion, s.policyVersion, s.compilerVersion, s.releaseId,
+            s.title, s.goal, s.createdAt, s.startStateId,
+            s.states.map { ViewerScene.State(it.id, it.imageAssetId, it.width, it.height,
+                if (it.id == original.branchId) "Edited unselected branch" else it.title, it.description, it.sourceKind, it.terminal) },
+            s.edges.map { ViewerScene.Edge(it.id, it.fromStateId, it.toStateId, it.endLabel, it.hotspotId,
+                if (it.id == original.branchEdgeId) "Alternate ending" else it.label, it.trigger, it.sourceKind) },
+            s.hotspots.map { ViewerScene.Hotspot(it.id, it.stateId,
+                if (it.id == branchHotspot) "Alternate ending" else it.label, it.rect) },
+            s.regions.map { ViewerScene.Region(it.id, it.stateId, it.baseAssetId, it.assetId, it.name,
+                it.sourceWidth, it.sourceHeight, it.bbox, it.group, 4, it.anchor) }, s.assets)
+        val visits = original.plan.visits.mapIndexed { index, it ->
+            RenderPlan.Visit(it.visitId, it.stateId, it.selectedEdgeId, if (index == 0) 105 else it.holdFrames)
+        }
+        val plan = RenderPlan.build(scene, original.plan.width, original.plan.height, visits, original.plan.effects)
+        val zip = File(context.noBackupFilesDir, "edited-${id()}.tapscene-ai")
+        AiPackageCodec.writePackage(scene, plan, original.assetRoot, zip, {}, null)
+        return original.copy(scene = scene, plan = plan, zip = zip)
     }
 
     suspend fun reviewDraftRegions(projects: ProjectStore, projectId: String) {

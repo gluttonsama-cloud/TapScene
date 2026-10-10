@@ -83,3 +83,23 @@ java -Djava.awt.headless=true -cp /tmp/tapscene-checks/classes \
 `ViewerTraversal.advance` 对视频只固定 pending 边及目标，不推进当前步、历史、覆盖或完成路径。重复点击锁定；EOS 或显式 skip 才提交目标。错误保留原步，可 retry（新 `mediaRunId`）或静态前进。Back 取消本次过渡并留在来源步；Restart/Close 清除 pending；进程内不同会话的 mediaRunId 不复用。过时、重复、失败后或退出后的回调无效；播放期间替换 scene 并改动既定目标会被拒绝。静态边和历史返回语义保持旧行为。
 
 检查覆盖上述选择/完成/错误/重试/跳过/取消/退出路径，以及 manifest/scene 版本白名单、角色引用与孤立资产、重复边引用的 60 秒边界、缺 validator 的默认拒绝、validator 抛错/取消/改写字节后的隔离清理。主机结果是回归证据，不代替 Android 交互与生命周期实测。
+
+## 静态 AI 包的 Android 主机回流闭环
+
+已配置 `AiRoundTripHostTest`（API 35、Robolectric 4.16.1、NATIVE graphics 和 NATIVE SQLite），实际执行结果以同次 CI 的 JUnit XML、`HOST_AI_ROUNDTRIP` 和 `TAPSCENE_AI_ROUNDTRIP_TS_OK` 为准。它沿用真实 32×48 PNG / 10×12 裁片和完整三步图，经生产 prepare、明确基线差异、commit、重新复核、封存、AI 导出，再由现有 Java 和 TS reader 读回。外部包修改未选分支标题/标签、区域层级及停留；完整分支、回访、区域和逐项效果必须保真。
+
+检查复用取消、过期确认、重复提交与声明视频拒绝反例，逐字段核对原项目 SQL 值（包括未保存文字与动画计划），并核对原图片、输入包和旧 release 每个文件的 SHA-256。新项目加入后共享 SQLite 文件自然改变，不能称整个数据库文件字节不变。CI 保留原六次数据执行，另加这一闭环；不使用 fake PNG、默认空实现或视频解码替身。
+
+安装既有 JDK17、Gradle8.13、Android SDK 与依赖后，可复现：
+
+```sh
+export TAPSCENE_AI_ROUNDTRIP_OUTPUT="$(mktemp -d)/result"
+gradle -p android --no-daemon --max-workers=2 -PcompatibilityPreview=true \
+  :app:testDebugUnitTest --tests com.tapscene.data.AiRoundTripHostTest
+(cd remotion-adapter && npm ci --ignore-scripts --no-fund --no-audit && \
+  node --import tsx test/roundtrip.verify.ts "$TAPSCENE_AI_ROUNDTRIP_OUTPUT")
+```
+
+输出为同一次 Android 运行的 `incoming.tapscene-ai`、`round-trip.tapscene-ai` 和预期 scene/plan。TS 步骤只消费真实输出，不另造可替代包。Robolectric 的 stock Linux shadow 不支持本流程的目录 open/fstat；仅此测试的四个 Os 调用通过限域 test-only 桥接使用真实 Linux/JDK FileChannel、文件描述符、`/proc/self/fd` 类型信息和 `FileDescriptor.sync()`，失败传播并核对关闭释放。目录与普通文件的实际同步有执行记录，但不称 Android 原生 fsync 或设备断电验证；新增模块开口只作用测试 JVM，无新增依赖。
+
+主机真实 PNG/SQLite 执行与合成自动复核不代表真人隐私判断、真机触控/界面、MediaProjection、Surface、视频硬解码或断电恢复通过；不需要 KVM，也不启动软件模拟器。纯测试增量不改变 APK 版本19。

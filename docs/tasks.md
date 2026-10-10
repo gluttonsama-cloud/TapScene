@@ -59,3 +59,9 @@
 - 完整 visits/effects 随新草稿保留，手机逐项表单修改/明确删除。画面、区域和图变化标记计划待修复，引用不自动删除；固定新候选时捕获计划并重新绑定新 release 摘要。外部复核/试走不继承，所有内容重新本机审阅。
 - 主机 Android 数据执行增量：两类五入口运行生产 Store/Workspace、SQLiteOpenHelper 与 NATIVE SQLite（迁移 API 26/35，其余 API 26），核对 TRUNCATE/FULL、事务回滚、草稿重开和提交边界取消；实际通过以该 PR 的 JUnit XML 为准，尚未执行不计通过。实跑发现 Android 延迟外键提交失败后仍可能复用未提交连接；生产事务现关闭失败连接池并保留异常，关闭不成功时阻止后续读取与清理，开发版本递增 19。其 SQLite 不代表 API 26 真机版本，设备媒体/进程终止/断电恢复仍为 NOT_RUN。
 - 已执行：包安全/AI/回流兼容性主机检查、SQLite 迁移/约束检查与 diff 检查。Android 新增源码及生产 Compose 已准备；精确 CI 编译、Lint、布局和平台会话测试分别待核验。无 Android SDK/KVM 的本机平台运行 NOT_RUN，不能用主机检查或截图代替。
+
+## 静态 AI 回流成功闭环检查
+
+- 复用完整静态 PNG/区域 fixture，增加一次 API35 NATIVE graphics/SQLite 主机执行：真实外部编辑包→生产 prepare/明确差异→独立项目 commit→全部内容与动作合成自动重新复核→新 release→新 AI 包由现 Java/TS reader 读回。原六次数据检查保留；精确执行与读回状态以本次 PR CI 为准，准备/编译不计通过。
+- 核对完整分支、回访与效果参数、导入隔离/幂等及原项目逐字段和旧 release 文件摘要不变；复用取消、旧确认摘要和声明视频拒绝。只共享指定纯数据/PNG 测试，不引入 Android instrumentation runner 或视频执行，也不新增 APK 依赖。生产源码和版本19保持不变。
+- Robolectric 缺失的目录/文件 open/fstat/fsync/close 仅在该测试私有根内由真实 Linux/JDK 文件描述符桥接，核对实际类型/同步与关闭；生产代码、其他 Os 调用及原数据测试不替换。主机 native PNG/SQLite 与合成自动确认不替代真人隐私判断、真机界面操作、视频/系统录制和断电恢复；这些平台项目继续分别记为 NOT_RUN。
