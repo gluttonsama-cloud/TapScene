@@ -65,3 +65,8 @@
 - 复用完整静态 PNG/区域 fixture，增加一次 API35 NATIVE graphics/SQLite 主机执行：真实外部编辑包→生产 prepare/明确差异→独立项目 commit→全部内容与动作合成自动重新复核→新 release→新 AI 包由现 Java/TS reader 读回。原六次数据检查保留；精确执行与读回状态以本次 PR CI 为准，准备/编译不计通过。
 - 核对完整分支、回访与效果参数、导入隔离/幂等及原项目逐字段和旧 release 文件摘要不变；复用取消、旧确认摘要和声明视频拒绝。只共享指定纯数据/PNG 测试，不引入 Android instrumentation runner 或视频执行，也不新增 APK 依赖。生产源码和版本19保持不变。
 - Robolectric 缺失的目录/文件 open/fstat/fsync/close 仅在该测试私有根内由真实 Linux/JDK 文件描述符桥接，核对实际类型/同步与关闭；生产代码、其他 Os 调用及原数据测试不替换。主机 native PNG/SQLite 与合成自动确认不替代真人隐私判断、真机界面操作、视频/系统录制和断电恢复；这些平台项目继续分别记为 NOT_RUN。
+
+## 固定候选临时数据库生命周期
+
+- 固定候选复制使用独立 ProjectStore 的同步作用域；成功或失败都在同一进程锁下关闭本实例 helper，原操作异常保留，关闭异常作为 suppressed。API26 不依赖 SQLiteOpenHelper 的 AutoCloseable，也不改变提交失败后的连接池隔离恢复。
+- 仅清理该路径与测试拥有的临时实例，不扩展 ViewModel 生命周期重构；开发版本递增20。必要增量检查涵盖实际临时句柄关闭、原异常身份、另一长期实例持续读写，以及真实候选重复替换/过期修订失败；执行结果以本次精确CI为准。

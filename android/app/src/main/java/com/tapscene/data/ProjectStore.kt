@@ -2267,6 +2267,25 @@ class ProjectStore(context: Context) {
     }
 
     companion object {
+        /** API 26 SQLiteOpenHelper is not AutoCloseable. Preserve the operation's original error.
+         * The synchronous action must not retain the store/cursors or start work that outlives it. */
+        internal fun <T> withTemporary(context: Context, action: (ProjectStore) -> T): T {
+            val store = ProjectStore(context)
+            var failure: Throwable? = null
+            try {
+                return action(store)
+            } catch (error: Throwable) {
+                failure = error
+                throw error
+            } finally {
+                try { synchronized(lock) { store.helper.close() } }
+                catch (closeFailure: Throwable) {
+                    if (failure == null) throw closeFailure
+                    if (failure !== closeFailure) failure.addSuppressed(closeFailure)
+                }
+            }
+        }
+
         private val lock = Any()
         /** Guarded by lock; shared across every store using the same app-private root. */
         private val activeImports = mutableSetOf<String>()

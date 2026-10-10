@@ -15,8 +15,8 @@ object DraftAiConfigChecks {
 
     private suspend fun checkConfig(context: Context, status: (String) -> Unit) {
         val fixture = AiDraftImportFixtures.complete(context)
-        val imports = AiDraftImportStore(context)
-        val projects = ProjectStore(context)
+        val imports = AiDraftImportFixtures.importStore(context)
+        val projects = AiDraftImportFixtures.projectStore(context)
         val releases = ReleaseStore(context)
         val preview = fixture.zip.inputStream().use { imports.prepare(it) }
         val projectId = checkNotNull(imports.commit(preview.sessionId, preview.previewDigest).projectId)
@@ -28,7 +28,7 @@ object DraftAiConfigChecks {
         // crossfade timeline was imported exactly, rather than recreated from UI defaults.
         check(original.resolve(fixture.scene).toBytes().contentEquals(fixture.plan.toBytes()))
         val originalJson = DraftAiConfigCodec.encode(original)
-        val recovered = checkNotNull(ProjectStore(context).readDraftAiConfig(projectId))
+        val recovered = checkNotNull(AiDraftImportFixtures.projectStore(context).readDraftAiConfig(projectId))
         check(DraftAiConfigCodec.encode(recovered) == originalJson)
         check(recovered.effects.map { it.id } == original.effects.map { it.id })
         check(recovered.effects.map { it.id }.distinct().size == original.effects.size)
@@ -48,7 +48,7 @@ object DraftAiConfigChecks {
         val edited = projects.saveDraftAiConfig(projectId, project.project.revision, original.copy(effects = editedEffects))
         project = checkNotNull(projects.readProject(projectId))
         check(project.project.revision == beforePlanEditRevision + 1 && edited.boundRevision == project.project.revision)
-        val editedRecovered = checkNotNull(ProjectStore(context).readDraftAiConfig(projectId))
+        val editedRecovered = checkNotNull(AiDraftImportFixtures.projectStore(context).readDraftAiConfig(projectId))
         check(!edited.needsRepair && DraftAiConfigCodec.encode(editedRecovered) == DraftAiConfigCodec.encode(edited))
         check(editedRecovered.effects.map { it.id } == original.effects.map { it.id })
         check(editedRecovered.effects.single { it.id == annotations[0].id }.value.text == "First annotation")
@@ -64,7 +64,7 @@ object DraftAiConfigChecks {
         val broken = projects.saveDraftAiConfig(projectId, project.project.revision, shortened)
         project = checkNotNull(projects.readProject(projectId))
         check(broken.needsRepair && projects.draftAiIssues(projectId, broken).any { it.contains("停留时间") })
-        val brokenRecovered = checkNotNull(ProjectStore(context).readDraftAiConfig(projectId))
+        val brokenRecovered = checkNotNull(AiDraftImportFixtures.projectStore(context).readDraftAiConfig(projectId))
         check(brokenRecovered.needsRepair && brokenRecovered.visits.first().holdFrames == 12)
         check(DraftAiConfigCodec.encode(brokenRecovered.copy(visits = original.visits)) == originalJson)
         check(brokenRecovered.effects.single { it.id == annotations[1].id }.value.startFrame == 40)
@@ -129,7 +129,7 @@ object DraftAiConfigChecks {
         val beforeDeleteJson = DraftAiConfigCodec.encode(beforeDelete)
         val regionId = fixture.scene.regions.single().id
         project = projects.deleteRegion(projectId, regionId, project.project.revision)
-        var dangling = checkNotNull(ProjectStore(context).readDraftAiConfig(projectId))
+        var dangling = checkNotNull(AiDraftImportFixtures.projectStore(context).readDraftAiConfig(projectId))
         check(dangling.needsRepair && DraftAiConfigCodec.encode(dangling) == beforeDeleteJson)
         check(dangling.effects.any { it.value.regionId == regionId })
         check(projects.draftAiIssues(projectId, dangling).any { it.contains("区域已删除") })
@@ -139,7 +139,7 @@ object DraftAiConfigChecks {
         rejected { releases.createCandidate(projectId, project.project.revision) }
 
         project = projects.deleteStep(projectId, fixture.endId).snapshot
-        dangling = checkNotNull(ProjectStore(context).readDraftAiConfig(projectId))
+        dangling = checkNotNull(AiDraftImportFixtures.projectStore(context).readDraftAiConfig(projectId))
         check(dangling.needsRepair && DraftAiConfigCodec.encode(dangling) == beforeDeleteJson)
         check(dangling.visits.any { it.stateId == fixture.endId })
         check(dangling.visits.any { it.selectedEdgeId == fixture.nextEdgeId })

@@ -3,6 +3,7 @@ package com.tapscene.data
 import android.content.Context
 import android.content.ContextWrapper
 import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteOpenHelper
 import android.graphics.Bitmap
 import android.graphics.Color
 import com.tapscene.packageformat.AiDraftImportPolicy
@@ -37,8 +38,8 @@ object AiDraftImportChecks {
 
     private suspend fun lifecycle(context: Context, status: (String) -> Unit, output: File? = null) {
         val originalFixture = AiDraftImportFixtures.complete(context)
-        val projects = ProjectStore(context)
-        var imports = AiDraftImportStore(context)
+        val projects = AiDraftImportFixtures.projectStore(context)
+        var imports = AiDraftImportFixtures.importStore(context)
         val releases = ReleaseStore(context)
         val first = originalFixture.zip.inputStream().use { imports.prepare(it) }
         val originalId = checkNotNull(imports.commit(first.sessionId, first.previewDigest).projectId)
@@ -81,7 +82,7 @@ object AiDraftImportChecks {
         unchanged()
 
         val pending = fixture.zip.inputStream().use { imports.prepare(it, baseline.id) }
-        imports = AiDraftImportStore(context) // A new instance must resume the durable exact preview.
+        imports = AiDraftImportFixtures.importStore(context) // A new instance must resume the durable exact preview.
         check(pending.sessionId in imports.pending())
         check(checkNotNull(imports.readPrepared(pending.sessionId)).previewDigest == pending.previewDigest)
         check(pending.scene.states.size == 3 && pending.plan.visits.size == 3)
@@ -157,7 +158,7 @@ object AiDraftImportChecks {
         check(imported.steps.first().hotspots.map { it.edgeId }.toSet() == fixture.scene.edges.filter { it.trigger == "tap" }.map { it.id }.toSet())
         check(imported.steps.first().nextAction?.id == fixture.nextEdgeId)
         rejected { releases.createCandidate(newId, imported.project.revision) } // Regions never inherit review.
-        val retry = AiDraftImportStore(context).commit(pending.sessionId, confirmed.previewDigest)
+        val retry = AiDraftImportFixtures.importStore(context).commit(pending.sessionId, confirmed.previewDigest)
         check(retry == result && imports.cancel(pending.sessionId) == result && imports.readResult(pending.sessionId) == result)
         check(imports.readPrepared(pending.sessionId) == null && pending.sessionId !in imports.pending())
         check(projects.listProjects().map { it.id }.toSet() == beforeIds + newId)
@@ -168,12 +169,20 @@ object AiDraftImportChecks {
         val importedConfig = checkNotNull(projects.readDraftAiConfig(newId))
         check(importedConfig.resolve(fixture.scene).toBytes().contentEquals(fixture.plan.toBytes()))
         val configJson = DraftAiConfigCodec.encode(importedConfig)
-        val recoveredConfig = checkNotNull(ProjectStore(context).readDraftAiConfig(newId))
+        val recoveredConfig = ProjectStore.withTemporary(context) { checkNotNull(it.readDraftAiConfig(newId)) }
         check(DraftAiConfigCodec.encode(recoveredConfig) == configJson)
         check(recoveredConfig.effects.map { it.id } == importedConfig.effects.map { it.id })
         AiDraftImportFixtures.reviewDraftRegions(projects, newId)
         val reviewedProject = checkNotNull(projects.readProject(newId))
-        val candidate = releases.createCandidate(newId, reviewedProject.project.revision)
+        val initialCandidate = releases.createCandidate(newId, reviewedProject.project.revision)
+        rejected { releases.createCandidate(newId, reviewedProject.project.revision + 1, replaceExisting = true) }
+        check(releases.readCandidate(newId)?.id == initialCandidate.id)
+        val replacement = releases.createCandidate(newId, reviewedProject.project.revision, replaceExisting = true)
+        val candidate = releases.createCandidate(newId, reviewedProject.project.revision, replaceExisting = true)
+        check(setOf(initialCandidate.id, replacement.id, candidate.id).size == 3)
+        check(releases.listCandidates().map { it.id } == listOf(candidate.id))
+        check(projects.readProject(newId) == reviewedProject) // The long-lived owner's pool still works.
+        status("PASS AI candidate lifecycle: three real candidate copies, failed stale revision preserves old candidate, long-lived project owner remains usable")
         check(candidate.reviewedStateIds.isEmpty() && candidate.reviewedRegionIds.isEmpty() && candidate.visitedEdgeIds.isEmpty())
         check(!candidate.summaryReviewed && !candidate.fileListReviewed && !candidate.completedPath)
         rejected { releases.seal(candidate.id, candidate.contentDigest) }
@@ -214,8 +223,8 @@ object AiDraftImportChecks {
 
     private suspend fun invalidInputs(context: Context, status: (String) -> Unit) {
         val fixture = AiDraftImportFixtures.complete(context)
-        val projects = ProjectStore(context)
-        val imports = AiDraftImportStore(context)
+        val projects = AiDraftImportFixtures.projectStore(context)
+        val imports = AiDraftImportFixtures.importStore(context)
         val beforeIds = projects.listProjects().map { it.id }.toSet()
         val zipChanged = fixture.zip.inputStream().use { imports.prepare(it) }
         val ownedZip = File(context.noBackupFilesDir, "ai-draft-imports/${zipChanged.sessionId}/input.tapscene-ai")
@@ -301,16 +310,38 @@ internal object AiDraftImportFixtures {
         val parent = context.noBackupFilesDir.canonicalFile
         val root = File(parent, "$name-${id()}")
         check(root.mkdir() && root.canonicalFile.parentFile == parent)
-        val isolated = object : ContextWrapper(context.applicationContext) {
-            override fun getApplicationContext(): Context = this
-            override fun getNoBackupFilesDir(): File = root
-        }
+        val isolated = FixtureContext(context.applicationContext, root)
         var failure: Throwable? = null
         try { block(isolated) } catch (error: Throwable) { failure = error; throw error }
         finally {
-            val cleanup = runCatching { check(root.canonicalFile.parentFile == parent); check(root.deleteRecursively() && !root.exists()) }.exceptionOrNull()
+            var cleanup: Throwable? = null
+            for (store in isolated.stores.asReversed()) {
+                val error = runCatching {
+                    // Test-owned objects only. Close before deleting the private database directory.
+                    val helper = ProjectStore::class.java.getDeclaredField("helper").apply { isAccessible = true }.get(store) as SQLiteOpenHelper
+                    helper.close()
+                }.exceptionOrNull()
+                if (error != null) { if (cleanup == null) cleanup = error else cleanup.addSuppressed(error) }
+            }
+            val deleteError = runCatching { check(root.canonicalFile.parentFile == parent); check(root.deleteRecursively() && !root.exists()) }.exceptionOrNull()
+            if (deleteError != null) { if (cleanup == null) cleanup = deleteError else cleanup.addSuppressed(deleteError) }
             if (cleanup != null) { if (failure != null) failure.addSuppressed(cleanup) else throw cleanup }
         }
+    }
+
+    private class FixtureContext(base: Context, private val root: File) : ContextWrapper(base) {
+        val stores = mutableListOf<ProjectStore>()
+        override fun getApplicationContext(): Context = this
+        override fun getNoBackupFilesDir(): File = root
+    }
+
+    fun projectStore(context: Context): ProjectStore = ProjectStore(context).also {
+        (context as FixtureContext).stores += it
+    }
+
+    fun importStore(context: Context): AiDraftImportStore = AiDraftImportStore(context).also { owner ->
+        val projects = AiDraftImportStore::class.java.getDeclaredField("projects").apply { isAccessible = true }.get(owner) as ProjectStore
+        (context as FixtureContext).stores += projects
     }
 
     fun complete(context: Context): Fixture {
@@ -387,8 +418,8 @@ internal object AiDraftImportFixtures {
     }
 
     suspend fun sealFixture(context: Context, projectId: String, fixture: Fixture): ReleaseSummary {
-        val projects = ProjectStore(context); val store = ReleaseStore(context)
-        val snapshot = checkNotNull(projects.readProject(projectId))
+        val store = ReleaseStore(context)
+        val snapshot = ProjectStore.withTemporary(context) { checkNotNull(it.readProject(projectId)) }
         var candidate = store.createCandidate(projectId, snapshot.project.revision)
         candidate.scene.states.forEach { state ->
             store.candidateAssetFile(candidate.id, state.id)
