@@ -8,6 +8,7 @@ import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.view.Surface
 import java.io.File
 import java.security.MessageDigest
@@ -37,7 +38,12 @@ internal class FrameRecordingBackend private constructor(
     private lateinit var muxer: MediaMuxer
     private lateinit var codecSurface: Surface
     private lateinit var renderer: RecordingGlRenderer
-    private val ledger = RecordingFrameLedger(1_000_000L / encoding.fps)
+    private val ledger = RecordingPresentationLedger()
+    private val presentationClock = RecordingPresentationClock(encoding.fps)
+    private var sourceSequence = 0L
+    private var lastSourceTimestampNs = 0L
+    @Volatile private var endPresentationPtsUs: Long? = null
+    private val presentationTick = Runnable { presentLatest() }
     private val evidence by lazy { FrameEvidenceStore(context) }
     private val writer = ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(256)) { task ->
         Thread(task, "TapSceneFrameEvidence").apply { isDaemon = true }
@@ -54,7 +60,7 @@ internal class FrameRecordingBackend private constructor(
     private var glResourcesReleased = false
     private var track = -1
     private var muxStarted = false
-    private var eos = false
+    private val drain = RecordingDrainGate()
     private var resourcesReleased = false
     private var cleanupStarted = false
     private val done = CompletableDeferred<RecordingBackendResult>()
@@ -76,7 +82,7 @@ internal class FrameRecordingBackend private constructor(
         override fun before(action: FrameAnchorAction): AnchorResult = freeze(action, FrameBoundary.Before)
         override fun markGestureCompleted(action: FrameAnchorAction) {
             synchronized(renderer.slotLock) {
-                if (accepts(action)) window.complete(action, ledger.captureSequence())
+                if (accepts(action)) window.complete(action, sourceSequence)
             }
         }
         override fun afterWait(action: FrameAnchorAction): AnchorResult = freeze(action, FrameBoundary.After)
@@ -100,25 +106,36 @@ internal class FrameRecordingBackend private constructor(
             try {
                 val config = info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
                 val end = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                if (end && !captureClosed && !stopStarted) {
+                    // An unsolicited terminal callback is a main-video fault, including when
+                    // it carries data. Do not announce readiness or keep dispatching clicks.
+                    drain.observedEnd(false)
+                    fail()
+                    return
+                }
                 check(info.flags and MediaCodec.BUFFER_FLAG_PARTIAL_FRAME == 0) { "Partial codec samples are unsupported" }
                 if (!config && info.size > 0) {
-                    check(muxStarted && !eos && !failed)
+                    check(muxStarted && !drain.eosSeen && !failed)
                     check(info.presentationTimeUs >= 0)
-                    val association = ledger.observeOutput(info.presentationTimeUs)
+                    val association = ledger.outputSeen(info.presentationTimeUs)
                     val previous = ledger.lastWrittenPtsUs()
                     check(previous == null || info.presentationTimeUs > previous) { "Reordered encoder output" }
                     val bytes = checkNotNull(codec.getOutputBuffer(index))
                     check(info.offset >= 0 && info.size <= bytes.capacity() - info.offset)
                     bytes.position(info.offset); bytes.limit(info.offset + info.size)
-                    muxer.writeSampleData(track, bytes, info)
+                    val sampleInfo = MediaCodec.BufferInfo().apply {
+                        set(info.offset, info.size, info.presentationTimeUs,
+                            info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM.inv())
+                    }
+                    muxer.writeSampleData(track, bytes, sampleInfo)
                     // Only the real successful write receives an ordinal and exact source match.
-                    val matched = ledger.muxed(association)
-                    if (matched.source != null && !encodedSample) { encodedSample = true; onReady() }
+                    ledger.muxed(association)
+                    checkReadiness()
                 }
-                if (end) eos = true
+                if (end) drain.observedEnd(true)
             } catch (_: Exception) { fail() }
             finally { runCatching { codec.releaseOutputBuffer(index, false) }.onFailure { fail() } }
-            if (eos && stopStarted) finishCodec()
+            if (drain.mayFinishAfterEnd()) finishCodec()
         }
         override fun onError(codec: MediaCodec, error: MediaCodec.CodecException) { fail() }
     }
@@ -167,16 +184,67 @@ internal class FrameRecordingBackend private constructor(
     private fun frameAvailable() {
         if (!accepting || failed) return
         try {
+            // Reserve before the latch, outside which no driver call holds the boundary lock.
+            // Completion conservatively excludes every already in-flight latch from its after.
             val captureSequence = synchronized(renderer.slotLock) {
                 if (!accepting) return
-                ledger.reserveCaptureSequence()
+                ++sourceSequence
             }
-            when (val value = ledger.source(renderer.acquireSourceTimestamp(), captureSequence)) {
-                is SourceTimestampResult.Accepted -> if (accepting) renderer.drawAndSubmit(value.frame)
-                is SourceTimestampResult.Skipped -> Unit // explicit skip; never fabricate a timestamp
+            val timestampNs = renderer.acquireSourceTimestamp()
+            if (timestampNs <= 0 || timestampNs <= lastSourceTimestampNs) return
+            lastSourceTimestampNs = timestampNs
+            val observation = VideoSourceObservation(captureSequence, captureSequence, timestampNs)
+            renderer.drawObservation(observation)
+            synchronized(renderer.slotLock) {
+                if (!accepting) return
+                presentationClock.observe(observation)
             }
+            schedulePresentation()
         } catch (_: Exception) { fail() }
         catch (_: OutOfMemoryError) { fail() }
+    }
+
+    /** Single GL queue, one deadline runnable. Late work never queues synthetic catch-up frames. */
+    private fun schedulePresentation() {
+        gl.removeCallbacks(presentationTick)
+        val delayNs = synchronized(renderer.slotLock) {
+            if (!accepting || failed) null
+            else presentationClock.delayUntilNextPresentationNs(SystemClock.elapsedRealtimeNanos())
+        } ?: return
+        check(gl.postDelayed(presentationTick, (delayNs + 999_999L) / 1_000_000L)) { "Presentation worker closed" }
+    }
+
+    private fun presentLatest() {
+        if (!accepting || failed) return
+        var slot: RecordingGlRenderer.PinnedSlot? = null
+        try {
+            val sample = synchronized(renderer.slotLock) {
+                if (!accepting) return
+                val decision = presentationClock.present(SystemClock.elapsedRealtimeNanos())
+                if (decision !is PresentationDecision.Submit) return@synchronized null
+                slot = checkNotNull(renderer.pinLatest()) { "Observation has no normalized frame" }
+                check(slot!!.frame == decision.sample.observation) { "Presentation observation changed" }
+                ledger.planned(decision.sample)
+                decision.sample
+            }
+            if (sample != null) {
+                renderer.submitPinned(checkNotNull(slot), sample.presentationPtsUs)
+                // The callback may have already muxed this exact PTS. Readiness joins both facts.
+                ledger.submitted(sample.presentationSampleId)
+                output.post { checkReadiness() }
+            }
+            schedulePresentation()
+        } catch (_: Exception) { fail() }
+        catch (_: OutOfMemoryError) { fail() }
+        finally { slot?.let(renderer::releasePin) }
+    }
+
+    /** Called only on the codec worker; start() is not evidence of a real encoded sample. */
+    private fun checkReadiness() {
+        if (!encodedSample && !failed && !stopStarted && ledger.hasCanonicalMatch()) {
+            encodedSample = true
+            onReady()
+        }
     }
 
     private fun accepts(action: FrameAnchorAction): Boolean = accepting && !failed && evidenceAvailable &&
@@ -198,10 +266,15 @@ internal class FrameRecordingBackend private constructor(
             if (!pngPermits.tryAcquire()) return missing(FrameMissingReason.QueueFull)
             val slot = renderer.pinLatest()
             if (slot == null) { pngPermits.release(); return missing(FrameMissingReason.NoFrame) }
-            val frame = checkNotNull(slot.frame)
-            if (boundary == FrameBoundary.After && frame.sequence <= checkNotNull(window.afterLowerBound(action))) {
+            val observed = slot.frame
+            if (boundary == FrameBoundary.After && observed.captureSequence <= checkNotNull(window.afterLowerBound(action))) {
                 renderer.releasePin(slot); pngPermits.release()
                 return missing(FrameMissingReason.NoNewFrame)
+            }
+            val frame = ledger.canonicalForSource(observed.captureSequence)
+            if (frame == null) {
+                renderer.releasePin(slot); pngPermits.release()
+                return missing(FrameMissingReason.EncoderUnmatched)
             }
             val ticket = FrameTicket(UUID.randomUUID().toString(), action, boundary, window.epoch, frame.sequence,
                 frame.sequence, frame.timestampNs, frame.submittedPtsUs, geometry,
@@ -246,13 +319,22 @@ internal class FrameRecordingBackend private constructor(
 
     private fun fail() {
         if (cleanupStarted) return
-        if (!failed) { failed = true; accepting = false; onError() }
+        if (!failed) { failed = true; stopAcceptingFrames(); onError() }
     }
 
     override fun stopAcceptingFrames() {
-        captureClosed = true
-        accepting = false
-        if (::renderer.isInitialized) anchors.cancelEpoch(FrameMissingReason.CaptureStopped)
+        if (::renderer.isInitialized) synchronized(renderer.slotLock) {
+            if (captureClosed) return
+            captureClosed = true
+            accepting = false
+            // Freeze at the capture gate, never after potentially slow VD/GL/codec cleanup.
+            endPresentationPtsUs = presentationClock.close(SystemClock.elapsedRealtimeNanos())
+            window.cancel()
+        } else {
+            captureClosed = true
+            accepting = false
+        }
+        gl.removeCallbacks(presentationTick)
     }
 
     @Synchronized override fun finish(stop: Boolean): CompletableDeferred<RecordingBackendResult> {
@@ -265,11 +347,14 @@ internal class FrameRecordingBackend private constructor(
             if (!glReleased) failed = true
             glThread.quitSafely()
             output.post {
-                if (!stop || !codecStarted || failed) { finishCodec(); return@post }
+                // Only this post from the returned GL teardown authorizes codec/surface cleanup.
+                // A failed GL release still needs best-effort codec cleanup, but is never sealed.
+                if (drain.glReturned(stop && codecStarted && !failed) == RecordingDrainGate.Teardown.FinishCodec) {
+                    finishCodec(); return@post
+                }
                 try { codec.signalEndOfInputStream() } catch (_: Exception) { failed = true; finishCodec(); return@post }
                 // This is a drain deadline, not a claim that a blocked native call was interrupted.
                 output.postDelayed({ if (!resourcesReleased) { failed = true; finishCodec() } }, 5_000)
-                if (eos) finishCodec()
             }
         }
         return done
@@ -277,10 +362,19 @@ internal class FrameRecordingBackend private constructor(
 
     private fun finishCodec() {
         if (cleanupStarted) return
+        check(drain.glTeardownReturned) { "Codec cleanup cannot precede GL teardown" }
         cleanupStarted = true
-        val completed = !failed && eos && ledger.samples().isNotEmpty() && muxStarted
+        val endPtsUs = endPresentationPtsUs
+        val lastPtsUs = ledger.lastWrittenPtsUs()
+        val completed = !failed && drain.eosSeen && lastPtsUs != null && endPtsUs != null && endPtsUs > lastPtsUs && muxStarted
         var closed = true
         var muxStopped = false
+        if (completed) runCatching {
+            // MediaMuxer supports an explicit empty EOS marker to set the final sample duration.
+            // It is not a source observation, encoded sample, or sample ordinal.
+            val end = MediaCodec.BufferInfo().apply { set(0, 0, checkNotNull(endPtsUs), MediaCodec.BUFFER_FLAG_END_OF_STREAM) }
+            muxer.writeSampleData(track, java.nio.ByteBuffer.allocate(0), end)
+        }.onFailure { failed = true }
         if (muxStarted) muxStopped = runCatching { muxer.stop(); true }.getOrDefault(false)
         if (codecStarted && ::codec.isInitialized) runCatching { codec.stop() }.onFailure { failed = true }
         runCatching { if (::codec.isInitialized) codec.release() }.onFailure { closed = false }
@@ -289,6 +383,18 @@ internal class FrameRecordingBackend private constructor(
         resourcesReleased = closed && glResourcesReleased
         done.complete(RecordingBackendResult(completed && !failed && muxStopped && resourcesReleased, resourcesReleased))
         codecThread.quitSafely()
+    }
+
+    /** Duration is a main-video contract, independent of optional PNG availability. */
+    suspend fun validateVideo(sealedFile: File) = withContext(Dispatchers.IO) {
+        val container = readContainer(sealedFile, encoding.width, encoding.height)
+        check(ledger.verifyContainer(container.samples)) { "Sealed sample count or chronology differs" }
+        val first = checkNotNull(ledger.samples().firstOrNull()).encoderPtsUs
+        val expected = checkNotNull(endPresentationPtsUs) - first
+        check(expected > 0 && container.durationUs > 0 &&
+            kotlin.math.abs(container.durationUs - expected) <= 1_000L) {
+            "Container duration does not preserve the explicit recording interval"
+        }
     }
 
     /** Sealed MP4 is read by actual sample ordinal; no millisecond FrameExtractor conversion. */
@@ -301,7 +407,7 @@ internal class FrameRecordingBackend private constructor(
             try {
                 val anchors = synchronized(renderer.slotLock) { tickets.toList() }
                 for (ticket in anchors) {
-                    val sample = ledger.matchSource(ticket.sourceFrameId)
+                    val sample = ledger.matchSource(ticket.captureSequence)
                     if (sample == null) evidence.missing(ticket, FrameMissingReason.EncoderUnmatched)
                     else evidence.markEncoder(session.sessionId, ticket.sourceFrameId, sample.encoderPtsUs, sample.ordinal)
                 }
@@ -370,7 +476,11 @@ internal class FrameRecordingBackend private constructor(
             throw RecordingStartException("本机暂时无法配置共帧 H.264 录制，请改用手动录屏。")
         }
 
-        internal fun readContainerSamples(file: File, width: Int, height: Int): List<Long> {
+        internal fun readContainerSamples(file: File, width: Int, height: Int): List<Long> =
+            readContainer(file, width, height).samples
+
+        private data class ContainerVideo(val samples: List<Long>, val durationUs: Long)
+        private fun readContainer(file: File, width: Int, height: Int): ContainerVideo {
             val extractor = MediaExtractor()
             try {
                 extractor.setDataSource(file.absolutePath)
@@ -388,7 +498,8 @@ internal class FrameRecordingBackend private constructor(
                     if (!extractor.advance()) break
                 }
                 check(values.isNotEmpty() && values.zipWithNext().all { (a, b) -> b > a })
-                return values
+                val duration = if (format.containsKey(MediaFormat.KEY_DURATION)) format.getLong(MediaFormat.KEY_DURATION) else 0L
+                return ContainerVideo(values, duration)
             } finally { extractor.release() }
         }
         private fun requireNormalizedFormat(format: MediaFormat, width: Int, height: Int) {
