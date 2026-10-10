@@ -368,10 +368,11 @@ fun AiPackageScreen(
                 }
             }
             if (config != null && !chooseSource) {
+                if (config.fromDraft) Text("此计划随草稿封存。需要调整时，请回项目的动画计划编辑并重新封存。", color = ShellColors.Muted)
                 DetailSection("画面方向", "选择生成视频的横竖方向。") {
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        OutlinedButton(onClick = { onCanvas(false) }, enabled = !state.busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("${if (config.width == 1080) "✓ " else ""}竖屏 9:16") }
-                        OutlinedButton(onClick = { onCanvas(true) }, enabled = !state.busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("${if (config.width == 1920) "✓ " else ""}横屏 16:9") }
+                        OutlinedButton(onClick = { onCanvas(false) }, enabled = !state.busy && !config.fromDraft, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("${if (config.width == 1080) "✓ " else ""}竖屏 9:16") }
+                        OutlinedButton(onClick = { onCanvas(true) }, enabled = !state.busy && !config.fromDraft, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("${if (config.width == 1920) "✓ " else ""}横屏 16:9") }
                     }
                 }
                 DetailSection("播放顺序", "逐步选择接下来播放的内容，也可以返回之前的步骤。视频最长 10 分钟。") {
@@ -385,12 +386,12 @@ fun AiPackageScreen(
                             Text("${index + 1}. ${step.title}", style = MaterialTheme.typography.titleSmall)
                             Text(edge?.let { "接着：${it.label}" } ?: if (step.terminal) "播放到这里结束" else "请选择下一步", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedButton(onClick = { onHold(visit.visitId, maxOf(1, visit.holdFrames - 30)) }, enabled = !state.busy && visit.holdFrames > 1, modifier = Modifier.heightIn(min = 48.dp)) { Text("− 1 秒") }
+                                OutlinedButton(onClick = { onHold(visit.visitId, maxOf(1, visit.holdFrames - 30)) }, enabled = !state.busy && !config.fromDraft && visit.holdFrames > 1, modifier = Modifier.heightIn(min = 48.dp)) { Text("− 1 秒") }
                                 Text("停留 ${aiSeconds(visit.holdFrames)} 秒", modifier = Modifier.weight(1f))
-                                OutlinedButton(onClick = { onHold(visit.visitId, minOf(RenderPlan.MAX_HOLD_FRAMES, visit.holdFrames + 30)) }, enabled = !state.busy && visit.holdFrames < RenderPlan.MAX_HOLD_FRAMES, modifier = Modifier.heightIn(min = 48.dp)) { Text("+ 1 秒") }
+                                OutlinedButton(onClick = { onHold(visit.visitId, minOf(RenderPlan.MAX_HOLD_FRAMES, visit.holdFrames + 30)) }, enabled = !state.busy && !config.fromDraft && visit.holdFrames < RenderPlan.MAX_HOLD_FRAMES, modifier = Modifier.heightIn(min = 48.dp)) { Text("+ 1 秒") }
                             }
                             effects.forEach { Text(aiEffectLabel(config, it), style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted) }
-                            TextButton(onClick = { showEffects = !showEffects }, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (showEffects) "收起效果" else if (effects.isEmpty()) "添加效果" else "调整效果") }
+                            TextButton(onClick = { showEffects = !showEffects }, enabled = !config.fromDraft, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (showEffects) "收起效果" else if (effects.isEmpty()) "添加效果" else "调整效果") }
                             if (showEffects) {
                                 if (edge?.hotspotId != null) TextButton(onClick = { onEffect(visit.visitId, "click", null, null) }, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("${if (effects.any { it.type == "click" }) "✓ " else ""}点击提示") }
                                 if (edge?.toStateId != null && edge.transitionAssetId == null) TextButton(onClick = { onEffect(visit.visitId, "transition", null, null) }, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("${if (effects.any { it.type == "transition" }) "✓ " else ""}平滑切换到下一步") }
@@ -411,14 +412,14 @@ fun AiPackageScreen(
                     }
                     if (!needsNext) Text("已选好播放顺序", color = ShellColors.Accent)
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        TextButton(onClick = onPrevious, enabled = !state.busy && (config.visits.size > 1 || last?.selectedEdgeId != null), modifier = Modifier.heightIn(min = 48.dp)) { Text("撤回最后一步") }
-                        TextButton(onClick = onReset, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("重新选择") }
+                        TextButton(onClick = onPrevious, enabled = !state.busy && !config.fromDraft && (config.visits.size > 1 || last?.selectedEdgeId != null), modifier = Modifier.heightIn(min = 48.dp)) { Text("撤回最后一步") }
+                        TextButton(onClick = onReset, enabled = !state.busy && !config.fromDraft, modifier = Modifier.heightIn(min = 48.dp)) { Text("重新选择") }
                     }
                 }
                 DetailSection("保存前检查") {
                     ShellLabelValue("视频时长", plan?.let { "约 ${aiSeconds(it.totalFrames)} 秒 · ${it.visits.size} 步" } ?: "请先选好播放顺序并检查效果")
                     Text("包含这个版本的全部已复核画面、裁片和过渡视频，也保留未选分支。原始录屏不会打包。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-                    Text("改停留时间后，需要重设这一步的效果及前一步的平滑切换。其他步骤保留。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    Text("改停留时间会保留效果；超出新停留范围时会阻止保存，请调整后再检查。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                     Text("手机保存动画数据包，再交给电脑上的配套渲染工具生成 MP4。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                     if (plan != null) AiTechnicalDetails(config, plan)
                 }
@@ -516,6 +517,11 @@ private fun AiTechnicalDetails(config: AiPackageConfiguration, plan: RenderPlan)
         Text("${plan.width} × ${plan.height} · 30 fps · ${plan.totalFrames} 帧\n版本 ${plan.releaseId}\n内容 SHA-256 ${plan.contentDigest}", style = MaterialTheme.typography.bodySmall)
         plan.visits.forEachIndexed { index, visit ->
             Text("${index + 1}. visit ${visit.visitId} · state ${visit.stateId}\nedge ${visit.selectedEdgeId ?: "结束"} · ${visit.holdFrames} 停留帧", style = MaterialTheme.typography.bodySmall)
+        }
+        plan.effects.forEachIndexed { index, effect ->
+            Text("效果 ${index + 1}：${effect.type} · 起始 ${effect.startFrame} 帧 · 持续 ${effect.durationFrames} 帧\n访问 ${effect.visitId}\n热点 ${effect.hotspotId ?: "无"} · 区域 ${effect.regionId ?: "无"}" +
+                (effect.rect?.let { "\n范围 ${it.x}, ${it.y}, ${it.width}, ${it.height}" } ?: "") +
+                (effect.text?.let { "\n标注：$it" } ?: ""), style = MaterialTheme.typography.bodySmall)
         }
         Text("除 manifest 自身外的完整文件清单：", style = MaterialTheme.typography.titleSmall)
         AiPackageCodec.fileList(config.scene, plan).forEach { file ->

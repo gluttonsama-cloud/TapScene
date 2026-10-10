@@ -34,12 +34,17 @@ object AuthoredPathChecks {
             check(migrated == legacy) { "Migration changed legacy IDs, graph, text, source or asset metadata" }
             legacy.steps.forEach { check(digest(store.resolveAsset(legacy.project.id, it.id)) == input.sha256) }
             SQLiteDatabase.openDatabase(File(root, "projects.sqlite").path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
-                check(db.version == 4)
+                check(db.version == 8) { "Real v1 project did not migrate to the current v8 schema" }
                 db.rawQuery("SELECT COUNT(*) FROM next_actions", null).use { check(it.moveToFirst() && it.getInt(0) == 0) }
                 db.rawQuery("SELECT COUNT(*) FROM edge_transitions", null).use { check(it.moveToFirst() && it.getInt(0) == 0) }
+                for (table in listOf("package_step_origins", "ai_import_sessions", "draft_ai_configs")) {
+                    db.rawQuery("SELECT COUNT(*) FROM $table", null).use { check(it.moveToFirst() && it.getInt(0) == 0) }
+                }
+                db.rawQuery("SELECT COUNT(*) FROM states WHERE origin_kind!='videoFrame' OR evidence_kind!='recorded' OR package_import_id IS NOT NULL", null)
+                    .use { check(it.moveToFirst() && it.getInt(0) == 0) }
                 db.rawQuery("PRAGMA foreign_key_check", null).use { check(!it.moveToFirst()) }
             }
-            status("PASS authored path migration: real v1 SQLite upgrades to v4 without changing manual hotspots, stable IDs, revision or PNG bytes")
+            status("PASS authored path migration: real v1 SQLite upgrades to v8 without changing manual hotspots, stable IDs, revision or PNG bytes")
             checkGraph(store, isolated, legacy, input, status)
             checkCapacity(store, input, status)
             check(input.file.isFile && digest(input.file) == input.sha256)
@@ -225,7 +230,10 @@ object AuthoredPathChecks {
             input.file.copyTo(file)
         }
         val hotspot = ProjectHotspot(id(), "Legacy manual", OpaqueMask(0.1f, 0.2f, 0.4f, 0.6f), stepIds[1], null, id())
-        SQLiteDatabase.openOrCreateDatabase(File(root, "projects.sqlite"), null).use { db ->
+        val database = File(root, "projects.sqlite")
+        check(!database.exists()) { "Historical v1 fixture must start from a new database file" }
+        SQLiteDatabase.openOrCreateDatabase(database, null).use { db ->
+            check(db.version == 0)
             db.setForeignKeyConstraintsEnabled(true)
             db.beginTransaction()
             try {

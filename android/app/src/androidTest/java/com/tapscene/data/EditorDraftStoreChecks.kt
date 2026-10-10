@@ -27,8 +27,9 @@ object EditorDraftStoreChecks {
         var failure: Throwable? = null
         try {
             checkStore(isolated(context, File(root, "store")), status)
-            for (version in 1..6) checkMigration(isolated(context, File(root, "v$version")), version)
-            status("PASS editor SQLite v1–v6-to-v7 genuine historical DDL, complete graph/assets/drafts/journals preserved before recovery, enabled foreign keys and missing-source video snapshot")
+            for (version in 1..7) checkMigration(isolated(context, File(root, "v$version")), version)
+            status("PASS editor SQLite v1–v7-to-v8 genuine historical DDL, complete graph/assets/drafts/journals preserved before recovery, enabled foreign keys and missing-source video snapshot")
+            AiImportMigrationChecks.run(context, status)
             status("NOT_COVERED editor recovery: actual process kill, IME typing and Compose lifecycle gestures require separate device/UI checks")
         } catch (error: Throwable) { failure = error; throw error }
         finally {
@@ -186,7 +187,10 @@ object EditorDraftStoreChecks {
         val retainedDraft = StoredEditorDraft(9,fields,fields.copy(title="Unsaved"),
             EditorPendingForm(EditorFormKind.NAME,title="  unfinished  "))
         val expectedRows = linkedMapOf<String, Pair<String, List<String>>>()
-        SQLiteDatabase.openOrCreateDatabase(File(context.noBackupFilesDir, "projects.sqlite"), null).use { db ->
+        val database = File(context.noBackupFilesDir, "projects.sqlite")
+        check(!database.exists()) { "Historical v$previous fixture must start from a new database file" }
+        SQLiteDatabase.openOrCreateDatabase(database, null).use { db ->
+            check(db.version == 0)
             db.setForeignKeyConstraintsEnabled(true)
             db.beginTransaction()
             try {
@@ -245,7 +249,7 @@ object EditorDraftStoreChecks {
         check(File(context.noBackupFilesDir, source.privateRelativePath).delete())
         ProjectStore.Database(context,File(context.noBackupFilesDir,"projects.sqlite").path).use { helper ->
             val db=helper.writableDatabase
-            check(db.version==7)
+            check(db.version==8)
             for ((table,expected) in expectedRows) check(migrationRows(db,table,expected.first)==expected.second) {
                 "Migration altered $table contents"
             }

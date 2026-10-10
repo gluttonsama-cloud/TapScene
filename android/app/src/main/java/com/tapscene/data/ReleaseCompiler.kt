@@ -16,7 +16,12 @@ import kotlin.coroutines.CoroutineContext
 
 /** Explicit whitelist projection: no source paths, capture tokens, masks, OCR or edit history. */
 internal object ReleaseCompiler {
-    fun scene(snapshot: ProjectSnapshot, releaseId: String, createdAt: Long): ViewerScene {
+    fun scene(snapshot: ProjectSnapshot, releaseId: String, createdAt: Long): ViewerScene = project(snapshot, releaseId, createdAt, true)
+
+    /** This ephemeral graph only checks a draft plan. It cannot assert review or be exported. */
+    fun draftPlanScene(snapshot: ProjectSnapshot): ViewerScene = project(snapshot, snapshot.project.id, 0, false)
+
+    private fun project(snapshot: ProjectSnapshot, releaseId: String, createdAt: Long, requireRegionReview: Boolean): ViewerScene {
         // Private origins and paths never enter the package. External screenshots retain their
         // authored evidence kind, including after an additional safe-image redaction.
         val states = snapshot.steps.map { step ->
@@ -49,7 +54,7 @@ internal object ReleaseCompiler {
             "全部边绑定视频累计不能超过 60 秒。"
         }
         val regions = snapshot.steps.flatMap { step -> step.regions.map { region ->
-            require(region.matchesBase(step.asset) && region.reviewedAt != null) { "区域底图已失效或裁片尚未复核。" }
+            require(region.matchesBase(step.asset) && (!requireRegionReview || region.reviewedAt != null)) { "区域底图已失效或裁片尚未复核。" }
             val crop = requireNotNull(region.asset) { "区域裁片需要重新生成。" }
             ViewerScene.Region(region.id, step.id, step.asset.id, crop.id, region.name,
                 region.sourceWidth, region.sourceHeight,

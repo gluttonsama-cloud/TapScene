@@ -53,3 +53,4 @@ mkdir -p "$WORK/classes" "$WORK/fixtures"
   "$ROOT"/tools/package-checks/*.java
 java -Djava.awt.headless=true -cp "$WORK/classes" PackageSecurityChecks "$WORK/fixtures" | tee "$WORK/results.txt"
 java -Djava.awt.headless=true -cp "$WORK/classes" AiPackageChecks "$WORK/fixtures/ai" | tee "$WORK/ai-results.txt"
+java -Djava.awt.headless=true -cp "$WORK/classes" AiDraftImportChecks "$WORK/fixtures/ai-draft" | tee "$WORK/ai-draft-results.txt"

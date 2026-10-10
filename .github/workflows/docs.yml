@@ -292,7 +292,9 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 46, f"Expected forty-six Compose review images, found {len(images)}"
+          assert len(images) == 54, f"Expected fifty-four Compose review images, found {len(images)}"
+          ai_draft_images = [image for image in images if "AiDraftScreenshotPreviewsKt" in str(image)]
+          assert len(ai_draft_images) == 8, f"Expected eight AI draft review images, found {len(ai_draft_images)}"
           lines = [
               "TapScene shell review: host-side Compose / Layoutlib renders.",
               "Not device screenshots; does not validate media decoding, touch, or system pickers.",
@@ -305,9 +307,9 @@ jobs:
               assert data[:8] == b"\x89PNG\r\n\x1a\n", image
               width, height = struct.unpack(">II", data[16:24])
               assert width > 0 and height > 0, image
-              if any(name in str(image) for name in ("EditorDraftRecovery", "SafeImage", "ScreenshotImport", "EditorNavigation", "ReviewAiNavigation")):
+              if any(name in str(image) for name in ("EditorDraftRecovery", "SafeImage", "ScreenshotImport", "EditorNavigation", "ReviewAiNavigation", "AiDraftScreenshot")):
                   # A modal window can yield a valid but blank PNG in Layoutlib. Reject that
-                  # before treating the two recovery form images as usable review evidence.
+                  # before treating form and AI import images as usable review evidence.
                   import zlib
                   offset, compressed = 8, bytearray()
                   while offset < len(data):

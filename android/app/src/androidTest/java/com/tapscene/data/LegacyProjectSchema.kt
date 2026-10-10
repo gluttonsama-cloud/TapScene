@@ -1,6 +1,6 @@
 package com.tapscene.data
 
-/** Exact historical DDL from db09a6b. Never construct legacy fixtures by downgrading user_version. */
+/** Frozen v1–v5 DDL from db09a6b plus shipped v6/v7 origin DDL (v7: c928f73). Never construct legacy fixtures by downgrading user_version. */
 internal object LegacyProjectSchema {
     val statements = listOf(
         """CREATE TABLE projects (
@@ -123,10 +123,53 @@ internal object LegacyProjectSchema {
                 FOREIGN KEY(project_id,source_id) REFERENCES sources(project_id,source_id) DEFERRABLE INITIALLY DEFERRED,
                 FOREIGN KEY(project_id,input_asset_id) REFERENCES local_assets(project_id,asset_id) DEFERRABLE INITIALLY DEFERRED
             )"""
-    fun statements(version: Int) = statements.map { if (version >= 6 && it.startsWith("CREATE TABLE states (")) statesV6 else it }.filterNot { sql ->
-        (version < 2 && sql.contains("next_actions")) ||
-        (version < 3 && (sql.contains("edge_transitions") || sql.contains("transition_imports"))) ||
-        (version < 4 && sql.contains("regions")) ||
-        (version < 5 && sql.contains("editor_draft"))
+    private val statesV7 = """CREATE TABLE states (
+                project_id TEXT NOT NULL, state_id TEXT NOT NULL, capture_id TEXT NOT NULL,
+                sort_order INTEGER NOT NULL CHECK(sort_order>=0),
+                title TEXT NOT NULL, description TEXT NOT NULL, is_terminal INTEGER NOT NULL CHECK(is_terminal IN (0,1)),
+                source_id TEXT, input_asset_id TEXT NOT NULL, frame_pts_us INTEGER CHECK(frame_pts_us>=0),
+                time_precision_us INTEGER CHECK(time_precision_us>0), masks_json TEXT NOT NULL,
+                origin_kind TEXT NOT NULL CHECK(origin_kind IN ('videoFrame','image')),
+                base_asset_id TEXT, base_sha256 TEXT, base_revision INTEGER, base_width INTEGER, base_height INTEGER,
+                image_source_id TEXT, evidence_kind TEXT NOT NULL DEFAULT 'recorded' CHECK(evidence_kind IN ('recorded','authored','imported')),
+                CHECK((origin_kind='videoFrame' AND image_source_id IS NULL AND evidence_kind='recorded' AND source_id IS NOT NULL AND frame_pts_us IS NOT NULL AND time_precision_us IS NOT NULL
+                    AND base_asset_id IS NULL AND base_sha256 IS NULL AND base_revision IS NULL AND base_width IS NULL AND base_height IS NULL)
+                    OR (origin_kind='image' AND image_source_id IS NULL AND source_id IS NULL AND frame_pts_us IS NULL AND time_precision_us IS NULL
+                    AND base_asset_id IS NOT NULL AND length(base_asset_id)>0 AND base_sha256 IS NOT NULL
+                    AND length(base_sha256)=64 AND base_sha256 NOT GLOB '*[^0-9a-f]*'
+                    AND base_revision IS NOT NULL AND base_revision>0 AND base_width IS NOT NULL AND base_width>0
+                    AND base_height IS NOT NULL AND base_height>0 AND base_width*base_height<=12000000)
+                    OR (origin_kind='image' AND image_source_id IS NOT NULL AND length(image_source_id)>0 AND evidence_kind='authored'
+                    AND source_id IS NULL AND frame_pts_us IS NULL AND time_precision_us IS NULL
+                    AND base_asset_id IS NULL AND base_sha256 IS NULL AND base_revision IS NULL AND base_width IS NULL AND base_height IS NULL)),
+                PRIMARY KEY(project_id,state_id), UNIQUE(project_id,input_asset_id), UNIQUE(project_id,capture_id),
+                FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE,
+                FOREIGN KEY(project_id,source_id) REFERENCES sources(project_id,source_id) DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(project_id,input_asset_id) REFERENCES local_assets(project_id,asset_id) DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(project_id,image_source_id) REFERENCES image_sources(project_id,source_id) DEFERRABLE INITIALLY DEFERRED
+            )"""
+    private val imagesV7 = listOf(
+        """CREATE TABLE image_sources (
+                project_id TEXT NOT NULL, source_id TEXT NOT NULL UNIQUE, mime TEXT NOT NULL CHECK(mime IN ('image/png','image/jpeg')),
+                source_json TEXT NOT NULL, PRIMARY KEY(project_id,source_id),
+                FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+            )""",
+        """CREATE TABLE image_source_imports(asset_id TEXT PRIMARY KEY NOT NULL, source_id TEXT UNIQUE NOT NULL, mime TEXT NOT NULL)""",
+        """CREATE TABLE image_source_cleanup(project_id TEXT NOT NULL, source_id TEXT PRIMARY KEY NOT NULL, mime TEXT NOT NULL)"""
+    )
+    fun statements(version: Int): List<String> {
+        require(version in 1..7)
+        return (statements.map {
+            if (it.startsWith("CREATE TABLE states (")) when (version) {
+                7 -> statesV7
+                6 -> statesV6
+                else -> it
+            } else it
+        }.filterNot { sql ->
+            (version < 2 && sql.contains("next_actions")) ||
+            (version < 3 && (sql.contains("edge_transitions") || sql.contains("transition_imports"))) ||
+            (version < 4 && sql.contains("regions")) ||
+            (version < 5 && sql.contains("editor_draft"))
+        }) + if (version >= 7) imagesV7 else emptyList()
     }
 }

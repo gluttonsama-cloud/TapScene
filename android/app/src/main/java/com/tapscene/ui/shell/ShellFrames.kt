@@ -21,6 +21,7 @@ fun ProjectHomeFrame(
     onSettings: () -> Unit,
     onLibrary: () -> Unit,
     onImportScreenshot: () -> Unit = {},
+    onImportAi: () -> Unit = {},
     content: @Composable () -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
@@ -31,7 +32,10 @@ fun ProjectHomeFrame(
             Button(onClick = onRecord, shape = RoundedCornerShape(8.dp), modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("开始录制") }
             OutlinedButton(onClick = onImportVideo, shape = RoundedCornerShape(8.dp), modifier = Modifier.heightIn(min = 48.dp)) { Text("导入录屏") }
         }
-        TextButton(onClick = onImportScreenshot, modifier = Modifier.padding(horizontal = 16.dp).heightIn(min = 48.dp)) { Text("导入截图") }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            TextButton(onClick = onImportScreenshot, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("导入截图") }
+            TextButton(onClick = onImportAi, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("导入 AI 包") }
+        }
         Box(Modifier.weight(1f)) { content() }
         GlobalNavigation(false, {}, onLibrary)
     }

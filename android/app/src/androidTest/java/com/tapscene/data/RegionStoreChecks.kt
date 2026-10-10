@@ -144,7 +144,7 @@ object RegionStoreChecks {
         check(sourceFile.isFile && input.file.isFile && replacement.file.isFile)
         check(releases.loadRelease(sealed.id).regions.single().id == r)
         SQLiteDatabase.openDatabase(File(context.noBackupFilesDir, "projects.sqlite").path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
-            check(db.version == 4)
+            check(db.version == 8) { "Region lifecycle did not use the current v8 project schema" }
             db.rawQuery("PRAGMA foreign_key_check", null).use { check(!it.moveToFirst()) }
             db.rawQuery("SELECT COUNT(*) FROM asset_imports", null).use { check(it.moveToFirst() && it.getInt(0) == 0) }
         }

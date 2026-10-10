@@ -32,6 +32,9 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     val transitions: TransitionWorkspace = viewModel()
     val regions: RegionWorkspace = viewModel()
     val screenshots: ScreenshotWorkspace = viewModel()
+    val aiDrafts: AiDraftWorkspace = viewModel()
+    val aiImportState by aiDrafts.importState.collectAsStateWithLifecycle()
+    val draftAiState by aiDrafts.planState.collectAsStateWithLifecycle()
     val screenshotState by screenshots.state.collectAsStateWithLifecycle()
     val state by projects.state.collectAsStateWithLifecycle()
     val mediaState by media.state.collectAsStateWithLifecycle()
@@ -53,6 +56,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     var importRequested by rememberSaveable { mutableStateOf(false) }
     var pickerProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var screenshotPickerPending by rememberSaveable { mutableStateOf(false) }
+    var aiPickerPending by rememberSaveable { mutableStateOf(false) }
+    var aiPickerRequested by rememberSaveable { mutableStateOf(false) }
     var screenshotPickerProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var renaming by remember { mutableStateOf<ProjectSummary?>(null) }
     var deletingProject by remember { mutableStateOf<ProjectSummary?>(null) }
@@ -84,7 +89,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     var discardingCandidate by remember { mutableStateOf<ReleaseCandidate?>(null) }
     var exportPickerPending by rememberSaveable { mutableStateOf(false) }
     val projectId = state.project?.project?.id
-    val unavailable = state.busy || state.loadFailed || candidateState.busy || releaseState.busy || screenshotPickerPending
+    val unavailable = state.busy || state.loadFailed || candidateState.busy || releaseState.busy || screenshotPickerPending || aiPickerPending || aiImportState.busy || draftAiState.busy
     val openReleaseReview: () -> Unit = {
         if (!releaseState.busy) { reviewCandidateId = null; push("review") }
     }
@@ -120,6 +125,52 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                 if (page == "review") { pop(); push("delivery") }
             }
         }
+    }
+    val aiPackagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val pending = aiPickerPending
+        aiPickerPending = false
+        if (pending && uri != null && page == "ai-import") aiDrafts.importPackage(uri)
+    }
+    val chooseAiPackage: () -> Unit = {
+        if (!aiImportState.busy && !aiImportState.outcomeUnknown && !aiPickerPending) {
+            aiPickerPending = true
+            try { aiPackagePicker.launch(arrayOf("*/*")) }
+            catch (_: android.content.ActivityNotFoundException) {
+                aiPickerPending = false
+                aiDrafts.importMessage("系统没有可用的文件选择工具。")
+            }
+        }
+    }
+    val openAiImport: () -> Unit = {
+        if (!unavailable && !mediaState.busy) {
+            aiPickerRequested = aiImportState.sessionId == null
+            push("ai-import")
+            aiDrafts.openImport()
+        }
+    }
+    // A restored route reopens the durable session. No package URI needs to survive process death.
+    LaunchedEffect(page) {
+        if (page == "ai-import" && !aiDrafts.importState.value.busy) aiDrafts.openImport()
+    }
+    LaunchedEffect(page, aiImportState.busy, aiPickerRequested) {
+        if (page == "ai-import" && aiPickerRequested && !aiImportState.busy) {
+            aiPickerRequested = false
+            if (aiImportState.sessionId == null && aiImportState.pendingSessionIds.isEmpty()) chooseAiPackage()
+        }
+    }
+    val openDraftAi: () -> Unit = {
+        val id = projects.state.value.project?.project?.id
+        if (id != null && !unavailable && !mediaState.busy) {
+            if (projects.state.value.dirtyStepIds.isNotEmpty()) projects.message("先保存或放弃步骤修改，再编辑动画计划。")
+            else { aiDrafts.openPlan(id); push("draft-ai") }
+        }
+    }
+    LaunchedEffect(page, projectId) {
+        if (page == "draft-ai" && projectId != null && draftAiState.project?.project?.id != projectId && !draftAiState.busy)
+            aiDrafts.openPlan(requireNotNull(projectId))
+    }
+    val closeDraftAi: () -> Unit = {
+        if (aiDrafts.closePlan()) { pop(); projects.reload() }
     }
     val packagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) releases.importPackage(uri)
@@ -552,6 +603,26 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 DeliveryOptionsScreen(pop, openReleaseReview, { if (sealed != null) releases.openAiPackage(sealed.id) else releases.clearAiConfiguration(); push("ai") }, { push("account") }, { push("versions") },
                                     sealedSummary = sealed, onExport = sealed?.let { item -> { releases.prepareExport(item.id) } }, busy = releaseState.busy)
                             }
+                            "ai-import" -> AiDraftImportContent(aiImportState,
+                                onBack = { if (!aiImportState.busy) { aiPickerRequested = false; pop(); projects.reload() } },
+                                onChooseFile = chooseAiPackage, onBaseline = aiDrafts::selectBaseline,
+                                onResume = aiDrafts::resumeImport, onCommit = aiDrafts::confirmImport,
+                                onCancel = aiDrafts::cancelImport, onReadResult = aiDrafts::readImportResult,
+                                onOpenProject = { id ->
+                                    if (!aiImportState.busy && !state.busy) {
+                                        aiDrafts.clearCompletedImport(); pages.clear(); library = false
+                                        tab = ProjectTab.STEPS; projects.openProject(id)
+                                        projects.message("已导入待复核；请重新检查画面、文字、动作、区域与动画计划。")
+                                    }
+                                }, onNewImport = { aiDrafts.clearCompletedImport(); chooseAiPackage() },
+                                onImage = aiDrafts::showImportImage, onCloseImage = aiDrafts::clearImage)
+                            "draft-ai" -> DraftAiPlanContent(draftAiState, DraftAiPlanCallbacks(
+                                onBack = closeDraftAi, onCanvas = aiDrafts::setCanvas, onHold = aiDrafts::setHold,
+                                onChooseEdge = aiDrafts::choosePlanEdge, onRestart = aiDrafts::restartPlan,
+                                onConfirmPath = aiDrafts::confirmPathChange, onDismissPath = aiDrafts::dismissPathChange,
+                                onChangeEffect = aiDrafts::changeEffect, onDeleteEffect = aiDrafts::deleteEffect,
+                                onSave = aiDrafts::savePlan, onReadResult = aiDrafts::reconcilePlan,
+                                onReload = { projectId?.let(aiDrafts::openPlan) }))
                             "ai" -> AiPackageScreen(pop, releaseState, releases::openAiPackage, releases::chooseAiEdge,
                                 releases::previousAiVisit, releases::resetAiPath, releases::setAiCanvas, releases::setAiHold,
                                 releases::toggleAiEffect, releases::prepareAiExport)
@@ -622,7 +693,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                             when (tab) {
                                 ProjectTab.STEPS -> StoryboardContent(state, projects::openStep, { tab = ProjectTab.SOURCES },
                                     projects::setStart, projects::moveStep, { deletingStep = it },
-                                    stepThumbnail = { asset -> ReviewedThumbnail(projects, state.project, asset) }, onBuildPath = openPath)
+                                    stepThumbnail = { asset -> ReviewedThumbnail(projects, state.project, asset) }, onBuildPath = openPath, onAiPlan = openDraftAi)
                                 ProjectTab.SOURCES -> Column(Modifier.fillMaxSize()) {
                                     if (scopeReady && mediaState.loadFailed) Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                                         Text("素材暂时无法读取。", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
@@ -656,7 +727,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 onAi = { id -> releases.openAiPackage(id); push("ai") }) }
                             GlobalNavigation(true, { library = false }, {})
                         }
-                        else -> ProjectHomeFrame({ push("record") }, requestImport, { push("settings") }, { library = true; releases.reloadLibrary() }, onImportScreenshot = requestScreenshot) {
+                        else -> ProjectHomeFrame({ push("record") }, requestImport, { push("settings") }, { library = true; releases.reloadLibrary() }, onImportScreenshot = requestScreenshot, onImportAi = openAiImport) {
                             ProjectHomeContent(state, { tab = ProjectTab.STEPS; projects.openProject(it) }, { renaming = it }, { deletingProject = it })
                         }
                     }
@@ -727,6 +798,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
             if (projectMore) AlertDialog(onDismissRequest = { projectMore = false }, title = { Text("项目") }, text = {
                 Column {
                     ShellActionRow("重命名", onClick = { projectMore = false; renaming = state.project?.project })
+                    ShellActionRow("动画计划", "保留并编辑完整访问与效果", onClick = { projectMore = false; openDraftAi() })
                     ShellActionRow("任务详情", onClick = { projectMore = false; push("task") })
                     ShellActionRow("托管版本", onClick = { projectMore = false; push("versions") })
                     ShellActionRow("删除项目", onClick = { projectMore = false; deletingProject = state.project?.project })
