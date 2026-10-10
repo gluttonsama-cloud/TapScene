@@ -20,9 +20,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import com.tapscene.data.DraftAiEffect
 import com.tapscene.data.ProjectSnapshot
 import com.tapscene.data.ProjectStep
@@ -31,6 +33,7 @@ import com.tapscene.packageformat.RenderPlan
 import com.tapscene.packageformat.ViewerScene
 import com.tapscene.ui.AiDraftImportUiState
 import com.tapscene.ui.DraftAiPlanUiState
+import com.tapscene.ui.DraftAiPathChange
 import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
@@ -96,7 +99,7 @@ fun AiDraftImportContent(
                         Text("动画 ${preview.plan.visits.size} 次访问 · ${preview.plan.effects.size} 个效果 · ${frames(preview.plan.totalFrames)} · ${preview.plan.width} × ${preview.plan.height}",
                             Modifier.padding(top = 8.dp), color = ShellColors.Muted)
                     }
-                    item { StatusNote(preview.trustNotice) }
+                    item { StatusNote("文件校验不认证作者身份或隐私安全。将建立独立新草稿，不覆盖原项目；全部内容仍需在本机重新复核。") }
                     if (!completed) item {
                         AiPanel {
                             SectionHeader("2  核对内容与对比版本")
@@ -390,18 +393,11 @@ fun DraftAiPlanContent(state: DraftAiPlanUiState, callbacks: DraftAiPlanCallback
             TextButton(onClick = { exitRequested = false }) { Text("继续编辑") }
             if (!state.saveOutcomeUnknown) TextButton(onClick = { exitRequested = false; callbacks.onBack() }) { Text("放弃未保存修改并返回") }
         } })
-    state.pendingPath?.let { change -> AlertDialog(onDismissRequest = callbacks.onDismissPath,
-        title = { Text("确认更改访问路径？") }, text = {
-            Column(Modifier.heightIn(max = 340.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("将移除 ${change.removedVisits.size} 次后续访问及其 ${change.removedEffects.size} 项效果。当前访问中不再适用的效果会保留为待修复。草稿步骤与动作不删除。")
-                change.removedVisits.forEach { visit -> Text("移除访问：${project?.let { draftStep(it, visit.stateId) } ?: visit.stateId}（${visit.holdFrames} 帧）") }
-                change.removedEffects.forEach { effect ->
-                    val index = change.before.effects.indexOfFirst { it.id == effect.id }
-                    Text("移除效果 ${index + 1}：${effectName(effect.value.type)} · ${effect.value.startFrame} 起 / ${effect.value.durationFrames} 帧")
-                }
-            }
-        }, confirmButton = { TextButton(onClick = callbacks.onConfirmPath, enabled = enabled) { Text("确认更改") } },
-        dismissButton = { TextButton(onClick = callbacks.onDismissPath) { Text("保留原路径") } }) }
+    state.pendingPath?.let { change ->
+        Dialog(onDismissRequest = callbacks.onDismissPath) {
+            DraftAiPathChangeConfirmation(change, project, enabled, callbacks.onConfirmPath, callbacks.onDismissPath)
+        }
+    }
     config?.effects?.firstOrNull { it.id == deletingEffect }?.let { entry ->
         AlertDialog(onDismissRequest = { deletingEffect = null }, title = { Text("删除这一项效果？") },
             text = { Text("仅移除 ${effectName(entry.value.type)}，起始 ${entry.value.startFrame} 帧、持续 ${entry.value.durationFrames} 帧。其他同类效果保留。保存计划后生效。") },
@@ -411,6 +407,39 @@ fun DraftAiPlanContent(state: DraftAiPlanUiState, callbacks: DraftAiPlanCallback
     if (project != null && config != null) config.effects.firstOrNull { it.id == editingEffect }?.let { entry ->
         DraftAiEffectDialog(entry, project, config.visits, enabled, { editingEffect = null }) { effect ->
             callbacks.onChangeEffect(entry.id, effect); editingEffect = null
+        }
+    }
+}
+
+/** The actual dialog body and actions also render directly in host previews: Dialog is a separate window. */
+@Composable
+internal fun DraftAiPathChangeConfirmation(
+    change: DraftAiPathChange,
+    project: ProjectSnapshot?,
+    enabled: Boolean,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(modifier.fillMaxWidth().widthIn(max = 560.dp).semantics { paneTitle = "确认更改访问路径" },
+        shape = MaterialTheme.shapes.extraLarge, color = ShellColors.Surface, tonalElevation = 6.dp) {
+        Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text("确认更改访问路径？", style = MaterialTheme.typography.titleLarge, modifier = Modifier.semantics { heading() })
+            Column(Modifier.weight(1f, fill = false).heightIn(max = 340.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("将移除 ${change.removedVisits.size} 次后续访问及其 ${change.removedEffects.size} 项效果。当前访问中不再适用的效果会保留为待修复。草稿步骤与动作不删除。")
+                change.removedVisits.forEach { visit ->
+                    Text("移除访问：${project?.let { draftStep(it, visit.stateId) } ?: visit.stateId}（${visit.holdFrames} 帧）")
+                }
+                change.removedEffects.forEach { effect ->
+                    val index = change.before.effects.indexOfFirst { it.id == effect.id }
+                    Text("移除效果 ${index + 1}：${effectName(effect.value.type)} · ${effect.value.startFrame} 起 / ${effect.value.durationFrames} 帧")
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                TextButton(onClick = onDismiss, modifier = Modifier.heightIn(min = 48.dp)) { Text("保留原路径") }
+                TextButton(onClick = onConfirm, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp)) { Text("确认更改") }
+            }
         }
     }
 }

@@ -2,6 +2,7 @@ package com.tapscene.ui.shell
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -10,6 +11,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.android.tools.screenshot.PreviewTest
@@ -111,7 +113,11 @@ fun DraftAiStaleReferenceSmallPreview() = AiDraftSurface {
 fun DraftAiPathLossConfirmationSmallPreview() = AiDraftSurface {
     val fixture = AiDraftPreviewFixture
     val change = DraftAiEdits.restart(fixture.config, fixture.longProject)
-    DraftAiPlanContent(fixture.draft.copy(pendingPath = change), DraftAiPlanCallbacks())
+    // Layoutlib captures one root window. Mount the same production dialog content and actions
+    // directly, rather than accidentally capturing only the screen behind the Dialog window.
+    Box(Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.Center) {
+        DraftAiPathChangeConfirmation(change, fixture.longProject, enabled = true, onConfirm = {}, onDismiss = {})
+    }
 }
 
 @Composable
