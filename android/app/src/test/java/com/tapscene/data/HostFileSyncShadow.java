@@ -24,7 +24,7 @@ import org.robolectric.annotation.Implements;
 import org.robolectric.shadow.api.Shadow;
 import org.robolectric.util.ReflectionHelpers.ClassParameter;
 
-/** Only the round-trip fixture's four Os calls use real host descriptors and fsync.
+/** Host PNG fixtures' four Os calls use real host descriptors and fsync.
  * Stock ShadowLinux cannot open directories or fstat descriptors. This Linux/JDK bridge
  * does not model Android filesystem durability or power loss, and never reports fake success. */
 @Implements(Os.class)
@@ -54,6 +54,17 @@ public final class HostFileSyncShadow {
             throw new IllegalStateException("Missing actual directory/file fsync or leaked descriptors");
         System.out.println("HOST_FILE_SYNC backend=Linux/JDK actualDirectorySyncs=" + directorySyncs
                 + " actualFileSyncs=" + fileSyncs + " openDescriptors=0");
+    }
+
+    /** The saved-step copier syncs its output through FileOutputStream.getFD().sync(),
+     * a real JDK call outside this Os shadow. Assert only the directory calls this bridge
+     * actually observes; do not manufacture an Os regular-file count for that direct call. */
+    public static synchronized void assertDirectorySyncEvidence() {
+        if (root == null || !open.isEmpty() || directorySyncs == 0)
+            throw new IllegalStateException("Missing actual directory fsync or leaked descriptors");
+        System.out.println("HOST_COPY_FILE_SYNC backend=Linux/JDK actualDirectorySyncs=" + directorySyncs
+                + " observedOsFileSyncs=" + fileSyncs
+                + " directFileDescriptorSync=not-counted openDescriptors=0");
     }
 
     public static synchronized void reset() throws IOException {

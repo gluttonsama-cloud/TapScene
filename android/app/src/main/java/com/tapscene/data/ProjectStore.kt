@@ -392,6 +392,177 @@ class ProjectStore(context: Context) {
         stepId: String = UUID.randomUUID().toString(),
     ): ProjectSnapshot = importReviewedStep(projectId, input, title, description, stepId)
 
+    /** Copy only a saved step's current safe pixels and authored definitions within this project.
+     * operationId is the new state ID and must survive an uncertain result. Retrying it cannot
+     * create another step, even if the source or project revision changed after the commit. */
+    suspend fun copySavedStep(projectId: String, stepId: String, expectedRevision: Long,
+        operationId: String): ProjectSnapshot {
+        validId(projectId); validId(stepId); validId(operationId)
+        require(operationId != stepId && expectedRevision > 0 && expectedRevision < Long.MAX_VALUE)
+        val captureId = "copy:$stepId:$expectedRevision:$operationId"
+        val (before, input) = access { db ->
+            val current = requireSnapshot(db, projectId)
+            if (hasSavedCopy(current, operationId, captureId)) current to null else {
+                requireCopySource(db, current, stepId, expectedRevision)
+                current to requireCurrentImageBase(db, current.steps.single { it.id == stepId }.safeImageBinding(current.project))
+            }
+        }
+        if (input == null) return before
+        val source = before.steps.single { it.id == stepId }
+        val binding = source.safeImageBinding(before.project)
+        require(source.asset.byteLength in 1..MAX_PNG_BYTES && source.asset.width > 0 && source.asset.height > 0 &&
+            source.asset.width.toLong() * source.asset.height <= MAX_IMAGE_PIXELS) { "已保存画面尺寸或容量无效。" }
+        require(root.usableSpace > source.asset.byteLength + 8L * 1024 * 1024) { "本机空间不足，无法复制步骤画面。" }
+        val assetId = newId()
+        access { db ->
+            transaction(db) { db.insertOrThrow("asset_imports", null, ContentValues().apply {
+                put("project_id", projectId); put("asset_id", assetId)
+            }) }
+            activeImports.add(importKey(assetId))
+        }
+        var committed = false
+        var failure: Throwable? = null
+        try {
+            val staging = privateDirectory(File(root, "project-staging"), root)
+            val operation = File(staging, assetId)
+            check(operation.mkdir()) { "无法建立步骤复制暂存，请重试。" }
+            val temporary = File(operation, "candidate.part")
+            val owner = currentCoroutineContext()
+            input.inputStream().use { from -> FileOutputStream(temporary).use { to ->
+                val buffer = ByteArray(64 * 1024)
+                var copied = 0L
+                while (true) {
+                    owner.ensureActive()
+                    val size = from.read(buffer); if (size < 0) break
+                    check(size > 0); copied += size
+                    check(copied <= source.asset.byteLength) { "已保存画面在复制时改变。" }
+                    to.write(buffer, 0, size)
+                }
+                check(copied == source.asset.byteLength) { "已保存画面不完整。" }
+                to.fd.sync()
+            } }
+            SafeMediaWriterValidation.verifyPng(temporary, source.asset.width, source.asset.height, source.masks)
+            check(sha256(temporary) == source.asset.sha256) { "安全画面副本校验失败，未添加步骤。" }
+            owner.ensureActive()
+            return withContext(NonCancellable) { synchronized(lock) {
+                val db = database()
+                val result = transaction(db) {
+                    val current = requireSnapshot(db, projectId)
+                    if (hasSavedCopy(current, operationId, captureId)) return@transaction current
+                    requireCopySource(db, current, stepId, expectedRevision)
+                    requireCurrentImageBase(db, binding)
+                    check(temporary.length() == source.asset.byteLength && sha256(temporary) == source.asset.sha256) {
+                        "安全画面副本在提交前改变。"
+                    }
+                    val directory = projectAssetDirectory(projectId)
+                    val destination = File(directory, "$assetId.png")
+                    check(!destination.exists()) { "步骤文件身份冲突，请重试。" }
+                    Files.move(temporary.toPath(), destination.toPath(), StandardCopyOption.ATOMIC_MOVE)
+                    syncDirectory(directory)
+                    db.insertOrThrow("local_assets", null, ContentValues().apply {
+                        put("project_id", projectId); put("asset_id", assetId); put("relative_path", assetPath(projectId, assetId))
+                        put("sha256", source.asset.sha256); put("byte_length", source.asset.byteLength)
+                        put("width", source.asset.width); put("height", source.asset.height)
+                    })
+                    // Also retain provenance hidden by a later safe-image redaction. Only the
+                    // local owner changes; external package IDs and the original digest do not.
+                    db.execSQL("""INSERT INTO package_step_origins
+                        (project_id,state_id,import_id,source_state_id,source_asset_id,source_sha256,declared_kind)
+                        SELECT project_id,?,import_id,source_state_id,source_asset_id,source_sha256,declared_kind
+                        FROM package_step_origins WHERE project_id=? AND state_id=?""".trimIndent(),
+                        arrayOf(operationId, projectId, stepId))
+                    val origin = when (val saved = source.origin) {
+                        is StepOrigin.Image -> StepOrigin.Image(SafeImageBinding(projectId, operationId, expectedRevision + 1,
+                            assetId, source.asset.sha256, source.asset.width, source.asset.height))
+                        is StepOrigin.PackageSafeImage -> saved.copy(localStepId = operationId)
+                        else -> saved // Same-project video/image source reference, never a new raw import.
+                    }
+                    val sourceIndex = current.steps.indexOfFirst { it.id == stepId }
+                    db.insertOrThrow("states", null, ContentValues().apply {
+                        put("project_id", projectId); put("state_id", operationId); put("capture_id", captureId)
+                        put("sort_order", sourceIndex + 1); put("title", source.title); put("description", source.description)
+                        put("is_terminal", if (source.isTerminal) 1 else 0); put("input_asset_id", assetId)
+                        putOrigin(origin); put("evidence_kind", source.evidenceKind); put("masks_json", masksJson(source.masks).toString())
+                    })
+                    current.steps.forEachIndexed { index, step ->
+                        db.update("states", ContentValues().apply { put("sort_order", if (index > sourceIndex) index + 1 else index) },
+                            "project_id=? AND state_id=?", arrayOf(projectId, step.id))
+                    }
+                    fun target(id: String?): String? = if (id == stepId) operationId else id
+                    source.hotspots.forEach { hotspot ->
+                        val id = newId()
+                        db.insertOrThrow("hotspots", null, ContentValues().apply {
+                            put("project_id", projectId); put("state_id", operationId); put("hotspot_id", id); put("label", hotspot.label)
+                            put("rect_left", hotspot.rect.left); put("rect_top", hotspot.rect.top)
+                            put("rect_right", hotspot.rect.right); put("rect_bottom", hotspot.rect.bottom)
+                        })
+                        db.insertOrThrow("edges", null, ContentValues().apply {
+                            put("project_id", projectId); put("from_state_id", operationId); put("hotspot_id", id); put("edge_id", newId())
+                            put("to_state_id", target(hotspot.targetStepId)); put("end_label", hotspot.endLabel)
+                        })
+                    }
+                    source.nextAction?.let { insertNextAction(db, projectId, operationId,
+                        it.copy(id = newId(), targetStepId = target(it.targetStepId), transition = null)) }
+                    source.regions.forEach { region ->
+                        val matches = region.matchesBase(source.asset)
+                        db.insertOrThrow("regions", null, ContentValues().apply {
+                            put("project_id", projectId); put("state_id", operationId); put("region_id", newId())
+                            put("base_asset_id", if (matches) assetId else region.baseAssetId); put("base_sha256", region.baseSha256)
+                            put("name", region.name); put("group_name", region.group)
+                            put("x_px", region.bbox.x); put("y_px", region.bbox.y)
+                            put("width_px", region.bbox.width); put("height_px", region.bbox.height)
+                            put("source_width", region.sourceWidth); put("source_height", region.sourceHeight)
+                            put("z_index", region.zIndex); put("anchor_x", region.anchorX); put("anchor_y", region.anchorY)
+                            putNull("asset_id"); putNull("reviewed_at")
+                        })
+                    }
+                    // No transition or review rows, incoming links, draft rows or AI edits.
+                    bump(db, projectId)
+                    requireSnapshot(db, projectId)
+                }
+                committed = true
+                result
+            } }
+        } catch (error: Throwable) { failure = error; throw error }
+        finally {
+            val cleanup = synchronized(lock) {
+                activeImports.remove(importKey(assetId))
+                runCatching { cleanupImport(database(), projectId, assetId) }.exceptionOrNull()
+            }
+            // Cleanup consults durable metadata after a failed/uncertain commit, never the flag.
+            if (cleanup != null && !committed) { if (failure != null) failure.addSuppressed(cleanup) else throw cleanup }
+        }
+    }
+
+    private fun hasSavedCopy(current: ProjectSnapshot, operationId: String, captureId: String): Boolean {
+        val saved = current.steps.singleOrNull { it.id == operationId } ?: return false
+        check(saved.captureId == captureId) { "复制操作身份已被占用，请刷新后重新复制。" }
+        val file = checkedAssetFile(current.project.id, saved.asset.privateRelativePath)
+        check(file.isFile && file.length() == saved.asset.byteLength && sha256(file) == saved.asset.sha256) {
+            "已复制的画面缺失或改变，请先处理该步骤。"
+        }
+        return true
+    }
+
+    private fun requireCopySource(db: SQLiteDatabase, current: ProjectSnapshot, stepId: String, expectedRevision: Long) {
+        check(current.project.revision == expectedRevision) { "草稿已改变，请刷新后重新复制。" }
+        val source = current.steps.singleOrNull { it.id == stepId } ?: error("待复制步骤已不存在。")
+        if (source.evidenceKind == "imported") check(count(db, "package_step_origins",
+            "project_id=? AND state_id=?", current.project.id, stepId) == 1) { "包画面来源记录不完整，无法复制。" }
+        check(count(db, "editor_drafts", "project_id=? AND state_id=?", current.project.id, stepId) == 0) {
+            "请先保存或放弃本步未保存的输入，再复制步骤。"
+        }
+        require(current.steps.size < ProjectLimits.MAX_STEPS) { "每个项目最多 40 个步骤。" }
+        require(current.steps.all { it.hotspots.size <= ProjectLimits.MAX_HOTSPOTS_PER_STEP } &&
+            edgeCount(current) + source.hotspots.size + (if (source.nextAction == null) 0 else 1) <= ProjectLimits.MAX_EDGES) {
+            "复制后会超过每步 6 个热点或项目 80 条连线的限制。"
+        }
+        require(current.steps.all { it.regions.size <= ProjectLimits.MAX_REGIONS_PER_STEP } &&
+            current.steps.sumOf { it.regions.size } + source.regions.size <= ProjectLimits.MAX_REGIONS) {
+            "复制后会超过每步 12 个区域或项目 80 个区域的限制。"
+        }
+    }
+
     /** Replace only the reviewed safe output. Regions retain their bounds but lose crops/review;
      * sealed releases have separate copies and remain unchanged. Existing actions stay authored. */
     suspend fun replaceReviewedStep(projectId: String, stepId: String, expectedRevision: Long,
@@ -1840,7 +2011,8 @@ class ProjectStore(context: Context) {
 
     private fun readOrigin(cursor: Cursor): StepOrigin = when (cursor.string("origin_kind")) {
         "packageImage" -> StepOrigin.PackageSafeImage(cursor.string("package_import_id"), cursor.string("package_state_id"),
-            cursor.string("package_asset_id"), cursor.string("package_sha256"), cursor.string("package_declared_kind"))
+            cursor.string("package_asset_id"), cursor.string("package_sha256"), cursor.string("package_declared_kind"),
+            localStepId = cursor.string("state_id"))
         "videoFrame" -> StepOrigin.VideoFrame(parseSource(JSONObject(cursor.string("source_json"))),
             cursor.long("frame_pts_us"), cursor.long("time_precision_us"))
         "image" -> if (!cursor.isNull(cursor.getColumnIndexOrThrow("image_source_id")))

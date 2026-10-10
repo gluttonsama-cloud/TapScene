@@ -194,6 +194,7 @@ fun StoryboardContent(
     modifier: Modifier = Modifier,
     onBuildPath: (() -> Unit)? = null,
     onAiPlan: (() -> Unit)? = null,
+    onCopyStep: (String) -> Unit = {},
 ) {
     val snapshot = state.project
     if (snapshot == null) {
@@ -253,7 +254,7 @@ fun StoryboardContent(
                 step = step, index = index, snapshot = snapshot, enabled = editable,
                 hasUnsavedChanges = step.id in state.dirtyStepIds,
                 onOpenStep = onOpenStep, onSetStart = onSetStart,
-                onMoveStep = onMoveStep, onDeleteStep = onDeleteStep,
+                onMoveStep = onMoveStep, onDeleteStep = onDeleteStep, onCopyStep = onCopyStep,
                 stepThumbnail = stepThumbnail,
             )
         }
@@ -272,6 +273,7 @@ private fun StoryboardStepRow(
     onMoveStep: (String, Int) -> Unit,
     onDeleteStep: (ProjectStep) -> Unit,
     stepThumbnail: @Composable (StepAsset) -> Bitmap?,
+    onCopyStep: (String) -> Unit,
 ) {
     var menuOpen by rememberSaveable(step.id) { mutableStateOf(false) }
     var allExitsVisible by rememberSaveable(step.id) { mutableStateOf(false) }
@@ -297,6 +299,7 @@ private fun StoryboardStepRow(
                     .clickable(enabled = enabled, role = Role.Button, onClickLabel = "编辑步骤") { onOpenStep(step.id) }
                     .semantics {
                         customActions = if (enabled) buildList {
+                            add(CustomAccessibilityAction("复制步骤") { onCopyStep(step.id); true })
                             if (!isStart) add(CustomAccessibilityAction("设为起点") { onSetStart(step.id); true })
                             if (index > 0) add(CustomAccessibilityAction("上移步骤") { onMoveStep(step.id, -1); true })
                             if (index < snapshot.steps.lastIndex) add(CustomAccessibilityAction("下移步骤") { onMoveStep(step.id, 1); true })
@@ -327,15 +330,12 @@ private fun StoryboardStepRow(
             Box {
                 MoreButton("步骤 $ordinal ${step.title}，更多操作", enabled) { menuOpen = true }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    DropdownMenuItem(text = { Text(if (isStart) "已是起点" else "设为起点") }, enabled = enabled && !isStart,
-                        onClick = { menuOpen = false; onSetStart(step.id) }, modifier = Modifier.heightIn(min = 48.dp))
-                    DropdownMenuItem(text = { Text("上移") }, enabled = enabled && index > 0,
-                        onClick = { menuOpen = false; onMoveStep(step.id, -1) }, modifier = Modifier.heightIn(min = 48.dp))
-                    DropdownMenuItem(text = { Text("下移") }, enabled = enabled && index < snapshot.steps.lastIndex,
-                        onClick = { menuOpen = false; onMoveStep(step.id, 1) }, modifier = Modifier.heightIn(min = 48.dp))
-                    HorizontalDivider()
-                    DropdownMenuItem(text = { Text("删除步骤", color = MaterialTheme.colorScheme.error) }, enabled = enabled,
-                        onClick = { menuOpen = false; onDeleteStep(step) }, modifier = Modifier.heightIn(min = 48.dp))
+                    SavedStepActionsMenuContent(enabled, isStart, index > 0, index < snapshot.steps.lastIndex,
+                        onCopy = { menuOpen = false; onCopyStep(step.id) },
+                        onSetStart = { menuOpen = false; onSetStart(step.id) },
+                        onMoveUp = { menuOpen = false; onMoveStep(step.id, -1) },
+                        onMoveDown = { menuOpen = false; onMoveStep(step.id, 1) },
+                        onDelete = { menuOpen = false; onDeleteStep(step) })
                 }
             }
         }
@@ -410,6 +410,32 @@ private fun StoryboardStepRow(
         }
         HorizontalDivider(Modifier.padding(start = 32.dp), color = MaterialTheme.colorScheme.outlineVariant)
     }
+}
+
+/** The same content is rendered in the real popup and in host layout checks. */
+@Composable
+internal fun SavedStepActionsMenuContent(
+    enabled: Boolean,
+    isStart: Boolean,
+    canMoveUp: Boolean,
+    canMoveDown: Boolean,
+    onCopy: () -> Unit,
+    onSetStart: () -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    DropdownMenuItem(text = { Text("复制步骤") }, enabled = enabled,
+        onClick = onCopy, modifier = Modifier.heightIn(min = 48.dp))
+    DropdownMenuItem(text = { Text(if (isStart) "已是起点" else "设为起点") }, enabled = enabled && !isStart,
+        onClick = onSetStart, modifier = Modifier.heightIn(min = 48.dp))
+    DropdownMenuItem(text = { Text("上移") }, enabled = enabled && canMoveUp,
+        onClick = onMoveUp, modifier = Modifier.heightIn(min = 48.dp))
+    DropdownMenuItem(text = { Text("下移") }, enabled = enabled && canMoveDown,
+        onClick = onMoveDown, modifier = Modifier.heightIn(min = 48.dp))
+    HorizontalDivider()
+    DropdownMenuItem(text = { Text("删除步骤", color = MaterialTheme.colorScheme.error) }, enabled = enabled,
+        onClick = onDelete, modifier = Modifier.heightIn(min = 48.dp))
 }
 
 /** Source metadata is real; recording preparation is navigation, never a permission request. */
