@@ -221,7 +221,7 @@ class WorkspaceStore(context: Context, projectId: String? = null) {
         /** Reuse existing records after project deletion; no new archive or duplicate media. */
         fun retainedWorkspaces(context: Context, liveProjectIds: Set<String>): List<RetainedMediaWorkspace> = synchronized(lock) {
             val root = context.noBackupFilesDir
-            val reservedCopies = ProjectStore.withTemporary(context) { it.uncommittedCopyProjectIds() }
+            val reservedCopies = ProjectStore.withTemporary(context) { it.uncommittedCopyProjectIds() + it.uncommittedClickChainProjectIds() }
             val result = mutableListOf<RetainedMediaWorkspace>()
             val legacy = runCatching { WorkspaceStore(context).read() }.getOrNull()
             result += RetainedMediaWorkspace(null, "原素材工作台", legacy?.size ?: 0)

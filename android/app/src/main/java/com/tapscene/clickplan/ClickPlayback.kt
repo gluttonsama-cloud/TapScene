@@ -76,7 +76,7 @@ object ClickPlayback {
                 if (recording.sessionId != current.state.recordingSessionId) return@collect
                 if (current.state.terminal) {
                     mutable.value = mutable.value.copy(busy = recording.isBusy, message = when (recording.phase) {
-                        RecordingPhase.Completed -> "录屏已保存在本机，完整点击链与执行日志已保留；可返回录制页手动取帧校正。"
+                        RecordingPhase.Completed -> "录屏已保存在本机，可以整理点击链画面与点击区域；手动取帧用于补充校正。"
                         RecordingPhase.Failed, RecordingPhase.Interrupted -> "点击日志已保留；录屏未完成，请返回录制页检查或重试视频登记。"
                         else -> mutable.value.message
                     })
@@ -355,7 +355,7 @@ object ClickPlayback {
             ClickRunPhase.Ready -> "等待目标窗口与录屏就绪"
             ClickRunPhase.Running -> "依次播放中，系统回调只表示手势完成"
             ClickRunPhase.Paused -> "后续点击已暂停；已派发的短按可能完成。请核对当前页面后明确恢复。"
-            ClickRunPhase.Completed -> "点击链已播放一次，正在保存真实录屏。可手动取帧校正。"
+            ClickRunPhase.Completed -> "点击链已播放一次，正在保存录屏；完成后可整理画面与点击区域。"
             else -> "本轮已中断或停止；未知点击不会自动重试，日志保存在本机。"
         })
         if (run.terminal) {

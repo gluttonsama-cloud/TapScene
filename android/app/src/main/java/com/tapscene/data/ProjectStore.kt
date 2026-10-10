@@ -9,6 +9,13 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.system.Os
 import android.system.OsConstants
+import com.tapscene.clickplan.ClickActionStatus
+import com.tapscene.clickplan.ClickPlanStore
+import com.tapscene.recording.FrameBoundary
+import com.tapscene.recording.FrameCandidateResult
+import com.tapscene.recording.FrameEvidenceCandidate
+import com.tapscene.recording.FrameEvidenceStore
+import com.tapscene.recording.FrameSourceAccessor
 import com.tapscene.media.MediaInputPolicy
 import com.tapscene.media.ImportedSource
 import com.tapscene.media.ImportedImageSource
@@ -526,6 +533,7 @@ class ProjectStore(context: Context) {
                         if (row.getAsString("base_asset_id") != null) row.put("base_revision", 1L)
                     }
                     "package_step_origins" -> remap("state_id", "state") // External identity/digest/import stay unchanged.
+                    "click_chain_origins" -> remap("local_id", if (row.getAsString("kind") == "frame") "state" else "edge")
                     "hotspots" -> { remap("hotspot_id", "hotspot"); remap("state_id", "state") }
                     "edges" -> { remap("edge_id", "edge"); remap("hotspot_id", "hotspot"); remap("from_state_id", "state"); remap("to_state_id", "state") }
                     "next_actions" -> { remap("action_id", "edge"); remap("from_state_id", "state"); remap("to_state_id", "state") }
@@ -618,6 +626,392 @@ class ProjectStore(context: Context) {
         transaction(db) {
             db.delete("project_copy_files", "operation_id=?", arrayOf(operationId))
             db.update("project_copy_operations", ContentValues().apply { put("workspace_owned", 0) }, "operation_id=?", arrayOf(operationId))
+        }
+    }
+
+    internal fun readClickChainImport(operationId: String): ClickChainImportReceipt? = access { db ->
+        validId(operationId); readClickChainImport(db, operationId)
+    }
+
+    /** End only a known noncommitted operation after its writer has stopped. A raced commit wins. */
+    internal fun cancelClickChainImport(operationId: String): ClickChainImportReceipt? = WorkspaceStore.withProjectCopyLock { access { db ->
+        validId(operationId)
+        val receipt = readClickChainImport(db, operationId) ?: return@access null
+        if (receipt.status == "committed") return@access receipt
+        check(importKey(operationId) !in activeClickChainImports) { "请等待本次保存停止，再调整选择。" }
+        transaction(db) {
+            check(!receipt.projectStillExists) { "导入结果尚未确定，请先重新读取。" }
+            db.update("click_chain_imports", ContentValues().apply { put("status", "aborted") },
+                "operation_id=? AND status='preparing'", arrayOf(operationId))
+        }
+        runCatching { cleanupClickChainImport(db, operationId) }
+        requireNotNull(readClickChainImport(db, operationId))
+    } }
+
+    private fun readClickChainImport(db: SQLiteDatabase, id: String): ClickChainImportReceipt? =
+        db.rawQuery("SELECT operation_id,project_id,status FROM click_chain_imports WHERE operation_id=?", arrayOf(id)).use {
+            if (!it.moveToFirst()) null else ClickChainImportReceipt(it.getString(0), it.getString(1), it.getString(2),
+                count(db, "projects", "project_id=?", it.getString(1)) == 1).also { receipt ->
+                validId(receipt.operationId); check(receipt.projectId == receipt.operationId)
+            }
+        }
+
+    internal fun uncommittedClickChainProjectIds(): Set<String> = access { db ->
+        db.rawQuery("SELECT project_id FROM click_chain_imports WHERE status!='committed'", null).use { cursor ->
+            buildSet { while (cursor.moveToNext()) add(cursor.getString(0)) }
+        }
+    }
+
+    private fun clickChainId(operationId: String, domain: String, key: String): String =
+        UUID.nameUUIDFromBytes("tapscene-click-chain:$operationId:$domain:$key".toByteArray(Charsets.UTF_8)).toString()
+
+    /** Versioned fields, not data-class toString: future diagnostic fields cannot break retries. */
+    private fun clickChainDigest(input: ClickChainImportInput): String {
+        val bytes = java.io.ByteArrayOutputStream()
+        java.io.DataOutputStream(bytes).use { out ->
+            fun item(value: Any?) {
+                out.writeBoolean(value != null)
+                if (value != null) { val data = value.toString().toByteArray(Charsets.UTF_8); out.writeInt(data.size); out.write(data) }
+            }
+            fun source(value: ImportedSource) {
+                item(value.sourceId); item(value.privateRelativePath); item(value.displayName)
+                with(value.metadata) { item(mime); item(byteLength); item(sha256); item(width); item(height)
+                    item(rotationDeg); item(durationUs); item(pixelWidthHeightRatio) }
+            }
+            fun frame(value: FrameEvidenceCandidate) {
+                with(value.ticket) {
+                    item(ticketId); with(action) { item(runId); item(actionId); item(sessionId); item(sourceId); item(generation) }
+                    item(boundary.name); item(epoch); item(sourceFrameId); item(captureSequence); item(sourceTimestampNs); item(submittedPtsUs)
+                    with(geometry) { item(geometryId); item(displayWidth); item(displayHeight); item(frameWidth); item(frameHeight)
+                        item(scale); item(offsetX); item(offsetY) }
+                    item(freshness.name)
+                }
+                item(value.pngSha256); item(value.width); item(value.height); item(value.encoderPtsUs)
+                item(value.muxSampleOrdinal); item(value.containerPtsUs); item(value.sourceSha256)
+            }
+            fun rect(value: OpaqueMask) { item(value.left); item(value.top); item(value.right); item(value.bottom) }
+            item("tapscene-reviewed-click-chain-v1"); item(input.operationId); item(input.title)
+            with(input.run) {
+                item(runId); item(plan.digest); item(recordingSessionId); item(sourceId); item(generation); item(createdAtMs)
+                item(phase.name); item(nextActionIndex); item(stopReason?.name); item(journalRevision); item(mapping.name)
+                item(outcomes.size); outcomes.forEach { item(it.actionId); item(it.status.name); item(it.beforeFrameId); item(it.afterFrameId); item(it.mapping.name) }
+                item(events.size); events.forEach { item(it.type.name); item(it.actionId); item(it.diagnosticUptimeMs) }
+            }
+            source(input.source); item(input.startFrameKey); item(input.terminalFrameKey); item(input.frames.size)
+            input.frames.forEach { selected ->
+                frame(selected.evidence); item(selected.title); item(selected.reviewed.file.absolutePath)
+                with(selected.reviewed) {
+                    item(sha256); item(width); item(height)
+                    val video = requireNotNull(videoOrigin) { "复核输出必须绑定实际录屏帧。" }
+                    source(video.source); item(video.frameTimeUs); item(video.timePrecisionUs)
+                    item(masks.size); masks.forEach(::rect); item(captureId)
+                }
+            }
+            item(input.actions.size); input.actions.forEach {
+                item(it.actionId); item(it.fromFrameKey); item(it.toFrameKey); item(it.label); rect(it.rect); frame(it.before); frame(it.after)
+            }
+        }
+        return hex(MessageDigest.getInstance("SHA-256").digest(bytes.toByteArray()))
+    }
+
+    private fun frameKey(frame: FrameEvidenceCandidate) = "${frame.ticket.action.sessionId}:${frame.ticket.sourceFrameId}"
+
+    /** Same captured frame retains one canonical anchor; extra video presentations cannot rebind it. */
+    private fun sameCapturedClickFrame(a: FrameEvidenceCandidate, b: FrameEvidenceCandidate): Boolean =
+        frameKey(a) == frameKey(b) && a.pngSha256 == b.pngSha256 && a.width == b.width && a.height == b.height &&
+            a.sourceSha256 == b.sourceSha256 && a.ticket.captureSequence == b.ticket.captureSequence &&
+            a.ticket.sourceTimestampNs == b.ticket.sourceTimestampNs && a.ticket.geometry == b.ticket.geometry &&
+            a.ticket.submittedPtsUs == b.ticket.submittedPtsUs && a.encoderPtsUs == b.encoderPtsUs &&
+            a.muxSampleOrdinal == b.muxSampleOrdinal && a.containerPtsUs == b.containerPtsUs
+
+    private fun validateClickChainShape(input: ClickChainImportInput) {
+        validId(input.operationId); input.run.validate()
+        require(input.run.terminal && input.operationId != input.run.projectId) { "请先结束录制运行，再建立独立项目。" }
+        text(input.title, "项目名称", 120)
+        require(input.frames.size in 1..ProjectLimits.MAX_STEPS && input.actions.size <= ProjectLimits.MAX_EDGES) { "所选内容超过 40 步骤或 80 连线限额。" }
+        require(input.source.sourceId == input.run.sourceId && input.frames.map { it.frameKey }.distinct().size == input.frames.size)
+        require(input.source.metadata.byteLength in 1..200L * 1024 * 1024 && input.source.metadata.durationUs in 1..180_000_000L)
+        val selected = input.frames.associateBy { it.frameKey }
+        require(input.startFrameKey in selected && (input.terminalFrameKey == null || input.terminalFrameKey in selected))
+        require(input.actions.map { it.actionId }.distinct().size == input.actions.size) { "同一个真实动作不能重复导入。" }
+        val evidence = input.frames.map { it.evidence } + input.actions.flatMap { listOf(it.before, it.after) }
+        evidence.forEach { frame ->
+            val action = frame.ticket.action
+            require(action.runId == input.run.runId && action.sessionId == input.run.recordingSessionId &&
+                action.sourceId == input.source.sourceId && action.generation == input.run.generation &&
+                input.run.plan.actions.any { it.actionId == action.actionId } && frame.sourceSha256 == input.source.metadata.sha256 &&
+                frame.width == frame.ticket.geometry.frameWidth && frame.height == frame.ticket.geometry.frameHeight &&
+                frame.ticket.geometry.displayWidth == input.run.plan.width && frame.ticket.geometry.displayHeight == input.run.plan.height &&
+                frame.containerPtsUs in 0..input.source.metadata.durationUs) { "画面与本次运行、素材或实际样本不一致。" }
+        }
+        evidence.groupBy(::frameKey).values.forEach { values ->
+            require(values.all { sameCapturedClickFrame(values.first(), it) }) { "相同捕获帧标识指向不同画面。" }
+        }
+        input.frames.forEach { frame ->
+            text(frame.title, "步骤名称", 120)
+            val reviewed = frame.reviewed
+            require(reviewed.origin == StepOrigin.VideoFrame(input.source, frame.evidence.containerPtsUs, 1L) &&
+                reviewed.width == frame.evidence.width && reviewed.height == frame.evidence.height) { "复核输出必须来自所选实际捕获帧。" }
+            require(reviewed.captureId.isNotBlank() && reviewed.captureId.length <= 512)
+        }
+        if (input.actions.isEmpty()) return
+        val indices = input.actions.map { action -> input.run.plan.actions.indexOfFirst { it.actionId == action.actionId } }
+        require(indices.first() >= 0 && indices.zipWithNext().all { (a, b) -> b == a + 1 }) { "不能跨越未选、失败或未知动作建立连线。" }
+        require(input.actions.map { it.before.ticket.epoch }.distinct().size == 1) { "不能跨录制区间建立连线。" }
+        input.actions.forEachIndexed { index, action ->
+            require(input.run.outcomes[indices[index]].status == ClickActionStatus.Completed) { "只有确认完成的动作能建立连线。" }
+            text(action.label, "热点名称", 120)
+            require(action.before.ticket.action.actionId == action.actionId && action.after.ticket.action.actionId == action.actionId &&
+                action.before.ticket.boundary == FrameBoundary.Before && action.after.ticket.boundary == FrameBoundary.After &&
+                action.before.ticket.epoch == action.after.ticket.epoch && action.before.ticket.captureSequence <= action.after.ticket.captureSequence &&
+                action.before.ticket.geometry == action.after.ticket.geometry) { "动作缺少同一区间的真实前后画面。" }
+            val from = requireNotNull(selected[action.fromFrameKey]) { "动作起点未选择。" }.evidence
+            val to = requireNotNull(selected[action.toFrameKey]) { "动作终点未选择。" }.evidence
+            val previous = input.actions.getOrNull(index - 1)?.after
+            val next = input.actions.getOrNull(index + 1)?.before
+            require((sameCapturedClickFrame(from, action.before) || previous?.let { sameCapturedClickFrame(from, it) && it.ticket.epoch == action.before.ticket.epoch } == true) &&
+                (sameCapturedClickFrame(to, action.after) || next?.let { sameCapturedClickFrame(to, it) && it.ticket.epoch == action.after.ticket.epoch } == true)) {
+                "连线只能使用本动作或紧邻动作的已选代表画面。"
+            }
+            require(from.ticket.epoch == action.before.ticket.epoch && to.ticket.epoch == action.after.ticket.epoch)
+            if (index > 0) {
+                require(input.actions[index - 1].toFrameKey == action.fromFrameKey) { "所选动作路线不连续。" }
+                require(previous!!.ticket.captureSequence <= action.before.ticket.captureSequence && previous.ticket.geometry == action.before.ticket.geometry) {
+                    "相邻动作画面顺序或坐标发生变化。"
+                }
+            }
+        }
+        require(input.startFrameKey == input.actions.first().fromFrameKey &&
+            selected.keys == input.actions.flatMap { listOf(it.fromFrameKey, it.toFrameKey) }.toSet()) { "所选画面必须与明确确认的路线一致。" }
+        require(input.actions.groupingBy { it.fromFrameKey }.eachCount().values.all { it <= ProjectLimits.MAX_HOTSPOTS_PER_STEP }) {
+            "相同捕获帧上的动作超过每步骤 6 热点限额；不会省略任何动作。"
+        }
+        require(input.terminalFrameKey == null || input.actions.none { it.fromFrameKey == input.terminalFrameKey }) { "有离开动作的画面不能设为终点。" }
+    }
+
+    private fun validateClickChainLive(db: SQLiteDatabase, input: ClickChainImportInput, store: FrameEvidenceStore,
+        sources: FrameSourceAccessor): FrameSourceAccessor {
+        requireSnapshot(db, input.run.projectId)
+        check(WorkspaceStore(app, input.run.projectId).read().singleOrNull { it.source.sourceId == input.source.sourceId }?.source == input.source) {
+            "原录屏登记已改变；新项目未创建。"
+        }
+        check(ClickPlanStore(app).readRuns(input.run.projectId).singleOrNull { it.runId == input.run.runId } == input.run) {
+            "运行记录已改变，请重新核对。"
+        }
+        // One fresh real MP4 hash/sample observation while the owning workspace and project are locked.
+        val source = requireNotNull(sources.registeredSource(input.run.projectId, input.run.recordingSessionId, input.source.sourceId)) {
+            "原录屏或编码样本已无法验证。"
+        }
+        check(source.projectId == input.run.projectId && source.sessionId == input.run.recordingSessionId &&
+            source.sourceId == input.source.sourceId && source.sourceSha256 == input.source.metadata.sha256 &&
+            source.frameWidth == input.source.metadata.width && source.frameHeight == input.source.metadata.height)
+        val observed = FrameSourceAccessor { projectId, sessionId, sourceId ->
+            source.takeIf { it.projectId == projectId && it.sessionId == sessionId && it.sourceId == sourceId }
+        }
+        (input.frames.map { it.evidence } + input.actions.flatMap { listOf(it.before, it.after) }).distinct().forEach { candidate ->
+            val actual = store.readCandidate(candidate.ticket.action.sessionId, candidate.ticket.ticketId, observed)
+            check(actual is FrameCandidateResult.Available && actual.candidate == candidate) { "所选捕获证据已失效；不会用估计画面替代。" }
+        }
+        return observed
+    }
+
+    /** All-or-nothing new project. The optional internal accessor isolates platform sample IO in host tests. */
+    internal suspend fun importReviewedClickChain(input: ClickChainImportInput,
+        sources: FrameSourceAccessor = SourceRepository(app).frameEvidenceSourceAccessor()): ClickChainImportReceipt {
+        val frozen = input.copy(frames = input.frames.map { it.copy(reviewed = it.reviewed.copy(masks = it.reviewed.masks.toList())) },
+            actions = input.actions.toList(), run = input.run.copy(outcomes = input.run.outcomes.toList(), events = input.run.events.toList()))
+        validId(frozen.operationId)
+        val operation = frozen.operationId
+        val digest = clickChainDigest(frozen)
+        // Even deleted originals and reviewed candidates are unnecessary after a known commit.
+        val completed = access { db -> readClickChainImport(db, operation)?.also {
+            check(clickChainStoredDigest(db, operation) == digest) { "此操作标识已绑定其他复核内容。" }
+            check(it.status != "aborted") { "这次导入已取消，请使用新的复核操作。" }
+        }?.takeIf { it.status == "committed" } }
+        if (completed != null) return completed
+        validateClickChainShape(frozen)
+        frozen.frames.forEach { validateInput(it.reviewed) }
+        val evidence = FrameEvidenceStore(app)
+        val rawId = clickChainId(operation, "source", frozen.source.sourceId)
+        val copiedSource = frozen.source.copy(sourceId = rawId, privateRelativePath = "sources/$rawId.mp4")
+        val files = listOf(ProjectCopyFile(rawId, "video", checkedProjectCopyInput(frozen.source.privateRelativePath),
+            copiedSource.privateRelativePath, frozen.source.metadata.sha256, frozen.source.metadata.byteLength)) + frozen.frames.map { frame ->
+            val asset = clickChainId(operation, "asset", frame.frameKey)
+            ProjectCopyFile(asset, "asset_png", frame.reviewed.file.canonicalFile, assetPath(operation, asset),
+                frame.reviewed.sha256.lowercase(), frame.reviewed.file.length(), frame.reviewed.width, frame.reviewed.height, frame.reviewed.masks)
+        }
+        require(files.filter { it.kind == "asset_png" }.sumOf { it.bytes } <= MAX_PNG_BYTES &&
+            root.usableSpace > files.sumOf { it.bytes } + 8L * 1024 * 1024) { "安全图片超过 50 MiB 或本机空间不足。" }
+        var observed: FrameSourceAccessor? = null
+        val racedReceipt = WorkspaceStore.withProjectCopyLock { access { db ->
+            readClickChainImport(db, operation)?.let { existing ->
+                check(clickChainStoredDigest(db, operation) == digest)
+                if (existing.status == "committed") return@access existing
+            }
+            check(importKey(operation) !in activeClickChainImports) { "本次导入仍在保存，请稍候。" }
+            observed = validateClickChainLive(db, frozen, evidence, sources)
+            transaction(db) {
+                val old = readClickChainImport(db, operation)
+                if (old == null) db.insertOrThrow("click_chain_imports", null, ContentValues().apply {
+                    put("operation_id", operation); put("project_id", operation); put("input_sha", digest)
+                    put("status", "preparing"); put("created_at", System.currentTimeMillis())
+                }) else check(old.status == "preparing" && clickChainStoredDigest(db, operation) == digest)
+                check(count(db, "projects", "project_id=?", operation) == 0 && count(db, "click_chain_files", "operation_id=?", operation) == 0) {
+                    "新项目身份冲突或上次导入清理尚未完成。"
+                }
+                check(listOf("", ".bak", ".new").none { File(root, "project-media-$operation.json$it").exists() })
+                files.forEach { file ->
+                    check(!File(root, file.path).exists()) { "导入文件身份冲突。" }
+                    db.insertOrThrow("click_chain_files", null, ContentValues().apply {
+                        put("operation_id", operation); put("file_id", file.id); put("kind", file.kind)
+                    })
+                }
+                db.update("click_chain_imports", ContentValues().apply { put("workspace_owned", 1) }, "operation_id=?", arrayOf(operation))
+            }
+            activeClickChainImports.add(importKey(operation))
+            null
+        } }
+        if (racedReceipt != null) return racedReceipt
+        val observedSource = requireNotNull(observed)
+        var failure: Throwable? = null
+        try {
+            val stagingRoot = privateDirectory(File(root, "click-chain-staging"), root)
+            val staging = privateDirectory(File(stagingRoot, operation), stagingRoot)
+            files.forEach { file ->
+                currentCoroutineContext().ensureActive()
+                check(file.source.isFile && file.source.length() == file.bytes && file.source.canonicalFile == file.source.absoluteFile)
+                val output = File(staging, "${file.id}.part"); check(!output.exists())
+                val hash = MessageDigest.getInstance("SHA-256"); var total = 0L
+                file.source.inputStream().use { source -> FileOutputStream(output).use { target ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val n = source.read(buffer); if (n < 0) break
+                        check(n > 0); total += n; check(total <= file.bytes); hash.update(buffer, 0, n); target.write(buffer, 0, n)
+                    }
+                    check(total == file.bytes && hex(hash.digest()) == file.sha) { "原片或复核输出在复制期间改变。" }
+                    target.fd.sync()
+                } }
+                if (file.kind == "asset_png") {
+                    SafeMediaWriterValidation.verifyPng(output, file.width, file.height, file.masks)
+                    val frame = frozen.frames.single { clickChainId(operation, "asset", it.frameKey) == file.id }
+                    evidence.withDecodedFrameSuspending(frame.evidence, observedSource) { bitmap -> verifyScreenshotPixels(output, bitmap, file.masks) }
+                }
+            }
+            currentCoroutineContext().ensureActive()
+            return withContext(NonCancellable) { WorkspaceStore.withProjectCopyLock { synchronized(lock) {
+                val db = database()
+                val receipt = requireNotNull(readClickChainImport(db, operation))
+                check(clickChainStoredDigest(db, operation) == digest)
+                if (receipt.status == "committed") return@synchronized receipt
+                check(receipt.status == "preparing")
+                validateClickChainLive(db, frozen, evidence, sources)
+                check(count(db, "projects", "project_id=?", operation) == 0)
+                files.forEach { file ->
+                    val temporary = File(staging, "${file.id}.part")
+                    check(temporary.isFile && temporary.length() == file.bytes && sha256(temporary) == file.sha) { "导入暂存已改变。" }
+                    val target = projectCopyOutput(operation, file.id, file.kind, createParent = true)
+                    check(!target.exists()); Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE)
+                    syncDirectory(requireNotNull(target.parentFile))
+                }
+                WorkspaceStore(app, operation).write(listOf(SourceDraft(copiedSource)))
+                transaction(db) {
+                    installClickChain(db, frozen, copiedSource, files)
+                    check(db.update("click_chain_imports", ContentValues().apply { put("status", "committed") },
+                        "operation_id=? AND status='preparing'", arrayOf(operation)) == 1)
+                    requireNotNull(readClickChainImport(db, operation))
+                }
+            } } }
+        } catch (error: Throwable) { failure = error; throw error }
+        finally { synchronized(lock) {
+            activeClickChainImports.remove(importKey(operation))
+            // Unknown COMMIT or close outcome is not permission to remove any media or journal.
+            runCatching { cleanupClickChainImport(database(), operation) }.exceptionOrNull()?.let { cleanup -> failure?.addSuppressed(cleanup) }
+        } }
+    }
+
+    private fun clickChainStoredDigest(db: SQLiteDatabase, id: String): String =
+        db.rawQuery("SELECT input_sha FROM click_chain_imports WHERE operation_id=?", arrayOf(id)).use { check(it.moveToFirst()); it.getString(0) }
+
+    private fun installClickChain(db: SQLiteDatabase, input: ClickChainImportInput, source: ImportedSource, files: List<ProjectCopyFile>) {
+        val project = input.operationId
+        fun id(domain: String, key: String) = clickChainId(project, domain, key)
+        val now = System.currentTimeMillis()
+        db.insertOrThrow("projects", null, ContentValues().apply {
+            put("project_id", project); put("title", input.title.trim()); put("goal", "")
+            put("created_at", now); put("updated_at", now); put("draft_revision", 1L); put("start_state_id", id("state", input.startFrameKey))
+        })
+        db.insertOrThrow("sources", null, ContentValues().apply {
+            put("project_id", project); put("source_id", source.sourceId); put("source_json", sourceJson(source).toString())
+        })
+        input.frames.forEachIndexed { index, frame ->
+            val assetId = id("asset", frame.frameKey); val file = files.single { it.id == assetId }
+            db.insertOrThrow("local_assets", null, ContentValues().apply {
+                put("project_id", project); put("asset_id", assetId); put("relative_path", file.path)
+                put("sha256", file.sha); put("byte_length", file.bytes); put("width", file.width); put("height", file.height)
+            })
+            db.insertOrThrow("states", null, ContentValues().apply {
+                put("project_id", project); put("state_id", id("state", frame.frameKey)); put("capture_id", id("capture", frame.frameKey))
+                put("sort_order", index); put("title", frame.title.trim()); put("description", "")
+                put("is_terminal", if (frame.frameKey == input.terminalFrameKey) 1 else 0); put("input_asset_id", assetId)
+                putOrigin(StepOrigin.VideoFrame(source, frame.evidence.containerPtsUs, 1L)); put("evidence_kind", "recorded")
+                put("masks_json", masksJson(frame.reviewed.masks).toString())
+            })
+            insertClickLineage(db, project, id("state", frame.frameKey), "frame", frame.evidence.toString())
+        }
+        input.actions.forEach { action ->
+            val hotspot = id("hotspot", action.actionId); val edge = id("edge", action.actionId)
+            val from = id("state", action.fromFrameKey); val to = id("state", action.toFrameKey)
+            db.insertOrThrow("hotspots", null, ContentValues().apply {
+                put("project_id", project); put("hotspot_id", hotspot); put("state_id", from); put("label", action.label.trim())
+                put("rect_left", action.rect.left); put("rect_top", action.rect.top); put("rect_right", action.rect.right); put("rect_bottom", action.rect.bottom)
+            })
+            db.insertOrThrow("edges", null, ContentValues().apply {
+                put("project_id", project); put("edge_id", edge); put("hotspot_id", hotspot); put("from_state_id", from); put("to_state_id", to); putNull("end_label")
+            })
+            insertClickLineage(db, project, edge, "action", action.toString())
+        }
+        val snapshot = requireSnapshot(db, project)
+        check(snapshot.steps.size == input.frames.size && edgeCount(snapshot) == input.actions.size)
+    }
+
+    private fun insertClickLineage(db: SQLiteDatabase, project: String, localId: String, kind: String, facts: String) {
+        db.insertOrThrow("click_chain_origins", null, ContentValues().apply {
+            put("project_id", project); put("local_id", localId); put("kind", kind); put("historical_facts", facts)
+        })
+    }
+
+    /** Only exact journal-owned files; durable receipt wins even after generated-project deletion. */
+    private fun cleanupClickChainImport(db: SQLiteDatabase, operation: String) {
+        validId(operation); check(importKey(operation) !in activeClickChainImports)
+        val receipt = requireNotNull(readClickChainImport(db, operation)) { "导入结果未知，保留文件等待恢复。" }
+        val committed = receipt.status == "committed"
+        if (!committed) check(!receipt.projectStillExists) { "导入提交结果不一致，保留文件。" }
+        val files = db.rawQuery("SELECT file_id,kind FROM click_chain_files WHERE operation_id=?", arrayOf(operation)).use { cursor ->
+            buildList { while (cursor.moveToNext()) add(cursor.getString(0) to cursor.getString(1)) }
+        }
+        val staging = File(root, "click-chain-staging/$operation"); check(staging.canonicalFile == staging.absoluteFile)
+        files.forEach { (id, kind) ->
+            val output = projectCopyOutput(operation, id, kind)
+            val temporary = File(staging, "$id.part"); check(temporary.canonicalFile == temporary.absoluteFile)
+            deleteImportFile(temporary)
+            if (!committed) {
+                check(count(db, "local_assets", "relative_path=?", output.relativeTo(root).path) == 0)
+                if (kind == "video") check(count(db, "sources", "source_id=?", id) == 0)
+                deleteImportFile(output)
+            }
+        }
+        if (staging.exists()) { check(staging.isDirectory && staging.delete()); syncDirectory(requireNotNull(staging.parentFile)) }
+        val owned = db.rawQuery("SELECT workspace_owned FROM click_chain_imports WHERE operation_id=?", arrayOf(operation)).use {
+            check(it.moveToFirst()); it.getInt(0) == 1
+        }
+        if (!committed && owned) for (suffix in listOf("", ".bak", ".new")) {
+            val workspace = File(root, "project-media-$operation.json$suffix")
+            check(workspace.canonicalFile == workspace.absoluteFile); deleteImportFile(workspace)
+        }
+        transaction(db) {
+            db.delete("click_chain_files", "operation_id=?", arrayOf(operation))
+            db.update("click_chain_imports", ContentValues().apply { put("workspace_owned", 0) }, "operation_id=?", arrayOf(operation))
         }
     }
 
@@ -2193,6 +2587,10 @@ class ProjectStore(context: Context) {
 
     /** Called only under the process-shared lock. Recovery is journal-driven, never a sweep. */
     private fun recoverImports(db: SQLiteDatabase) {
+        val chains = db.rawQuery("SELECT operation_id FROM click_chain_imports WHERE workspace_owned=1 OR EXISTS(SELECT 1 FROM click_chain_files f WHERE f.operation_id=click_chain_imports.operation_id)", null).use { cursor ->
+            buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
+        }
+        chains.filterNot { importKey(it) in activeClickChainImports }.forEach { runCatching { cleanupClickChainImport(db, it) } }
         val copies = db.rawQuery("SELECT operation_id FROM project_copy_operations WHERE workspace_owned=1 OR EXISTS(SELECT 1 FROM project_copy_files f WHERE f.operation_id=project_copy_operations.operation_id)", null).use { cursor ->
             buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
         }
@@ -2542,7 +2940,7 @@ class ProjectStore(context: Context) {
     internal class Database(
         context: Context, path: String,
         private val migrationCheckpoint: ((String) -> Unit)? = null,
-    ) : SQLiteOpenHelper(context, path, null, 9) {
+    ) : SQLiteOpenHelper(context, path, null, 10) {
         override fun onConfigure(db: SQLiteDatabase) {
             // SQLiteOpenHelper calls this BEFORE its upgrade transaction. Changing a PRAGMA
             // inside onUpgrade is ineffective and dropping states would cascade child rows.
@@ -2604,6 +3002,7 @@ class ProjectStore(context: Context) {
             createRegions(db)
             createEditorDrafts(db)
             createProjectCopies(db)
+            createClickChainImports(db)
         }
 
         private fun createNextActions(db: SQLiteDatabase) {
@@ -2673,8 +3072,8 @@ class ProjectStore(context: Context) {
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            check((oldVersion in 1..7 && newVersion in 8..9 && foreignKeys(db) == 0) ||
-                (oldVersion == 8 && newVersion == 9 && foreignKeys(db) == 1)) {
+            check((oldVersion in 1..7 && newVersion in 8..10 && foreignKeys(db) == 0) ||
+                (oldVersion in 8..9 && newVersion == 10 && foreignKeys(db) == 1)) {
                 "项目数据库需要安全迁移；请保留现有本机数据。"
             }
             if (oldVersion < 2) createNextActions(db)
@@ -2686,7 +3085,29 @@ class ProjectStore(context: Context) {
                 createAiImportTables(db)
                 migrateOrigins(db, oldVersion)
             }
-            if (newVersion >= 9) createProjectCopies(db)
+            if (oldVersion < 9 && newVersion >= 9) createProjectCopies(db)
+            if (oldVersion < 10 && newVersion >= 10) createClickChainImports(db)
+        }
+
+        private fun createClickChainImports(db: SQLiteDatabase) {
+            // No project/source FK: retry receipts survive original and generated project deletion.
+            db.execSQL("""CREATE TABLE click_chain_imports (
+                operation_id TEXT PRIMARY KEY NOT NULL, project_id TEXT NOT NULL UNIQUE,
+                input_sha TEXT NOT NULL CHECK(length(input_sha)=64 AND input_sha NOT GLOB '*[^0-9a-f]*'),
+                status TEXT NOT NULL CHECK(status IN ('preparing','committed','aborted')), created_at INTEGER NOT NULL,
+                workspace_owned INTEGER NOT NULL DEFAULT 0 CHECK(workspace_owned IN (0,1)), CHECK(project_id=operation_id)
+            )""")
+            db.execSQL("""CREATE TABLE click_chain_files (
+                operation_id TEXT NOT NULL, file_id TEXT NOT NULL UNIQUE,
+                kind TEXT NOT NULL CHECK(kind IN ('asset_png','video')), PRIMARY KEY(operation_id,file_id),
+                FOREIGN KEY(operation_id) REFERENCES click_chain_imports(operation_id)
+            )""")
+            // Historical private facts, never live source ownership, export data, or execution permission.
+            db.execSQL("""CREATE TABLE click_chain_origins (
+                project_id TEXT NOT NULL, local_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('frame','action')),
+                historical_facts TEXT NOT NULL CHECK(length(CAST(historical_facts AS BLOB)) BETWEEN 1 AND 32768),
+                PRIMARY KEY(project_id,local_id), FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+            )""")
         }
 
         private fun createProjectCopies(db: SQLiteDatabase) {
@@ -2899,7 +3320,8 @@ class ProjectStore(context: Context) {
         /** Guarded by lock; shared across every store using the same app-private root. */
         private val activeImports = mutableSetOf<String>()
         private val activeProjectCopies = mutableSetOf<String>()
-        private val PROJECT_COPY_TABLES = listOf("sources", "image_sources", "local_assets", "package_step_origins", "states", "hotspots", "edges", "next_actions", "edge_transitions", "regions")
+        private val activeClickChainImports = mutableSetOf<String>()
+        private val PROJECT_COPY_TABLES = listOf("sources", "image_sources", "local_assets", "package_step_origins", "states", "hotspots", "edges", "next_actions", "edge_transitions", "regions", "click_chain_origins")
         private val PNG_SIGNATURE = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10)
         private val SHA = Regex("[0-9a-fA-F]{64}")
         private const val MAX_PNG_BYTES = 50L * 1024 * 1024

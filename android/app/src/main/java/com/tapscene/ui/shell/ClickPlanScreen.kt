@@ -57,7 +57,9 @@ import com.tapscene.clickplan.ClickDevice
 import com.tapscene.clickplan.ClickPlan
 import com.tapscene.clickplan.ClickPlanStore
 import com.tapscene.clickplan.ClickPlayback
+import com.tapscene.clickplan.ClickRun
 import com.tapscene.clickplan.ClickRunPhase
+import com.tapscene.recording.RecordingCoordinator
 import com.tapscene.clickplan.ClickTargetApp
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -103,12 +105,13 @@ private val ClickPlanDraftSaver = listSaver<ClickPlanDraft, Any>(
 
 /** Store work stays off the UI thread; returning from the target never overwrites unsaved inputs. */
 @Composable
-fun ClickPlanRoute(projectId: String, onBack: () -> Unit) {
+fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String) -> Unit = {}) {
     val context = LocalContext.current
     val app = context.applicationContext
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val scope = rememberCoroutineScope()
     val playback by ClickPlayback.state.collectAsStateWithLifecycle()
+    val recording by RecordingCoordinator.state.collectAsStateWithLifecycle()
     var draft by rememberSaveable(projectId, stateSaver = ClickPlanDraftSaver) { mutableStateOf(ClickPlanDraft()) }
     var initialized by rememberSaveable(projectId) { mutableStateOf(false) }
     var dirty by rememberSaveable(projectId) { mutableStateOf(false) }
@@ -118,6 +121,9 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit) {
     var saveFailed by remember(projectId) { mutableStateOf(false) }
     var conflict by remember(projectId) { mutableStateOf(false) }
     var message by rememberSaveable(projectId) { mutableStateOf<String?>(null) }
+    var recordedRuns by remember(projectId) { mutableStateOf<List<ClickRun>>(emptyList()) }
+    var reviewRunId by rememberSaveable(projectId) { mutableStateOf<String?>(null) }
+    var showRecordedRuns by rememberSaveable(projectId) { mutableStateOf(false) }
     var apps by remember(projectId) { mutableStateOf<List<ClickTargetApp>>(emptyList()) }
     var geometryMatches by remember(projectId) { mutableStateOf(true) }
     var refresh by remember(projectId) { mutableIntStateOf(0) }
@@ -146,7 +152,8 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit) {
         try {
             ClickPlayback.initialize(app)
             val geometry = ClickDevice.geometry(context)
-            val result = withContext(Dispatchers.IO) { ClickPlanStore(app).getPlan(projectId) to ClickDevice.launcherApps(app) }
+            val result = withContext(Dispatchers.IO) { val store = ClickPlanStore(app); Triple(store.getPlan(projectId), ClickDevice.launcherApps(app), store.readRuns(projectId).filter { it.terminal }) }
+            recordedRuns = result.third
             apps = result.second
             val saved = result.first
             if (!initialized || !dirty) {
@@ -208,8 +215,13 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit) {
             if (dirty) showLeave = true else onBack()
         }
     }
+    if (reviewRunId != null) {
+        ClickChainReviewRoute(requireNotNull(reviewRunId), onBack = { reviewRunId = null }, onOpenProject = onOpenProject)
+        return
+    }
     BackHandler(onBack = leave)
-    val run = playback.run?.takeIf { it.projectId == projectId }
+    val run = playback.run?.takeIf { it.projectId == projectId } ?: recordedRuns.firstOrNull()
+    val reviewable = (listOfNotNull(run?.takeIf { it.terminal }) + recordedRuns).distinctBy { it.runId }
     val target = apps.firstOrNull { it.packageName == draft.targetPackage }
     val error = clickPlanInputError(draft.targetPackage, draft.width, draft.height, draft.displayId, draft.points)
     ClickPlanContent(
@@ -237,6 +249,7 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit) {
             runLabel = run?.let { "${clickRunLabel(it.phase)} · 已完成 ${it.nextActionIndex} / ${it.plan.actions.size} 点" },
             pointStatuses = run?.takeIf { !dirty && it.plan.planId == draft.planId && it.plan.revision == draft.revision }
                 ?.outcomes?.associate { it.actionId to clickActionLabel(it.status) }.orEmpty(),
+            canReviewRun = reviewable.isNotEmpty() && !recording.isBusy && !playback.busy && !playback.overlayVisible && !saving,
             canPause = run?.phase == ClickRunPhase.Running,
             canResume = run?.phase == ClickRunPhase.Paused && playback.connected,
         ),
@@ -274,8 +287,14 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit) {
             onPause = ClickPlayback::pause,
             onResume = { ClickPlayback.confirmResume(context) },
             onStop = { ClickPlayback.stop(app) },
+            onReviewRun = { if (reviewable.size == 1) reviewRunId = reviewable.single().runId else showRecordedRuns = true },
         ),
     )
+    if (showRecordedRuns) AlertDialog(onDismissRequest = { showRecordedRuns = false }, title = { Text("选择已录制点击链") },
+        text = { LazyColumn { itemsIndexed(reviewable) { index, item -> TextButton(onClick = {
+            showRecordedRuns = false; reviewRunId = item.runId
+        }) { Text("${if (index == 0) "最近一次" else "第 ${index + 1} 次记录"} · ${item.nextActionIndex}/${item.plan.actions.size} 个动作已完成") } } } },
+        confirmButton = { TextButton(onClick = { showRecordedRuns = false }) { Text("返回") } })
     if (showApps) ClickTargetPicker(apps, onDismiss = { showApps = false }, onChoose = { selected ->
         showApps = false
         if (selected.packageName != draft.targetPackage && draft.points.isNotEmpty()) pendingTarget = selected
@@ -344,6 +363,7 @@ data class ClickPlanUiState(
     val pointStatuses: Map<String, String> = emptyMap(),
     val canPause: Boolean = false,
     val canResume: Boolean = false,
+    val canReviewRun: Boolean = false,
 )
 
 data class ClickPlanCallbacks(
@@ -362,6 +382,7 @@ data class ClickPlanCallbacks(
     val onPause: () -> Unit = {},
     val onResume: () -> Unit = {},
     val onStop: () -> Unit = {},
+    val onReviewRun: () -> Unit = {},
 )
 
 /** Production content shared by the route and layout-only screenshot previews. */
@@ -416,10 +437,13 @@ fun ClickPlanContent(state: ClickPlanUiState, callbacks: ClickPlanCallbacks) {
                         modifier = Modifier.heightIn(min = 48.dp)) { Text("按当前屏幕重新编排") }
                 }
             }
+            if (state.canReviewRun) item("review_recorded_chain") {
+                Button(onClick = callbacks.onReviewRun, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("整理已录制点击链") }
+            }
             if (state.runLabel != null || state.sessionActive) item("runtime") {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     state.runLabel?.let { Text(it, style = MaterialTheme.typography.titleSmall) }
-                    Text("系统完成手势不代表目标 App 已完成业务操作。执行记录尚未映射到视频帧。",
+                    Text("手势完成不代表业务成功。录屏结束后可核对画面和点击区域，生成步骤路线。",
                         style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (state.canPause) OutlinedButton(onClick = callbacks.onPause, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("暂停") }

@@ -829,3 +829,16 @@ HTTP 映射：400 输入错误；401 会话失效；404 不存在或无权；409
 定位视图通过 getLocationOnScreen 校验实际 frame，绘制使用屏幕坐标减去局部原点；采点同时核对 local + origin 与 raw 坐标一致，缩放/裁切不一致不保存。没有读取目标节点或扩大权限。公开接口说明见 [WindowManager](https://developer.android.com/reference/android/view/WindowManager#getCurrentWindowMetrics())、[WindowInsets](https://developer.android.com/reference/android/view/WindowInsets#getInsetsIgnoringVisibility(int))。
 
 编辑浮层只有 Locating、Picking、Browsing、Closed 四态。浏览移除点位层和面板，保留可拖动的小控制窗；返回定位只恢复编辑界面，计划和 actionId 不变。拖动触摸由控制窗消费，不重放给目标 App。视图回调用 generation 校验，关闭后旧按钮不能重开。播放准备只接受 Locating，所有控制窗均纳入同一 detach gate；录制期间不保留隐形观察窗。
+
+
+### 点击链锚点复核与独立项目生成
+
+`ClickChainWorkspace` 仅从终结运行及所属素材的 `FrameEvidenceStore` 读取 before/after/Missing。使用真实登记源访问器核对 MP4、编码样本和 PNG，按 `(sessionId, sourceFrameId)` 识别捕获帧；ticket、呈现 PTS 或重复显示样本不另造步骤。原始像素只在 `withDecodedFrameSuspending` 内交给既有安全输出器，不向页面传原始路径或将原 PNG 登记为正式资产。
+
+连续已完成动作的中间阶段允许作者选择前一 after 或紧邻后一 before；首尾分别为首动作 before 与末动作 after。缺图、非完成、跨 epoch、观测顺序或几何异常阻断整段路线；可另选完整范围或仅加入画面。点击区域由真实配置派发点经所选阶段图的 scale/offset 预填小范围，作者拖改并确认区域与后继；不读取手指、不推断按钮框或业务结果。区域确认绑定实际选中图和前后安全 PNG 摘要，换图/换输出立即失效。
+
+私有复核 JSON 持久原始表单、范围、代表图、遮挡、实际输出复核和动作确认。单调 serial 与 owner 隔离迟到窗口；输出由精确 job 日志持有，PNG 文件及父目录同步后才保存引用。未知写入保留作者意图、重读再协调；旧 owner 可经明确放弃未保存修改后重开，不能覆盖新草稿。
+
+SQLite v10 加法增加 `click_chain_imports`、`click_chain_files`、`click_chain_origins`。稳定 operationId 冻结输入；Workspace → Project 锁内检查原归属和新鲜证据，独立复制 MP4、安全 PNG 与新 Workspace，再将全部步骤/热点/边/起终点及 committed 回执同事务写入。复制前后核原片摘要和实际安全像素；相同帧复用、同页多热点及自环保留，限额整体检查。清理只读健康数据库的持久回执与精确日志；未知提交不清文件，committed 重试即使原项目已删除也不再次创建。仅 preparing 且写入已停止时可明确取消；后续使用新操作身份。
+
+新项目不依赖原录制 session 的存活。历史帧/动作事实只作为私有沿革，完整项目复制时映射到新本地步骤/边；观看、AI 和托管公开投影均不携带原片、运行身份或这些事实。正式安全 PNG 与独立原片继续使用现有手工画面修正，不要求再次打开原捕获锚点。
