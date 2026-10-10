@@ -8,6 +8,7 @@ plugins {
 // Phone delivery stays small; emulator/universal packages are explicit build targets.
 val supportedAbis = listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
 val requestedAbi = providers.gradleProperty("tapsceneAbi").orElse("arm64-v8a").get()
+val runtimeSmoke = providers.gradleProperty("tapsceneRuntimeSmoke").orNull == "true"
 val packagedAbis = when (requestedAbi) {
     "universal" -> supportedAbis
     in supportedAbis -> listOf(requestedAbi)
@@ -26,7 +27,8 @@ android {
         targetSdk = 36
         versionCode = 31
         versionName = "0.26.0-presentation-clock-dev"
-        testInstrumentationRunner = "com.tapscene.media.MediaCompatibilityInstrumentation"
+        testInstrumentationRunner = if (runtimeSmoke) "com.tapscene.runtime.ClickRuntimeInstrumentation"
+            else "com.tapscene.media.MediaCompatibilityInstrumentation"
         manifestPlaceholders["appLabel"] = "TapScene"
         buildConfigField("boolean", "HOSTED_ENABLED", "false")
         ndk { abiFilters += packagedAbis }
@@ -70,7 +72,12 @@ android {
     packaging { jniLibs.keepDebugSymbols += "**/libonnxruntime.so" }
     // Share only explicit data/AI PNG checks; never import the instrumentation runner or all androidTest checks.
     sourceSets.getByName("test").java.srcDir("src/sharedTest/java")
-    sourceSets.getByName("androidTest").java.srcDir("src/sharedTest/java")
+    if (runtimeSmoke) {
+        // A deliberately separate device lane: never run or package the broad media fixture suite.
+        sourceSets.getByName("androidTest").java.setSrcDirs(listOf("src/androidTest/java/com/tapscene/runtime"))
+    } else {
+        sourceSets.getByName("androidTest").java.srcDir("src/sharedTest/java")
+    }
     testOptions {
         unitTests.isIncludeAndroidResources = true
         unitTests.all {

@@ -1,0 +1,39 @@
+# 有限云端 Android 运行检查
+
+本入口只在一次性 GitHub `ubuntu-24.04` runner 的合成 Android 设备运行。它执行真实 Android OS、生产无障碍点击与 MediaProjection/EGL/MediaCodec 管线；不是实体手机、OEM 或性能验收。应用仍为开发版本 31，产品代码、权限和超时不因测试修改。
+
+## 为什么保留软件模拟路线
+
+仓库此前 [CI #16](https://github.com/gluttonsama-cloud/TapScene/actions/runs/37909197077) 使用 `-accel off`、Emulator 37.2.12 / build 16428233 和 `x86_64-35_r02.zip`，日志明确记录 `Boot completed in 410981 ms`；两个 APK 安装成功，随后旧全量 instrumentation 进程崩溃。该次没有保留 logcat，不能把崩溃归因于 KVM，也不能把它当作点击/录屏验证通过。
+
+本入口复用该 API 35 `default;x86_64` 系统镜像和模拟器。`sdk-lock.py` 先检查 Google 官方 stable feed 中的版本、文件大小和 SHA-1，版本变化时失败，安装后再检查 `source.properties`。不升级到新镜像，不改 `/dev/kvm`、SELinux、主机权限或网络安全设置。
+
+官方将 [CPU 软件模拟](https://developer.android.com/studio/run/emulator-commandline) 标为 unsupported / very slow；使用其要求的 `ANDROID_I_WANT_MY_TCG=yes`。图形用同一官方模拟器内的 SwiftShader。一次成功仅证明该固定云端组合，不外推实体机兼容。
+
+## 已有 SDK 与许可
+
+旧 workflow 和现有 `docs.yml` 都使用 GitHub runner 的 SDK 和 `sdkmanager --install`，没有仓库新增的 `sdkmanager --licenses`。旧 run 的 runner image 为 `ubuntu24/20261004.327`，其[官方构建脚本](https://github.com/actions/runner-images/blob/ubuntu24/20261004.327/images/ubuntu/scripts/build/install-android-sdk.sh#L103-L104) 已包含组件许可输入；旧 run 的同版本 emulator/image 安装日志没有许可提示。
+
+独立 lane 继续使用现有 JDK 17、Gradle 8.13、AGP 8.13.2、NDK 28.2.13676358、CMake 3.22.1 及已锁定 OCR 构建来源。`sdkmanager` 的 stdin 固定为 `/dev/null`，不自动答复新许可、不写入许可哈希。任何缺少的接受步骤都失败并保留安装日志，需另行判断；这不是新账号、云服务或用户设备授权流程。
+
+## 入口与边界
+
+- `.github/workflows/android-runtime.yml` 是独立非部署 workflow：相关录制/点击/测试路径的 PR 变更触发，也定义 `workflow_dispatch`。新 workflow 的手动入口受 GitHub [默认分支要求](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch) 限制，不能假设未进入默认分支便有 UI 按钮。
+- `-PtapsceneRuntimeSmoke=true -PtapsceneAbi=x86_64 -PcompatibilityPreview=true` 才选择专用测试 runner 和 `:runtime-target`。默认构建保持原配置；合成目标不属于产品依赖或手机交付。
+- 不运行旧 `MediaCompatibilityInstrumentation`，不运行旧全量媒体/数据 suite；只编译并执行本入口。无新增第三方测试框架。
+- 仅一个隔离 AVD、一个独立 Android 用户目录与临时 ADB 身份；均在 runner 临时目录，不使用用户账户/手机/持久调试凭据。运行只安装主 app、专用 test APK 和无网络的目标 APK。
+- 先 EGL → AVC Surface → MP4 探针，随后一次生产点击链。先通过正常系统设置启用本次测试服务，再通过正常通知/录屏授权 UI。测试控制器使用 `FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES`，否则 [UiAutomation 默认会关闭被测服务](https://developer.android.com/reference/android/app/UiAutomation#FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)。不使用 `pm grant`、`appops`、`settings put`、root 或复用投影令牌。
+- 目标 App 两个大触控区只接受真实 MotionEvent，记录事件时间与接收时间；控制 IPC 不能伪造触摸。演示按钮只有普通合成页面效果，不包含登录、支付或个人内容。
+- 正常生产路径显示定位点、隐藏整个定位层、请求同意、核对目标窗口、派发一次短按并录制。初次场景约 20 秒，含长静态等待及尾段。保留定位层曾可见的截图与真正编码的视频；截图不代替录屏。
+- 实际事件顺序/时间、生产计划/执行日志、真正 MP4 样本和时长、录帧中的定位点残留、有效帧证据分别核对。不能把手势回调当成目标实际收到了点击，不能把 elapsed/uptime 强行当作源 PTS，静态像素也不证明系统没有新源帧回调。
+- 生产 15 秒目标臂定时、5–7 秒录制停止边界不放宽；超时或 codec/GL 错误使本轮失败，按保存的证据修复后再决定重试。
+
+## 资源、诊断与清理
+
+固定 480×800、160 dpi、2 个模拟 CPU、2560 MiB guest RAM；没有矩阵、并行 AVD 或自动重试。构建独立于模拟器运行，避免编译和软件图形同时抢内存。总体 job 最多 50 分钟；runtime 步骤 25 分钟，其中启动最多 900 秒，单 harness 最多 480 秒，全部运行命令共同受 22 分钟预算限制，余时留给诊断和清理。
+
+无论通过、断言失败还是进程崩溃，保留 7 天的 `android-runtime-smoke` artifact：准确提交/tree、SDK/构建日志、emulator 全日志、运行期全 buffer logcat、crash buffer、app exit-info、服务状态，以及由 `run-as` 只读取本次合成测试目录的 `app-evidence.tar`。它包含真实视频和测试断言，未包含 SDK/AVD 用户盘或 ADB 私钥。
+
+退出处理先取诊断，再停止测试 app、关闭模拟器/ADB，最后只删除本轮固定临时目录。超时不报告成功；只有专用 runner 完成全部断言的 `TAPSCENE_RUNTIME_SMOKE_OK` 才通过。GitHub 强制终止整机时无法保证退出钩子运行，runner 销毁仍会清除一次性设备；不能把缺失清理日志称作已核验清理。
+
+当前状态：新增入口待精确提交 CI 编译和实际运行。源代码/语法检查不等于 runtime 通过，也不替代实体手机 120 秒静态录制、生命周期和 OEM 兼容检查。
