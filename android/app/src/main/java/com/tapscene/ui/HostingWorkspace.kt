@@ -311,7 +311,8 @@ class HostingWorkspace private constructor(application: Application, private val
                     "expired" -> "取消时已有正式发布记录，该版本现已到期。"
                     else -> "取消时已正式发布。链接仍有效，请在版本管理中另行确认撤销。"
                 } else if (result.state == "cancelled")
-                "服务端已确认取消。" else "取消结果尚待确认，请重新查询任务。") }
+                if (result.uploadId == null) "未发起上传，已取消本机任务。" else "服务端已确认取消。"
+                else "取消结果尚待确认，请重新查询任务。") }
         }
     }
 

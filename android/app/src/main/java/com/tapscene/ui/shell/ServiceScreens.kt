@@ -961,7 +961,7 @@ internal fun hostingTaskLabel(task: HostedModels.Task): String = when {
     task.state == "prepared" -> "快照已固定，待上传"
     task.state == "receiving" -> "逐资产上传中 / 可恢复"
     task.state == "validating" -> "服务端校验中，尚未发布"
-    task.state == "cancelled" -> "已确认取消"
+    task.state == "cancelled" -> if (task.uploadId == null) "未发起上传，已取消本机任务" else "服务端已确认取消"
     task.state == "expired" -> "上传预留已到期"
     task.state == "failed" -> "服务端校验失败"
     else -> "结果未知，需查询确认"
