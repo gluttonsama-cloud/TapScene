@@ -28,9 +28,10 @@ private fun EditorNavigationSurface() {
     val image = remember { ShellPreviewFixture.bitmap(1) }
     TapSceneTheme {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            EditorWorkspaceContent(ShellPreviewFixture.project, ShellPreviewFixture.draft, image, false,
+            EditorWorkspaceContent(ShellPreviewFixture.project, ShellPreviewFixture.draft.copy(
+                title = "核对填写信息", dirty = true, recoveryStatus = DraftRecoveryStatus.STAGED), image, false,
                 EditorCallbacks({}, {}, {}, {}, {}, {}, {}, {}, {}, {}),
-                previewEnabled = false, regionsEnabled = false, dirtyStepCount = 2)
+                previewEnabled = false, regionsEnabled = false, dirtyStepCount = 2, canUndoEdit = true)
         }
     }
 }
@@ -46,7 +47,7 @@ fun EditorPanelSaveFailurePreview() {
                 title = "核对活动日期、联系方式与参与人数，再确认下一步",
                 description = ("长讲解仍保留在本机暂存中。正式保存未完成时，可以检查输入并重试。\n").repeat(10)),
                 true, DraftRecoveryStatus.STAGED, {}, {}, {}, { _, _ -> },
-                message = "保存步骤未完成，请检查本机存储后重试。未保存的修改仍保留")
+                message = "保存步骤未完成，请检查本机存储后重试。未保存的修改仍保留", canUndoEdit = true)
         }
     }
 }

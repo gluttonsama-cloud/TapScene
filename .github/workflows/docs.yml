@@ -261,6 +261,7 @@ jobs:
               ("com.tapscene.data.ProjectStoreHostTest", "saveIsAtomicAndPreservesTheOtherStep"): 1,
               ("com.tapscene.data.ProjectStoreHostTest", "temporaryStoreClosesOnlyItsOwnConnection"): 1,
               ("com.tapscene.ui.ProjectWorkspaceHostTest", "cancellationAndDiscardDoNotReviveCommittedForms"): 1,
+              ("com.tapscene.ui.ProjectWorkspaceHostTest", "singleEditorUndoCoalescesAndHonorsSaveNavigationAndRevisionBoundaries"): 1,
               ("com.tapscene.data.AiRoundTripHostTest", "completeStaticPackageReturnsAsReviewedRelease"): 1,
           }
           actual = Counter()
@@ -280,7 +281,7 @@ jobs:
                   stderr = "\n".join(node.text or "" for node in suite.iter("system-err"))
                   assert "Explicit termination method 'close' not called" not in stderr, "Static AI round trip leaked a CloseGuard resource"
           summary = (f"HOST_DATA_EXECUTION tests={sum(actual.values())} failures={failures} errors={errors} "
-                     f"skipped={skipped} test_seconds={seconds:.3f}; expected=6 original data executions + 1 temporary-store lifecycle + 1 static AI round trip / 7 entry points / 3 classes")
+                     f"skipped={skipped} test_seconds={seconds:.3f}; expected=6 original data executions + 1 temporary-store lifecycle + 1 static AI round trip + 1 editor undo / 8 entry points / 3 classes")
           print(summary)
           (Path(os.environ["RUNNER_TEMP"]) / "host-data-execution.txt").write_text(summary + "\n", encoding="utf-8")
           assert actual == Counter(expected), f"Missing/unexpected executed tests: {actual}"
@@ -296,7 +297,7 @@ jobs:
           assert "PASS AI round trip video gate:" in evidence
           assert "HOST_TEMP_STORE api=26 repeated-success=closed exceptional-exit=closed primary-error=preserved other-owner=read/write/open" in evidence
           assert "PASS AI candidate lifecycle: three real candidate copies" in evidence
-          print("TAPSCENE_HOST_DATA_CHECKS_OK: original six checks plus temporary-store lifecycle and static native-PNG round trip executed; device/video/power-loss checks remain separate")
+          print("TAPSCENE_HOST_DATA_CHECKS_OK: original six checks plus temporary-store lifecycle, static native-PNG round trip and editor undo executed; device/video/power-loss checks remain separate")
           PY_HOST
       - name: Read the actual Android round-trip export with the independent TS reader
         if: steps.scope.outputs.android == 'true'

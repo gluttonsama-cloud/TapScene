@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -44,6 +45,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -91,6 +93,8 @@ data class EditorCallbacks(
     val onResolveConflict: (Boolean) -> Unit = {},
     val onSavePendingForm: () -> Unit = {},
     val onResolveUnsavedSteps: () -> Unit = {},
+    val onUndo: () -> Unit = {},
+    val onTextEditEnd: () -> Unit = {},
 )
 
 @Composable
@@ -106,6 +110,7 @@ fun EditorWorkspaceContent(
     correctionEnabled: Boolean = true,
     dirtyStepCount: Int = if (draft.dirty) 1 else 0,
     formMessage: String? = null,
+    canUndoEdit: Boolean = false,
 ) {
     var mode by rememberSaveable(draft.stepId) { mutableStateOf(EditorMode.FRAME) }
     var adding by rememberSaveable(draft.stepId) { mutableStateOf(false) }
@@ -176,6 +181,9 @@ fun EditorWorkspaceContent(
                     TextButton(onClick = callbacks.onRetryStaging, enabled = !busy,
                         modifier = Modifier.heightIn(min = 48.dp)) { Text("重试") }
                 }
+                TextButton(onClick = callbacks.onUndo,
+                    enabled = !busy && canUndoEdit && draft.conflicts.isEmpty(),
+                    modifier = Modifier.heightIn(min = 48.dp)) { Text("撤销") }
                 TextButton(onClick = callbacks.onSave,
                     enabled = !busy && draft.dirty && pendingForm == null && draft.conflicts.isEmpty(),
                     modifier = Modifier.heightIn(min = 48.dp)) { Text("保存") }
@@ -353,15 +361,18 @@ fun EditorWorkspaceContent(
         val dismiss = { if (!busy) callbacks.onPendingFormChange(null) }
         when (form.kind) {
             EditorFormKind.NAME -> StepNameSheet(form, !busy, draft.recoveryStatus, formMessage,
-                callbacks.onRetryStaging, callbacks.onPendingFormChange, dismiss) { _, _ -> callbacks.onSavePendingForm() }
+                callbacks.onRetryStaging, callbacks.onPendingFormChange, dismiss, canUndoEdit, callbacks.onUndo,
+                callbacks.onTextEditEnd) { _, _ -> callbacks.onSavePendingForm() }
             EditorFormKind.HOTSPOT -> HotspotEditorSheet(form,
                 draft.hotspots.firstOrNull { it.id == form.objectId }, project.steps, !busy && !draft.isTerminal, !busy,
-                draft.recoveryStatus, formMessage, callbacks.onRetryStaging, callbacks.onPendingFormChange, dismiss) {
+                draft.recoveryStatus, formMessage, callbacks.onRetryStaging, callbacks.onPendingFormChange, dismiss,
+                canUndoEdit, callbacks.onUndo, callbacks.onTextEditEnd) {
                 callbacks.onSavePendingForm()
             }
             EditorFormKind.NEXT_ACTION -> NextActionEditorSheet(form,
                 draft.nextAction?.takeIf { it.id == form.objectId }, project.steps, !busy && !draft.isTerminal, !busy,
-                draft.recoveryStatus, formMessage, callbacks.onRetryStaging, callbacks.onPendingFormChange, dismiss) {
+                draft.recoveryStatus, formMessage, callbacks.onRetryStaging, callbacks.onPendingFormChange, dismiss,
+                canUndoEdit, callbacks.onUndo, callbacks.onTextEditEnd) {
                 callbacks.onSavePendingForm()
             }
         }
@@ -429,6 +440,7 @@ private fun EditorModeIcon(mode: EditorMode, tint: Color) {
 @Composable
 private fun StepNameSheet(form: EditorPendingForm, enabled: Boolean, recoveryStatus: DraftRecoveryStatus, message: String?,
     onRetry: () -> Unit, onChange: (EditorPendingForm) -> Unit, onDismiss: () -> Unit,
+    canUndoEdit: Boolean, onUndo: () -> Unit, onTextEditEnd: () -> Unit,
     onConfirm: (String, String) -> Unit) {
     val dismissAllowed by rememberUpdatedState(enabled)
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true,
@@ -438,7 +450,7 @@ private fun StepNameSheet(form: EditorPendingForm, enabled: Boolean, recoverySta
         properties = ModalBottomSheetProperties(shouldDismissOnBackPress = dismissAllowed)) {
         StepNameFormContent(form, enabled, recoveryStatus, onRetry, onChange, onDismiss, { title, description ->
             if (dismissAllowed && sheetState.targetValue != SheetValue.Hidden) onConfirm(title, description)
-        }, message)
+        }, message, canUndoEdit, onUndo, onTextEditEnd)
     }
 }
 
@@ -446,7 +458,8 @@ private fun StepNameSheet(form: EditorPendingForm, enabled: Boolean, recoverySta
 @Composable
 internal fun StepNameFormContent(form: EditorPendingForm, enabled: Boolean, recoveryStatus: DraftRecoveryStatus,
     onRetry: () -> Unit, onChange: (EditorPendingForm) -> Unit, onDismiss: () -> Unit,
-    onConfirm: (String, String) -> Unit, message: String? = null) {
+    onConfirm: (String, String) -> Unit, message: String? = null,
+    canUndoEdit: Boolean = false, onUndo: () -> Unit = {}, onTextEditEnd: () -> Unit = {}) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
@@ -455,13 +468,16 @@ internal fun StepNameFormContent(form: EditorPendingForm, enabled: Boolean, reco
             PendingFormStatus(recoveryStatus, enabled, onRetry)
             message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
             OutlinedTextField(form.title, { onChange(form.copy(title = it)) }, label = { Text("步骤名称") }, singleLine = true,
-                enabled = enabled, modifier = Modifier.fillMaxWidth())
+                enabled = enabled, modifier = Modifier.fillMaxWidth().onFocusChanged { if (!it.isFocused) onTextEditEnd() })
             OutlinedTextField(form.description, { onChange(form.copy(description = it)) }, label = { Text("讲解（可选）") }, minLines = 3, maxLines = 8,
-                enabled = enabled, modifier = Modifier.fillMaxWidth())
+                enabled = enabled, modifier = Modifier.fillMaxWidth().onFocusChanged { if (!it.isFocused) onTextEditEnd() })
             Text("保存本步会正式保存本步文字与动作。取消会丢弃此面板输入。", style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onUndo, enabled = enabled && canUndoEdit,
+                    modifier = Modifier.heightIn(min = 48.dp)) { Text("撤销") }
+                Spacer(Modifier.weight(1f))
                 TextButton(onClick = onDismiss, enabled = enabled) { Text("取消") }
                 Button(onClick = { onConfirm(form.title.trim(), form.description.trim()) },
                     enabled = enabled && form.title.isNotBlank()) { Text("保存本步") }
@@ -473,7 +489,8 @@ internal fun StepNameFormContent(form: EditorPendingForm, enabled: Boolean, reco
 @Composable
 private fun HotspotEditorSheet(form: EditorPendingForm, original: ProjectHotspot?, steps: List<ProjectStep>, enabled: Boolean, dismissEnabled: Boolean,
     recoveryStatus: DraftRecoveryStatus, message: String?, onRetry: () -> Unit, onChange: (EditorPendingForm) -> Unit,
-    onDismiss: () -> Unit, onConfirm: (ProjectHotspot) -> Unit) {
+    onDismiss: () -> Unit, canUndoEdit: Boolean, onUndo: () -> Unit, onTextEditEnd: () -> Unit,
+    onConfirm: (ProjectHotspot) -> Unit) {
     // Visibility is presentation-only; every editable value belongs to the pending form.
     var showGeometry by rememberSaveable(form.objectId) { mutableStateOf(false) }
     val rectangle = if (original != null && listOf(form.left, form.top, form.right, form.bottom) ==
@@ -495,11 +512,11 @@ private fun HotspotEditorSheet(form: EditorPendingForm, original: ProjectHotspot
             PendingFormStatus(recoveryStatus, enabled, onRetry)
             message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
             OutlinedTextField(form.label, { onChange(form.copy(label = it)) }, label = { Text("动作名称") }, singleLine = true,
-                enabled = enabled, modifier = Modifier.fillMaxWidth())
+                enabled = enabled, modifier = Modifier.fillMaxWidth().onFocusChanged { if (!it.isFocused) onTextEditEnd() })
             Text("点击后前往", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 8.dp))
             EditorTargetRow("结束演示", null, form.endsDemo, enabled) { onChange(form.copy(endsDemo = true)) }
             if (form.endsDemo) OutlinedTextField(form.endLabel, { onChange(form.copy(endLabel = it)) }, label = { Text("结束说明") },
-                enabled = enabled, modifier = Modifier.fillMaxWidth())
+                enabled = enabled, modifier = Modifier.fillMaxWidth().onFocusChanged { if (!it.isFocused) onTextEditEnd() })
             steps.forEachIndexed { index, step ->
                 EditorTargetRow("${index + 1}  ${step.title}", step.originLabel,
                     !form.endsDemo && form.targetStepId == step.id, enabled) {
@@ -512,18 +529,21 @@ private fun HotspotEditorSheet(form: EditorPendingForm, original: ProjectHotspot
             }
             if (showGeometry || rectangle == null) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    EditorPercentageField("左边 %", form.left, { onChange(form.copy(left = it)) }, enabled, Modifier.weight(1f))
-                    EditorPercentageField("顶部 %", form.top, { onChange(form.copy(top = it)) }, enabled, Modifier.weight(1f))
+                    EditorPercentageField("左边 %", form.left, { onChange(form.copy(left = it)) }, enabled, Modifier.weight(1f), onTextEditEnd)
+                    EditorPercentageField("顶部 %", form.top, { onChange(form.copy(top = it)) }, enabled, Modifier.weight(1f), onTextEditEnd)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    EditorPercentageField("右边 %", form.right, { onChange(form.copy(right = it)) }, enabled, Modifier.weight(1f))
-                    EditorPercentageField("底部 %", form.bottom, { onChange(form.copy(bottom = it)) }, enabled, Modifier.weight(1f))
+                    EditorPercentageField("右边 %", form.right, { onChange(form.copy(right = it)) }, enabled, Modifier.weight(1f), onTextEditEnd)
+                    EditorPercentageField("底部 %", form.bottom, { onChange(form.copy(bottom = it)) }, enabled, Modifier.weight(1f), onTextEditEnd)
                 }
             }
             if (rectangle == null) Text("范围须在 0–100% 内，右边大于左边，底部大于顶部。", color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall)
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onUndo, enabled = enabled && canUndoEdit,
+                    modifier = Modifier.heightIn(min = 48.dp)) { Text("撤销") }
+                Spacer(Modifier.weight(1f))
                 TextButton(onClick = onDismiss, enabled = dismissEnabled) { Text("取消") }
                 Button(onClick = {
                     val rect = rectangle
@@ -548,7 +568,8 @@ private fun HotspotEditorSheet(form: EditorPendingForm, original: ProjectHotspot
 @Composable
 private fun NextActionEditorSheet(form: EditorPendingForm, original: ProjectNextAction?, steps: List<ProjectStep>, enabled: Boolean, dismissEnabled: Boolean,
     recoveryStatus: DraftRecoveryStatus, message: String?, onRetry: () -> Unit, onChange: (EditorPendingForm) -> Unit,
-    onDismiss: () -> Unit, onConfirm: (ProjectNextAction) -> Unit) {
+    onDismiss: () -> Unit, canUndoEdit: Boolean, onUndo: () -> Unit, onTextEditEnd: () -> Unit,
+    onConfirm: (ProjectNextAction) -> Unit) {
     val validTarget = steps.any { it.id == form.targetStepId }
     val dismissAllowed by rememberUpdatedState(dismissEnabled)
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true,
@@ -566,7 +587,7 @@ private fun NextActionEditorSheet(form: EditorPendingForm, original: ProjectNext
             Text("画布外按钮 · 作者编排", style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             OutlinedTextField(form.label, { onChange(form.copy(label = it)) }, label = { Text("按钮文字") }, singleLine = true,
-                enabled = enabled, modifier = Modifier.fillMaxWidth())
+                enabled = enabled, modifier = Modifier.fillMaxWidth().onFocusChanged { if (!it.isFocused) onTextEditEnd() })
             Text("点击后前往", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 8.dp))
             if (!validTarget) Text(if (form.targetStepId == null) "请选择目标步骤。" else "原目标已失效，请重新选择。",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
@@ -576,7 +597,10 @@ private fun NextActionEditorSheet(form: EditorPendingForm, original: ProjectNext
                 }
             }
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onUndo, enabled = enabled && canUndoEdit,
+                    modifier = Modifier.heightIn(min = 48.dp)) { Text("撤销") }
+                Spacer(Modifier.weight(1f))
                 TextButton(onClick = onDismiss, enabled = dismissEnabled) { Text("取消") }
                 Button(onClick = { if (dismissAllowed && sheetState.targetValue != SheetValue.Hidden) form.objectId?.let { id -> onConfirm(ProjectNextAction(
                     id, form.label.trim(), form.targetStepId, original?.transition)) } },
@@ -674,9 +698,11 @@ private fun DraftConflictDialog(project: ProjectSnapshot, draft: StepEditDraft, 
 }
 
 @Composable
-private fun EditorPercentageField(label: String, value: String, onValue: (String) -> Unit, enabled: Boolean, modifier: Modifier) {
+private fun EditorPercentageField(label: String, value: String, onValue: (String) -> Unit, enabled: Boolean, modifier: Modifier,
+    onTextEditEnd: () -> Unit) {
     OutlinedTextField(value, onValue, label = { Text(label) }, enabled = enabled, singleLine = true,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = modifier)
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+        modifier = modifier.onFocusChanged { if (!it.isFocused) onTextEditEnd() })
 }
 
 @Composable

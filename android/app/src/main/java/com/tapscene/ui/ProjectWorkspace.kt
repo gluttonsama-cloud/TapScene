@@ -98,6 +98,7 @@ data class ProjectUiState(
     val issues: List<ProjectIssue> = emptyList(),
     val dirtyStepIds: Set<String> = emptySet(),
     val editorExitIssue: String? = null,
+    val canUndoEdit: Boolean = false,
     /** Also changes for unsaved text/geometry, invalidating an older preview immediately. */
     val editRevision: Long = 0,
 ) {
@@ -128,6 +129,26 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     private val pendingStages = linkedMapOf<Pair<String, String>, Long>()
     private var stagingTask: Job? = null
     private val savingDrafts = mutableMapOf<Pair<String, String>, StepEditDraft>()
+    // One session-local author edit only. Never retain pixels, source paths or media bindings.
+    private var editorUndo: EditorUndo? = null
+
+    private data class EditorUndo(
+        val projectId: String,
+        val stepId: String,
+        val revision: Long,
+        val fields: EditorDraftFields,
+        val pendingForm: EditorPendingForm?,
+        val textGroup: String?,
+    )
+
+    private fun clearEditorUndo() {
+        editorUndo = null
+        mutableState.update { it.copy(canUndoEdit = false) }
+    }
+
+    /** A focus change ends contiguous typing without discarding the last reversible edit. */
+    fun endEditorTextEdit() { if (!state.value.busy) editorUndo = editorUndo?.copy(textGroup = null) }
+
 
     private data class DraftRecord(
         val draft: StepEditDraft,
@@ -163,6 +184,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     fun openProject(id: String) = execute("打开项目") {
+        clearEditorUndo()
         val project = withContext(Dispatchers.IO) { store.readProject(id) }
             ?: error("项目已不存在，请刷新项目列表")
         invalidatePreview()
@@ -189,6 +211,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         loadedDraftProjects.remove(id)
         drafts.keys.removeAll { it.first == id }
         if (state.value.project?.project?.id == id) {
+            clearEditorUndo()
             mutableState.update { it.copy(project = null, route = ProjectRoute.PROJECTS,
                 selectedStepId = null, stepDraft = null, bitmap = null, preview = null, issues = emptyList(), dirtyStepIds = emptySet()) }
         }
@@ -196,6 +219,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     fun openStep(id: String) = execute("读取步骤画面") {
+        clearEditorUndo()
         val project = state.value.project ?: return@execute
         val step = project.steps.firstOrNull { it.id == id } ?: return@execute
         invalidatePreview()
@@ -207,12 +231,14 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     /** The hosting screen must first successfully activate the same project's media workbench. */
     fun openMedia() {
         if (state.value.busy || state.value.project == null || state.value.loadFailed) return
+        clearEditorUndo()
         invalidatePreview()
         mutableState.update { it.copy(route = ProjectRoute.MEDIA, bitmap = null) }
     }
 
     fun back() {
         if (state.value.busy) return
+        clearEditorUndo()
         when (state.value.route) {
             ProjectRoute.PREVIEW -> exitPreview()
             ProjectRoute.EDIT, ProjectRoute.MEDIA -> {
@@ -228,8 +254,8 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun editTitle(value: String) = editDraft { it.copy(title = value) }
-    fun editDescription(value: String) = editDraft { it.copy(description = value) }
+    fun editTitle(value: String) = editDraft(textGroup = "title") { it.copy(title = value) }
+    fun editDescription(value: String) = editDraft(textGroup = "description") { it.copy(description = value) }
 
     fun editTerminal(value: Boolean) {
         val draft = state.value.stepDraft ?: return
@@ -275,21 +301,63 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
 
     fun removeNextAction() = editDraft { it.copy(nextAction = null) }
 
-    private fun editDraft(change: (StepEditDraft) -> StepEditDraft) {
+    private fun editDraft(textGroup: String? = null, recordUndo: Boolean = true, change: (StepEditDraft) -> StepEditDraft) {
         val current = state.value
         if (current.busy || current.loadFailed) return
         val project = current.project ?: return
         val old = current.stepDraft ?: return
+        if (old.conflicts.isNotEmpty()) return
         val key = project.project.id to old.stepId
         val record = drafts[key] ?: return
         val changed = change(old)
         if (changed == old) return
+        if (recordUndo) {
+            val previous = editorUndo
+            if (previous == null || textGroup == null || previous.textGroup != textGroup || previous.projectId != project.project.id ||
+                previous.stepId != old.stepId || previous.revision != project.project.revision) {
+                editorUndo = EditorUndo(project.project.id, old.stepId, project.project.revision,
+                    old.fields(), old.pendingForm, textGroup)
+            }
+            editorUndo?.let { if (changed.fields() == it.fields && changed.pendingForm == it.pendingForm) editorUndo = null }
+        }
         val next = changed.copy(dirty = true,
             recoveryStatus = DraftRecoveryStatus.STAGING)
         drafts[key] = record.copy(draft = next)
         invalidatePreview(edited = true)
-        mutableState.update { it.copy(stepDraft = next, dirtyStepIds = dirtyIds(project.project.id), message = null) }
+        mutableState.update { it.copy(stepDraft = next, dirtyStepIds = dirtyIds(project.project.id), canUndoEdit = editorUndo != null, message = null) }
         queueStage(key)
+    }
+
+    /** Re-read before applying: a stale local history must never undo a newer official graph. */
+    fun undoEditorEdit() {
+        val current = state.value
+        if (current.busy || current.loadFailed || current.route != ProjectRoute.EDIT) return
+        val undo = editorUndo ?: return
+        val project = current.project ?: return
+        val draft = current.stepDraft ?: return
+        if (draft.conflicts.isNotEmpty() || undo.projectId != project.project.id || undo.stepId != draft.stepId) return
+        execute("撤销本次编辑", editing = true) {
+            val fresh = withContext(Dispatchers.IO) { store.readProject(undo.projectId) }
+                ?: error("项目已不存在，请刷新")
+            applyProject(fresh)
+            if (fresh.project.revision != undo.revision || editorUndo !== undo) {
+                clearEditorUndo()
+                message("已保存内容有更新，旧编辑不能撤销；当前输入仍保留")
+                return@execute
+            }
+            val step = fresh.steps.firstOrNull { it.id == undo.stepId } ?: return@execute
+            val key = undo.projectId to undo.stepId
+            val record = drafts[key] ?: return@execute
+            val fields = EditorDraftReconciliation.prune(undo.fields, fresh.steps.map { it.id }.toSet())
+            val pending = EditorDraftReconciliation.prune(undo.pendingForm, fresh.steps.map { it.id }.toSet())
+            // withCurrentMedia inside toDraft can only attach bindings from this official step.
+            drafts[key] = record.copy(draft = fields.toDraft(step, pending).copy(recoveryStatus = DraftRecoveryStatus.STAGING))
+            clearEditorUndo() // Consume before queued persistence; a repeated tap is never redo.
+            invalidatePreview(edited = true)
+            publishDraftState(fresh)
+            queueStage(key)
+            message("已撤销本次编辑")
+        }
     }
 
     fun saveStepDraft() = saveStepDraftInternal(null)
@@ -333,6 +401,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
                             submitted.isTerminal, submitted.hotspots, expectedRevision = record.baseRevision,
                             nextAction = submitted.nextAction, editorDraftSession = session)
                     }
+                    clearEditorUndo()
                     saved.steps.firstOrNull { it.id == draft.stepId }?.let { step ->
                         drafts[key] = DraftRecord(step.toDraft(), step, saved.project.revision)
                     }
@@ -365,6 +434,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
                 withContext(NonCancellable) {
                     val session = sessionFor(project.project.id)
                     check(withContext(Dispatchers.IO) { store.clearEditorDraft(project.project.id, step.id, session) })
+                    clearEditorUndo()
                     drafts[key] = DraftRecord(step.toDraft(), step, project.project.revision)
                     applyProject(project)
                 }
@@ -422,13 +492,32 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     fun dismissEditorExitIssue() { mutableState.update { it.copy(editorExitIssue = null) } }
 
     private fun leaveEditorRoute() {
+        clearEditorUndo()
         invalidatePreview()
         mutableState.update { it.copy(route = ProjectRoute.STEPS, bitmap = null, editorExitIssue = null) }
     }
 
     fun editPendingForm(projectId: String, stepId: String, form: EditorPendingForm?) {
-        if (state.value.project?.project?.id != projectId || state.value.selectedStepId != stepId) return
-        editDraft { it.copy(pendingForm = form) }
+        val current = state.value
+        if (current.busy || current.loadFailed || current.project?.project?.id != projectId || current.selectedStepId != stepId) return
+        val old = current.stepDraft?.pendingForm
+        if (old == form) return
+        val samePanel = old != null && form != null && old.kind == form.kind &&
+            old.objectId == form.objectId && old.edgeId == form.edgeId
+        if (!samePanel) clearEditorUndo() // Opening is not an edit; cancellation never reopens old input.
+        editDraft(textGroup = if (samePanel) pendingTextGroup(old!!, form!!) else null, recordUndo = samePanel) {
+            it.copy(pendingForm = form)
+        }
+    }
+
+    private fun pendingTextGroup(old: EditorPendingForm, next: EditorPendingForm): String? {
+        val changes = listOf("title" to (old.title != next.title), "description" to (old.description != next.description),
+            "label" to (old.label != next.label), "left" to (old.left != next.left), "top" to (old.top != next.top),
+            "right" to (old.right != next.right), "bottom" to (old.bottom != next.bottom),
+            "endLabel" to (old.endLabel != next.endLabel)).filter { it.second }
+        return changes.singleOrNull()?.first?.takeIf {
+            old.targetStepId == next.targetStepId && old.endsDemo == next.endsDemo
+        }?.let { "panel:${next.kind}:${next.objectId}:$it" }
     }
 
     fun retryDraftStaging() {
@@ -439,6 +528,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
 
     fun resolveDraftConflict(keepMine: Boolean) {
         if (state.value.busy || state.value.loadFailed) return
+        clearEditorUndo()
         val project = state.value.project ?: return
         val step = state.value.selectedStep ?: return
         val key = project.project.id to step.id
@@ -992,6 +1082,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
             retainedMediaWorkspaces = loaded.retainedMediaWorkspaces, loadFailed = false) }
         if (loaded.selected != null) { restoreDrafts(loaded.selected); applyProject(loaded.selected) }
         else if (selectedId != null) {
+            clearEditorUndo()
             drafts.keys.removeAll { it.first == selectedId }
             invalidatePreview()
             mutableState.update { it.copy(project = null, route = ProjectRoute.PROJECTS,
@@ -1000,6 +1091,8 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     private fun applyProject(project: ProjectSnapshot) {
+        editorUndo?.let { if (it.projectId != project.project.id || it.revision != project.project.revision ||
+            project.steps.none { step -> step.id == it.stepId }) clearEditorUndo() }
         val current = state.value
         if (previewSnapshot?.project?.id == project.project.id && previewSnapshot?.project?.revision != project.project.revision) {
             invalidatePreview()
