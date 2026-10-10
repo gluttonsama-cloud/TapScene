@@ -53,6 +53,8 @@ fun RecordingCaptureRoute(
     val preferences = remember(app) { app.getSharedPreferences("recording-ui", Context.MODE_PRIVATE) }
     var showNotice by rememberSaveable { mutableStateOf(false) }
     var waitingProject by rememberSaveable { mutableStateOf(false) }
+    var clickPlanRequested by rememberSaveable { mutableStateOf(false) }
+    var showClickPlan by rememberSaveable { mutableStateOf(false) }
     var pendingProject by rememberSaveable { mutableStateOf<String?>(null) }
     var checkingBudget by remember { mutableStateOf(false) }
     var budgetJob by remember { mutableStateOf<Job?>(null) }
@@ -115,7 +117,10 @@ fun RecordingCaptureRoute(
         if (waitingProject && !projectState.busy) {
             waitingProject = false
             val id = projectState.project?.project?.id
-            if (id != null) requestConsent(id) else localMessage = "项目未创建，请重试。"
+            if (id != null) {
+                if (clickPlanRequested) { clickPlanRequested = false; showClickPlan = true }
+                else requestConsent(id)
+            } else { clickPlanRequested = false; localMessage = "项目未创建，请重试。" }
         }
     }
     LaunchedEffect(recording.phase, recording.sourceId, organizeAfterStop) {
@@ -133,6 +138,10 @@ fun RecordingCaptureRoute(
         waitingProject = false
         organizeAfterStop = false
         onBack()
+    }
+    if (showClickPlan && projectState.project?.project?.id != null) {
+        ClickPlanRoute(requireNotNull(projectState.project?.project?.id), onBack = { showClickPlan = false })
+        return
     }
     BackHandler(onBack = leave)
     RecordingCaptureContent(
@@ -153,6 +162,13 @@ fun RecordingCaptureRoute(
                 if (id != null && source != null) onCandidates(id, source, true)
             },
             onImportVideo = onImportVideo,
+            onClickPlan = {
+                if (projectState.project?.project?.id != null) showClickPlan = true
+                else if (!projectState.busy) {
+                    clickPlanRequested = true; waitingProject = true
+                    projects.createProject(LocalDateTime.now().format(DateTimeFormatter.ofPattern("'点击链录制' MM-dd HH:mm")))
+                }
+            },
         ),
     )
     if (showNotice) AlertDialog(onDismissRequest = { showNotice = false }, title = { Text("开始前请留意") },
@@ -170,6 +186,7 @@ data class RecordingCaptureCallbacks(
     val onDiscard: () -> Unit,
     val onCandidates: () -> Unit,
     val onImportVideo: () -> Unit,
+    val onClickPlan: (() -> Unit)? = null,
 )
 
 /** Real page content; Android consent, persistence and coordinator calls stay in the route. */
@@ -233,10 +250,15 @@ fun RecordingCaptureContent(
                         }
                         Text("请先继续检查或删除未完成录制，再开始新录制。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                     }
-                    Button(onClick = callbacks.onStart,
+                    callbacks.onClickPlan?.let { openPlan ->
+                        Button(onClick = openPlan, enabled = !recording.canRetry && !projectState.busy && !preparingConsent,
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("编排点击链并录屏") }
+                        Text("先顺序定位，再隐藏点位播放一次；保留完整点击链与真实录屏。", style = MaterialTheme.typography.bodySmall)
+                    }
+                    OutlinedButton(onClick = callbacks.onStart,
                         enabled = !recording.canRetry && !projectState.busy && !projectState.loadFailed && !preparingConsent,
                         shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                        Text(if (preparingConsent) "准备授权…" else if (recording.phase == RecordingPhase.Idle) "开始录制" else "录制下一段")
+                        Text(if (preparingConsent) "准备授权…" else "手动操作并录屏")
                     }
                     OutlinedButton(onClick = callbacks.onImportVideo, enabled = !projectState.busy && !preparingConsent,
                         shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("导入已有录屏") }

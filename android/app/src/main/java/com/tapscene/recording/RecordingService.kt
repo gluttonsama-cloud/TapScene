@@ -13,6 +13,8 @@ import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.os.Build
 import android.os.IBinder
+import com.tapscene.clickplan.ClickPlayback
+import com.tapscene.clickplan.ClickConsentActivity
 
 /** A fresh user grant is required. There is no sticky start, boot receiver or saved token. */
 class RecordingService : Service() {
@@ -64,7 +66,11 @@ class RecordingService : Service() {
                     finishSession()
                 }
             }
-            ACTION_STOP -> RecordingCoordinator.stopFromService(this, RecordingStopReason.User)
+            ACTION_STOP -> {
+                ClickPlayback.stop(this)
+                RecordingCoordinator.stopFromService(this, RecordingStopReason.User)
+            }
+            ACTION_PAUSE -> ClickPlayback.pause()
             else -> if (!RecordingCoordinator.isOwnedBy(this)) finishSession()
         }
         return START_NOT_STICKY
@@ -98,7 +104,7 @@ class RecordingService : Service() {
             this, 1, Intent(this, RecordingService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        return Notification.Builder(this, CHANNEL_ID)
+        val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setContentTitle("TapScene 正在无声录制")
             .setContentText("仅保存在本机；点击停止结束本段录制")
@@ -108,12 +114,23 @@ class RecordingService : Service() {
             .setOnlyAlertOnce(true)
             .setContentIntent(stopIntent)
             .addAction(Notification.Action.Builder(android.R.drawable.ic_media_pause, "停止录制", stopIntent).build())
-            .build()
+        if (RecordingCoordinator.isClickSession(sessionId)) {
+            val pause = PendingIntent.getService(this, 2, Intent(this, RecordingService::class.java).setAction(ACTION_PAUSE),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            val resume = PendingIntent.getActivity(this, 3, Intent(this, ClickConsentActivity::class.java)
+                .putExtra("resume", true).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            builder.setContentText("点击链录屏 · 暂停只阻止后续点；可随时停止")
+                .addAction(Notification.Action.Builder(android.R.drawable.ic_media_pause, "暂停点击", pause).build())
+                .addAction(Notification.Action.Builder(android.R.drawable.ic_media_play, "核对并继续", resume).build())
+        }
+        return builder.build()
     }
 
     internal companion object {
         const val ACTION_START = "com.tapscene.recording.START"
         const val ACTION_STOP = "com.tapscene.recording.STOP"
+        const val ACTION_PAUSE = "com.tapscene.recording.PAUSE_CLICKS"
         const val EXTRA_SESSION_ID = "sessionId"
         private const val CHANNEL_ID = "tapscene_recording"
         private const val NOTIFICATION_ID = 4102

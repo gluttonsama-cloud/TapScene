@@ -45,7 +45,8 @@ object RecordingCoordinator {
     @Volatile private var pending: PendingGrant? = null
     @Volatile private var owner: RecordingService? = null
     @Volatile private var stopRequest: Pair<String, RecordingStopReason>? = null
-    private var active: ActiveRecording? = null
+    private val clickGate = RecordingClickGate()
+    @Volatile private var active: ActiveRecording? = null
     private val sealedPending = mutableSetOf<String>()
 
     /** Recovery never resumes capture, reuses a grant or treats an unsealed MP4 as usable. */
@@ -63,9 +64,11 @@ object RecordingCoordinator {
     }
 
     /** Call only from an Activity result containing this new session's explicit user consent. */
-    fun start(context: Context, projectId: String, resultCode: Int, consentIntent: Intent) {
+    fun start(context: Context, projectId: String, resultCode: Int, consentIntent: Intent, clickSession: RecordingClickSession? = null) {
+        clickSession?.let { clickGate.issue(it.sessionId) }
         val app = context.applicationContext
         serial {
+            if (clickSession != null && !clickGate.permits(clickSession.sessionId)) return@serial
             if (mutableState.value.isBusy || active != null || pending != null) return@serial
             if (resultCode != Activity.RESULT_OK) {
                 mutableState.value = RecordingUiState(phase = RecordingPhase.Failed, error = "未获得本次录制授权。")
@@ -77,7 +80,13 @@ object RecordingCoordinator {
                 // UI recovery is asynchronous. Recheck persisted pending work here so a tap
                 // from a stale Idle screen cannot hide it behind a second recording session.
                 if (sealedPending.isNotEmpty() || mutableState.value.canRetry) return@serial
-                val grant = PendingGrant(UUID.randomUUID().toString(), projectId, UUID.randomUUID().toString(), resultCode, consentIntent)
+                clickSession?.let {
+                    RecordingJournalStore.requireUuid(it.sessionId)
+                    RecordingJournalStore.requireUuid(it.sourceId)
+                    require(it.width > 0 && it.height > 0)
+                }
+                val grant = PendingGrant(clickSession?.sessionId ?: UUID.randomUUID().toString(), projectId,
+                    clickSession?.sourceId ?: UUID.randomUUID().toString(), resultCode, consentIntent, clickSession)
                 stopRequest = null
                 pending = grant
                 mutableState.value = RecordingUiState(
@@ -115,6 +124,19 @@ object RecordingCoordinator {
                 owner = null
             }
         }
+    }
+
+    /** Read immediately before each gesture. A queued Stop fences execution synchronously. */
+    fun canDispatchClicks(sessionId: String, projectId: String, sourceId: String): Boolean {
+        val value = mutableState.value
+        return value.sessionId == sessionId && value.projectId == projectId && value.sourceId == sourceId && value.phase == RecordingPhase.Recording &&
+            value.clickCaptureReady && stopRequest?.first != sessionId && clickGate.permits(sessionId)
+    }
+
+    /** Covers cancellation before the asynchronous start command has published its session ID. */
+    fun stopClickSession(context: Context, sessionId: String) {
+        clickGate.cancel(sessionId)
+        if (mutableState.value.sessionId == sessionId) stop(context)
     }
 
     /** Revalidates and registers only durably sealed videos, always with their original source ID. */
@@ -171,6 +193,8 @@ object RecordingCoordinator {
         withContext(handler.asCoroutineDispatcher()) { gate.withLock { } }
     }
 
+    internal fun isClickSession(sessionId: String?): Boolean = pending?.takeIf { it.sessionId == sessionId }?.clickSession != null || active?.takeIf { it.journal.sessionId == sessionId }?.clickSession != null
+
     internal fun isPending(sessionId: String): Boolean = pending?.sessionId == sessionId
     internal fun isOwnedBy(service: RecordingService): Boolean = owner === service
 
@@ -181,7 +205,7 @@ object RecordingCoordinator {
                 if (owner !== service && pending == null) service.finishSession()
                 return@serial
             }
-            if (stopRequest?.first == sessionId) {
+            if (stopRequest?.first == sessionId || (grant.clickSession != null && !clickGate.permits(sessionId))) {
                 pending = null
                 mutableState.value = mutableState.value.copy(
                     phase = RecordingPhase.Interrupted, stopReason = stopRequest?.second,
@@ -212,7 +236,13 @@ object RecordingCoordinator {
                     JournalPhase.Starting, System.currentTimeMillis(),
                 )
                 store.create(journal)
-                recording = ActiveRecording(service, store, journal, RecordingEncoder.canvas(service), maxDurationMs, maxBytes)
+                val canvas = RecordingEncoder.canvas(service)
+                grant.clickSession?.let {
+                    if (canvas.width != it.width || canvas.height != it.height) {
+                        throw RecordingStartException("屏幕尺寸已改变，请重新编排点位。")
+                    }
+                }
+                recording = ActiveRecording(service, store, journal, canvas, maxDurationMs, maxBytes, grant.clickSession)
                 active = recording
                 val current = recording
                 val prepared = RecordingEncoder.prepare(service, current.canvas, store.part(grant.sessionId), maxDurationMs, maxBytes,
@@ -264,7 +294,7 @@ object RecordingCoordinator {
                 current.startedAtElapsedMs = SystemClock.elapsedRealtime()
                 current.journal = current.journal.copy(phase = JournalPhase.Recording)
                 store.save(current.journal)
-                mutableState.value = current.journal.ui(RecordingPhase.Recording)
+                mutableState.value = current.journal.ui(RecordingPhase.Recording).copy(clickCaptureReady = current.clickSession != null && (Build.VERSION.SDK_INT < 34 || current.captureGeometryConfirmed))
                 scheduleTick(current.journal.sessionId)
             } catch (error: Exception) {
                 val failedRecording = recording
@@ -324,7 +354,7 @@ object RecordingCoordinator {
             try {
                 val newCanvas = RecordingEncoder.canvas(service)
                 if (newCanvas.width == current.canvas.width && newCanvas.height == current.canvas.height) return@serial
-                if (Build.VERSION.SDK_INT < 32) stopLocked(current, RecordingStopReason.DisplayChanged)
+                if (Build.VERSION.SDK_INT < 32 || current.clickSession != null) stopLocked(current, RecordingStopReason.DisplayChanged)
                 // API32+ uniformly fits and centers changed content into the unchanged output.
                 // API34+ has authoritative capture-region callbacks; earlier metrics are NOT
                 // treated as the exact captured bounds or converted into hotspot coordinates.
@@ -335,11 +365,25 @@ object RecordingCoordinator {
     }
 
     private fun captureResized(sessionId: String, width: Int, height: Int) {
+        // Fence the main-thread dispatcher before this observation waits for the recording gate.
+        active?.takeIf { it.journal.sessionId == sessionId }?.clickSession?.let {
+            if (width != it.width || height != it.height) stopRequest = sessionId to RecordingStopReason.DisplayChanged
+        }
         serial {
             val current = active?.takeIf { it.journal.sessionId == sessionId && !it.stopping } ?: return@serial
             if (width <= 0 || height <= 0) {
                 stopLocked(current, RecordingStopReason.DisplayChanged)
                 return@serial
+            }
+            current.clickSession?.let {
+                if (width != it.width || height != it.height) {
+                    stopLocked(current, RecordingStopReason.DisplayChanged)
+                    return@serial
+                }
+                current.captureGeometryConfirmed = true
+                if (mutableState.value.phase == RecordingPhase.Recording) {
+                    mutableState.value = mutableState.value.copy(clickCaptureReady = true)
+                }
             }
             // Both the encoder Surface and VirtualDisplay retain the SAME dimensions. Changing
             // only one introduces another transform. API32+ documents fit/center letterboxing;
@@ -355,11 +399,13 @@ object RecordingCoordinator {
     }
 
     private fun requestStop(sessionId: String, reason: RecordingStopReason) {
+        stopRequest = sessionId to reason
         serial { active?.takeIf { it.journal.sessionId == sessionId }?.let { stopLocked(it, reason) } }
     }
 
     private suspend fun stopLocked(current: ActiveRecording, reason: RecordingStopReason) {
         if (active !== current || current.stopping) return
+        stopRequest = current.journal.sessionId to reason
         current.stopping = true
         current.journal = current.journal.copy(
             phase = JournalPhase.Stopping, elapsedMs = current.elapsedMs(), stopReason = reason,
@@ -543,7 +589,7 @@ object RecordingCoordinator {
     }
 
     private fun checkStartNotCancelled(sessionId: String) {
-        if (stopRequest?.first == sessionId) throw StartCancelledException()
+        if (stopRequest?.first == sessionId || (active?.clickSession?.sessionId == sessionId && !clickGate.permits(sessionId))) throw StartCancelledException()
     }
 
     private class StartCancelledException : Exception()
@@ -559,13 +605,16 @@ object RecordingCoordinator {
     private data class PendingGrant(
         val sessionId: String, val projectId: String, val sourceId: String,
         val resultCode: Int, val consentIntent: Intent,
+        val clickSession: RecordingClickSession? = null,
     )
 
     private class ActiveRecording(
         val service: RecordingService, val store: RecordingJournalStore,
         var journal: RecordingJournal, val canvas: RecordingCanvas,
         val maxDurationMs: Int, val maxBytes: Long,
+        val clickSession: RecordingClickSession? = null,
     ) {
+        var captureGeometryConfirmed = false
         var recorder: MediaRecorder? = null
         var projection: MediaProjection? = null
         var callback: MediaProjection.Callback? = null
