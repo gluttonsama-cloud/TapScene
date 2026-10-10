@@ -12,7 +12,9 @@ class OfflineShareProvider : FileProvider() {
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
         if (mode != "r") throw FileNotFoundException("分享副本仅可读取。")
-        return store().read(uri, verifyBytes = true) { super.openFile(uri, "r") }
+        return store().read(uri, verifyBytes = true) {
+            super.openFile(uri, "r") ?: throw FileNotFoundException("分享副本无法打开。")
+        }
     }
 
     override fun query(uri: Uri, projection: Array<out String>?, selection: String?,
