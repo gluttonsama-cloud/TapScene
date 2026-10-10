@@ -115,6 +115,7 @@ adb_owned=true
   > "$out/emulator.txt" 2>&1 &
 emulator_pid=$!
 export EMULATOR_PID="$emulator_pid"
+printf '%s boot: waiting for sys.boot_completed\n' "$(date -u +%FT%TZ)" >> "$out/runtime-stages.txt"
 bounded 900 bash -c '
   until "$ADB" -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d "\r" | grep -qx "1"; do
     kill -0 "$EMULATOR_PID" || exit 1
@@ -122,14 +123,27 @@ bounded 900 bash -c '
   done'
 kill -0 "$emulator_pid"
 device_owned=true
+printf '%s boot: complete and owned emulator PID confirmed\n' "$(date -u +%FT%TZ)" >> "$out/runtime-stages.txt"
 # Stream all buffers before installing or launching either package, including native crashes.
 "$ADB" -s "$serial" logcat -b all -v threadtime > "$out/logcat.txt" 2>&1 &
 logcat_pid=$!
 bounded 30 "$ADB" -s "$serial" shell getprop > "$out/device-properties.txt"
 bounded 30 "$ADB" -s "$serial" shell dumpsys SurfaceFlinger > "$out/surfaceflinger.txt"
-bounded 120 "$ADB" -s "$serial" install android/app/build/outputs/apk/debug/app-debug.apk
-bounded 120 "$ADB" -s "$serial" install -t android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-bounded 120 "$ADB" -s "$serial" install -t android/runtime-target/build/outputs/apk/debug/runtime-target-debug.apk
+# First-boot PackageInstaller validation on TCG exceeded 120 seconds in run 38061310417.
+# Only deployment gets extra time, inside the unchanged total runtime budget.
+printf '%s install: app (maximum 360 seconds)\n' "$(date -u +%FT%TZ)" >> "$out/runtime-stages.txt"
+stat -c '%n %s bytes' android/app/build/outputs/apk/debug/app-debug.apk > "$out/apk-sizes.txt"
+bounded 360 "$ADB" -s "$serial" install android/app/build/outputs/apk/debug/app-debug.apk \
+  2>&1 | tee "$out/install-app.txt"
+printf '%s install: harness (maximum 180 seconds)\n' "$(date -u +%FT%TZ)" >> "$out/runtime-stages.txt"
+stat -c '%n %s bytes' android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk >> "$out/apk-sizes.txt"
+bounded 180 "$ADB" -s "$serial" install -t android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk \
+  2>&1 | tee "$out/install-harness.txt"
+printf '%s install: synthetic target (maximum 120 seconds)\n' "$(date -u +%FT%TZ)" >> "$out/runtime-stages.txt"
+stat -c '%n %s bytes' android/runtime-target/build/outputs/apk/debug/runtime-target-debug.apk >> "$out/apk-sizes.txt"
+bounded 120 "$ADB" -s "$serial" install -t android/runtime-target/build/outputs/apk/debug/runtime-target-debug.apk \
+  2>&1 | tee "$out/install-target.txt"
+printf '%s instrumentation: dedicated EGL probe and click scenario\n' "$(date -u +%FT%TZ)" >> "$out/runtime-stages.txt"
 # No adb input business clicks, pm grant, appops, settings put, adb root, or test token reuse.
 bounded 480 "$ADB" -s "$serial" shell am instrument -w -e syntheticOnly true \
   "$app.test/com.tapscene.runtime.ClickRuntimeInstrumentation" \

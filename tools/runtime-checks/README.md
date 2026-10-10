@@ -32,10 +32,12 @@
 
 固定 480×800、160 dpi、2 个模拟 CPU、2560 MiB guest RAM；没有矩阵、并行 AVD 或自动重试。构建独立于模拟器运行，避免编译和软件图形同时抢内存。总体 job 最多 50 分钟；runtime 步骤 25 分钟，其中启动最多 900 秒，单 harness 最多 480 秒，全部运行命令共同受 22 分钟预算限制，余时留给诊断和清理。
 
+[第二次精确 CI](https://github.com/gluttonsama-cloud/TapScene/actions/runs/38061310417) 已真正启动 Android，日志为 `Boot completed in 427082 ms`。首个 APK 安装尚未完成即触及原 120 秒部署限额，未进入测试；保留的 logcat 显示 PackageInstaller 校验路径 `streamValidateAndCommit` 持锁 44.233 秒。该证据说明未完成和锁争用，不单独证明安装健康推进。部署限额因此调整为主 APK 360 秒、harness 180 秒、轻量目标 120 秒，仍共用原 22 分钟总预算。每个部署阶段保留 UTC 起始时间、APK 大小和 adb 输出；不跳过签名/包校验、不自动重试安装，也不延长任何产品运行时限。
+
 [首次精确 CI](https://github.com/gluttonsama-cloud/TapScene/actions/runs/38060445119) 已完成三个 APK 构建，但在模拟器加载阶段发现 `libpulse.so.0` 缺失，未启动 AVD。独立 lane 因此只从 [Ubuntu 官方仓库](https://packages.ubuntu.com/noble/libpulse0)安装 `libpulse0` 及其必要依赖，保存 `ldd` 诊断并用官方启动器的 `-version` 实际加载结果把关；裸 `ldd` 不代表启动器设置的内置库路径。`-no-audio` 不能免除 ELF 加载依赖。没有安装音频服务、全套桌面或新的模拟器版本。
 
 无论通过、断言失败还是进程崩溃，保留 7 天的 `android-runtime-smoke` artifact：准确提交/tree、SDK/构建日志、emulator 全日志、运行期全 buffer logcat、crash buffer、app exit-info、服务状态，以及由 `run-as` 只读取本次合成测试目录的 `app-evidence.tar`。它包含真实视频和测试断言，未包含 SDK/AVD 用户盘或 ADB 私钥。
 
 退出处理先取诊断，再停止测试 app、关闭模拟器/ADB，最后只删除本轮固定临时目录。超时不报告成功；只有专用 runner 完成全部断言的 `TAPSCENE_RUNTIME_SMOKE_OK` 才通过。GitHub 强制终止整机时无法保证退出钩子运行，runner 销毁仍会清除一次性设备；不能把缺失清理日志称作已核验清理。
 
-当前状态：首次精确 CI 的三个 APK 编译已通过；补齐启动库后的 Android 实际运行仍待验证。源码/构建通过不等于 runtime 通过，也不替代实体手机 120 秒静态录制、生命周期和 OEM 兼容检查。
+当前状态：三个 APK 编译和隔离 Android 启动已通过；安装准备后的 EGL 探针与生产场景仍待验证。源码/构建/启动通过不等于 runtime 通过，也不替代实体手机 120 秒静态录制、生命周期和 OEM 兼容检查。
