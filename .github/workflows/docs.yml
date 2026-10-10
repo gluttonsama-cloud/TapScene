@@ -167,10 +167,14 @@ jobs:
           retention-days: 7
           if-no-files-found: error
       - name: Set up Node for the independent trusted adapter
-        if: steps.scope.outputs.ai == 'true'
+        if: steps.scope.outputs.ai == 'true' || steps.scope.outputs.android == 'true'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '24.19.0'
+      - name: Prepare the independent trusted adapter
+        if: steps.scope.outputs.ai == 'true' || steps.scope.outputs.android == 'true'
+        working-directory: remotion-adapter
+        run: npm ci --ignore-scripts --no-fund --no-audit
       - name: Check AI data contracts and render actual synthetic videos
         if: steps.scope.outputs.ai == 'true'
         timeout-minutes: 15
@@ -180,7 +184,6 @@ jobs:
           grep -E '^TAPSCENE_AI_PACKAGE_CHECKS_PASSED: [1-9][0-9]* assertions/rejections;' "$RUNNER_TEMP/ai-package-checks.txt"
           sudo apt-get install --no-install-recommends --yes fonts-noto-cjk
           cd remotion-adapter
-          npm ci --ignore-scripts --no-fund --no-audit
           npm run check
           mkdir -p "$RUNNER_TEMP/ai-render"
           npm run render -- "$RUNNER_TEMP/ai-fixtures/synthetic-portrait.tapscene-ai" "$RUNNER_TEMP/ai-render/synthetic-portrait.mp4"
@@ -226,16 +229,19 @@ jobs:
       - name: Build the arm64 phone preview and run lint
         if: steps.scope.outputs.android == 'true'
         run: gradle -p android --no-daemon --max-workers=2 -PcompatibilityPreview=true -PtapsceneAbi=arm64-v8a :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
-      - name: Execute production Android data checks on host native SQLite
+      - name: Execute production Android data and static AI round-trip checks
         id: host_data
         if: steps.scope.outputs.android == 'true'
         timeout-minutes: 10
+        env:
+          TAPSCENE_AI_ROUNDTRIP_OUTPUT: ${{ runner.temp }}/ai-round-trip
         run: |
           set -o pipefail
           gradle -p android --no-daemon --max-workers=2 -PcompatibilityPreview=true -PtapsceneAbi=arm64-v8a \
             :app:testDebugUnitTest \
             --tests com.tapscene.data.ProjectStoreHostTest \
             --tests com.tapscene.ui.ProjectWorkspaceHostTest \
+            --tests com.tapscene.data.AiRoundTripHostTest \
             2>&1 | tee "$RUNNER_TEMP/host-data-checks.txt"
       - name: Verify the exact host checks executed without failures or skips
         if: always() && steps.host_data.outcome != 'skipped' && steps.scope.outputs.android == 'true'
@@ -254,6 +260,7 @@ jobs:
               ("com.tapscene.data.ProjectStoreHostTest", "rawPendingFormReopensAndStaleSessionIsRejected"): 1,
               ("com.tapscene.data.ProjectStoreHostTest", "saveIsAtomicAndPreservesTheOtherStep"): 1,
               ("com.tapscene.ui.ProjectWorkspaceHostTest", "cancellationAndDiscardDoNotReviveCommittedForms"): 1,
+              ("com.tapscene.data.AiRoundTripHostTest", "completeStaticPackageReturnsAsReviewedRelease"): 1,
           }
           actual = Counter()
           failures = errors = skipped = 0
@@ -269,7 +276,7 @@ jobs:
                   seconds += float(case.get("time", "0"))
               output.extend(node.text or "" for node in suite.iter("system-out"))
           summary = (f"HOST_DATA_EXECUTION tests={sum(actual.values())} failures={failures} errors={errors} "
-                     f"skipped={skipped} test_seconds={seconds:.3f}; expected=6 executions / 5 entry points / 2 classes")
+                     f"skipped={skipped} test_seconds={seconds:.3f}; expected=6 unchanged data executions + 1 static AI round trip / 6 entry points / 3 classes")
           print(summary)
           (Path(os.environ["RUNNER_TEMP"]) / "host-data-execution.txt").write_text(summary + "\n", encoding="utf-8")
           assert actual == Counter(expected), f"Missing/unexpected executed tests: {actual}"
@@ -280,8 +287,19 @@ jobs:
           assert "mode=NATIVE journal=truncate sync=2" in evidence
           for boundary in ("save-before-commit", "save-after-commit", "discard-before/after-commit", "owner/store recreation"):
               assert f"HOST_CANCEL {boundary}" in evidence, f"Missing cancellation boundary: {boundary}"
-          print("TAPSCENE_HOST_DATA_CHECKS_OK: production Android data code executed; device/media/power-loss checks remain separate")
+          assert "HOST_AI_ROUNDTRIP api=35 graphics=NATIVE sqlite=NATIVE" in evidence
+          assert "HOST_FILE_SYNC backend=Linux/JDK actualDirectorySyncs=" in evidence and "openDescriptors=0" in evidence
+          assert "PASS AI round trip video gate:" in evidence
+          print("TAPSCENE_HOST_DATA_CHECKS_OK: original six checks plus static native-PNG round trip executed; device/video/power-loss checks remain separate")
           PY_HOST
+      - name: Read the actual Android round-trip export with the independent TS reader
+        if: steps.scope.outputs.android == 'true'
+        run: |
+          cd remotion-adapter
+          npm exec --no -- tsc --noEmit
+          node --import tsx test/roundtrip.verify.ts "$RUNNER_TEMP/ai-round-trip" \
+            2>&1 | tee "$RUNNER_TEMP/ai-round-trip/ts-reader.txt"
+          grep -q '^TAPSCENE_AI_ROUNDTRIP_TS_OK:' "$RUNNER_TEMP/ai-round-trip/ts-reader.txt"
       - name: Keep host Android data execution reports
         if: always() && steps.host_data.outcome != 'skipped' && steps.scope.outputs.android == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -292,6 +310,7 @@ jobs:
             android/app/build/reports/tests/testDebugUnitTest/
             ${{ runner.temp }}/host-data-checks.txt
             ${{ runner.temp }}/host-data-execution.txt
+            ${{ runner.temp }}/ai-round-trip/
           retention-days: 7
           if-no-files-found: error
       - name: Inspect packaged OCR models, native dependencies, alignment and size

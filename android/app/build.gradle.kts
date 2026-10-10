@@ -58,7 +58,7 @@ android {
     sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("ocr/assets"))
     // Preserve the already stripped official runtime byte-for-byte for supply-chain checks.
     packaging { jniLibs.keepDebugSymbols += "**/libonnxruntime.so" }
-    // Only the two historical SQLite fixtures are shared; never import all androidTest checks.
+    // Share only explicit data/AI PNG checks; never import the instrumentation runner or all androidTest checks.
     sourceSets.getByName("test").java.srcDir("src/sharedTest/java")
     sourceSets.getByName("androidTest").java.srcDir("src/sharedTest/java")
     testOptions {
@@ -71,6 +71,8 @@ android {
                 "--add-opens=java.base/java.lang=ALL-UNNAMED",
                 "--add-opens=java.base/java.util=ALL-UNNAMED",
                 "--add-opens=java.base/java.io=ALL-UNNAMED",
+                // The one static-AI host check holds real file/directory FDs for fsync.
+                "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
                 "--add-opens=java.base/java.net=ALL-UNNAMED",
                 "--add-opens=java.base/java.security=ALL-UNNAMED",
                 "--add-opens=java.base/java.text=ALL-UNNAMED",
