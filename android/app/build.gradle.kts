@@ -24,8 +24,8 @@ android {
         applicationId = "com.tapscene"
         minSdk = 26
         targetSdk = 36
-        versionCode = 23
-        versionName = "0.18.0-step-copy-dev"
+        versionCode = 24
+        versionName = "0.19.0-project-copy-dev"
         testInstrumentationRunner = "com.tapscene.media.MediaCompatibilityInstrumentation"
         manifestPlaceholders["appLabel"] = "TapScene"
         ndk { abiFilters += packagedAbis }

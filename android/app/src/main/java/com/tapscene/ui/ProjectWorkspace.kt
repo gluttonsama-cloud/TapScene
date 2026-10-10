@@ -57,6 +57,9 @@ data class StepEditDraft(
 
 data class ProjectIssue(val stepId: String?, val message: String)
 
+/** A durable receipt is acknowledged only after the production screen has shown this result. */
+data class ProjectCopyNotice(val operationId: String, val message: String)
+
 data class PreviewTransition(
     val actionId: String,
     val edgeId: String,
@@ -99,6 +102,7 @@ data class ProjectUiState(
     val dirtyStepIds: Set<String> = emptySet(),
     val editorExitIssue: String? = null,
     val canUndoEdit: Boolean = false,
+    val projectCopyNotice: ProjectCopyNotice? = null,
     /** Also changes for unsaved text/geometry, invalidating an older preview immediately. */
     val editRevision: Long = 0,
 ) {
@@ -204,6 +208,99 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     fun renameProject(id: String, title: String) = execute("重命名项目", editing = true) {
         val renamed = withContext(Dispatchers.IO) { store.renameProject(id, title) }
         if (state.value.project?.project?.id == id) applyProject(renamed)
+    }
+
+    /** Copy the saved project only. Reading home-page drafts must never rebase or clear them. */
+    fun copySavedProject(sourceProjectId: String, blockedReason: String? = null) {
+        val current = state.value
+        if (current.busy || current.loadFailed) return
+        val source = current.project?.project?.takeIf { it.id == sourceProjectId }
+            ?: current.projects.firstOrNull { it.id == sourceProjectId } ?: return
+        fun hasLiveInput() = drafts.any { (key, record) -> key.first == sourceProjectId &&
+            (record.draft.dirty || record.draft.pendingForm != null || record.draft.conflicts.isNotEmpty()) }
+        val inputMessage = "请先打开原项目，保存或放弃所有步骤的修改（含面板输入），再复制"
+        var operationId: String? = null
+        mutableState.update { it.copy(projectCopyNotice = null) }
+        execute("复制已保存项目", editing = true, afterRefresh = {
+            operationId?.let { reconcileProjectCopy(it) }
+        }) {
+            draftWriteLock.withLock {
+                // Reconcile a prior commit even if the source has since acquired new input.
+                val previous = withContext(Dispatchers.IO) { store.pendingProjectCopy(sourceProjectId) }
+                if (previous?.status == "committed") {
+                    operationId = previous.operationId
+                    return@withLock
+                }
+                require(blockedReason == null) { blockedReason.orEmpty() }
+                require(!hasLiveInput()) { inputMessage }
+                val persisted = withContext(Dispatchers.IO) { store.readEditorDrafts(sourceProjectId) }
+                require(persisted.values.none { it.pendingForm != null || it.edit != it.base }) { inputMessage }
+                // Once begin writes its journal, retain its identity even if IO return is cancelled.
+                coroutineContext.ensureActive()
+                val attempt = withContext(NonCancellable) {
+                    withContext(Dispatchers.IO) { store.beginProjectCopy(sourceProjectId, source.revision) }
+                        .also { operationId = it.operationId }
+                }
+                coroutineContext.ensureActive()
+                if (attempt.status == "preparing") withContext(Dispatchers.IO) {
+                    store.copySavedProject(sourceProjectId, attempt.sourceRevision, attempt.operationId)
+                }
+            }
+        }
+    }
+
+    private suspend fun reconcileProjectCopy(operationId: String) {
+        try {
+            val receipt = withContext(Dispatchers.IO) { store.readProjectCopy(operationId) }
+            when (receipt?.status) {
+                "committed" -> {
+                    if (state.value.loadFailed) {
+                        message("项目已复制，结果尚未完整读取；请重新读取后，再点“复制项目”确认结果")
+                        return
+                    }
+                    val copied = withContext(Dispatchers.IO) { store.readProject(receipt.projectId) }
+                    val result = if (copied == null) {
+                        "副本已创建，但已被删除；本次重试不会重新创建" +
+                            if (receipt.missingRawSourceCount > 0) "；原项目缺失 ${receipt.missingRawSourceCount} 份原素材" else ""
+                    } else {
+                        clearEditorUndo()
+                        invalidatePreview()
+                        restoreDrafts(copied)
+                        applyProject(copied)
+                        mutableState.update { it.copy(route = ProjectRoute.STEPS, selectedStepId = null,
+                            stepDraft = null, bitmap = null) }
+                        "已复制并打开副本，交付前请重新复核" +
+                            if (receipt.missingRawSourceCount > 0) "；原项目缺失 ${receipt.missingRawSourceCount} 份原素材，已保存画面仍保留" else ""
+                    }
+                    mutableState.update { it.copy(message = result,
+                        projectCopyNotice = ProjectCopyNotice(operationId, result)) }
+                }
+                "aborted" -> message("复制未完成，原项目保持原样；可再次复制")
+                "preparing" -> message((state.value.message ?: "复制尚未完成") + "；再点“复制项目”可继续本次操作")
+                else -> message("无法确认复制结果；请重新读取后，再点“复制项目”重试")
+            }
+        } catch (_: Exception) {
+            // A read failure is not evidence of rollback. The store keeps this attempt for retry.
+            message("无法确认复制结果；请重新读取后，再点“复制项目”重试")
+        }
+    }
+
+    /** Called by the screen only after it has composed the authoritative copy result. */
+    fun acknowledgeProjectCopyResult(operationId: String) {
+        val notice = state.value.projectCopyNotice?.takeIf { it.operationId == operationId } ?: return
+        viewModelScope.launch {
+            operationLock.withLock {
+                if (state.value.projectCopyNotice?.operationId != operationId) return@withLock
+                try {
+                    withContext(Dispatchers.IO) { store.acknowledgeProjectCopy(operationId) }
+                    mutableState.update { if (it.projectCopyNotice?.operationId == operationId)
+                        it.copy(projectCopyNotice = null) else it }
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) {
+                    message("${notice.message}；结果确认未完成，再点“复制项目”可核对，勿重复新建")
+                }
+            }
+        }
     }
 
     /** The caller presents the deletion impact and gets explicit confirmation before this event. */
@@ -1086,7 +1183,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     fun message(value: String) { mutableState.update { it.copy(message = value) } }
     fun cancel() { task?.cancel() }
 
-    private fun execute(label: String, editing: Boolean = false, afterRefresh: (() -> Unit)? = null, block: suspend () -> Unit) {
+    private fun execute(label: String, editing: Boolean = false, afterRefresh: (suspend () -> Unit)? = null, block: suspend () -> Unit) {
         if (state.value.busy || (editing && state.value.loadFailed)) return
         mutableState.update { it.copy(busy = true, stage = label, message = null) }
         task = viewModelScope.launch {

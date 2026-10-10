@@ -251,6 +251,376 @@ class ProjectStore(context: Context) {
         }
     }
 
+    /** A pending result is returned before inspecting the source: a retry is not a new copy. */
+    fun beginProjectCopy(sourceProjectId: String, expectedRevision: Long): ProjectCopyReceipt = access { db -> transaction(db) {
+        validId(sourceProjectId)
+        pendingProjectCopy(db, sourceProjectId)?.let { return@transaction it }
+        requireProjectCopySource(db, sourceProjectId, expectedRevision)
+        val id = newId()
+        db.insertOrThrow("project_copy_operations", null, ContentValues().apply {
+            put("operation_id", id); put("source_project_id", sourceProjectId); put("source_revision", expectedRevision)
+            put("project_id", id); put("status", "preparing"); put("missing_raw_count", 0)
+            put("acknowledged", 0); put("created_at", System.currentTimeMillis())
+        })
+        requireNotNull(readProjectCopy(db, id))
+    } }
+
+    fun pendingProjectCopy(sourceProjectId: String): ProjectCopyReceipt? = access { db ->
+        validId(sourceProjectId); pendingProjectCopy(db, sourceProjectId)
+    }
+
+    private fun pendingProjectCopy(db: SQLiteDatabase, sourceProjectId: String): ProjectCopyReceipt? =
+        db.rawQuery("SELECT * FROM project_copy_operations WHERE source_project_id=? AND acknowledged=0 AND status!='aborted' ORDER BY created_at,operation_id LIMIT 1",
+            arrayOf(sourceProjectId)).use { if (it.moveToFirst()) projectCopyReceipt(it) else null }
+
+    fun readProjectCopy(operationId: String): ProjectCopyReceipt? = access { db ->
+        validId(operationId); readProjectCopy(db, operationId)
+    }
+
+    /** Only acknowledge after the result was presented. A failed acknowledgment is safely retried. */
+    fun acknowledgeProjectCopy(operationId: String) = access { db -> transaction(db) {
+        val receipt = readProjectCopy(db, operationId) ?: error("项目复制记录已不存在。")
+        check(receipt.status == "committed") { "项目复制结果尚未确定，请重试。" }
+        db.update("project_copy_operations", ContentValues().apply { put("acknowledged", 1) }, "operation_id=?", arrayOf(operationId))
+        Unit
+    } }
+
+    internal fun uncommittedCopyProjectIds(): Set<String> = access { db ->
+        db.rawQuery("SELECT project_id FROM project_copy_operations WHERE status!='committed'", null).use { cursor ->
+            buildSet { while (cursor.moveToNext()) add(cursor.getString(0)) }
+        }
+    }
+
+    private fun projectCopyReceipt(cursor: Cursor) = ProjectCopyReceipt(cursor.string("operation_id"),
+        cursor.string("source_project_id"), cursor.long("source_revision"), cursor.string("project_id"),
+        cursor.string("status"), cursor.int("missing_raw_count")).also {
+            validId(it.operationId); validId(it.sourceProjectId); validId(it.projectId)
+            check(it.projectId == it.operationId && it.sourceProjectId != it.projectId) { "项目复制归属记录不一致，请保留本机数据。" }
+        }
+
+    private fun readProjectCopy(db: SQLiteDatabase, id: String): ProjectCopyReceipt? =
+        db.rawQuery("SELECT * FROM project_copy_operations WHERE operation_id=?", arrayOf(id)).use {
+            if (it.moveToFirst()) projectCopyReceipt(it) else null
+        }
+
+    private fun requireProjectCopySource(db: SQLiteDatabase, id: String, revision: Long): ProjectSnapshot {
+        val saved = requireSnapshot(db, id)
+        check(saved.project.revision == revision) { "原项目已改变，请重新读取后复制。" }
+        db.rawQuery("SELECT draft_json FROM editor_drafts WHERE project_id=?", arrayOf(id)).use { rows ->
+            while (rows.moveToNext()) {
+                val draft = EditorDraftCodec.decode(rows.getString(0))
+                check(draft.base == draft.edit && draft.pendingForm == null) { "请先保存或放弃项目内所有步骤修改（含面板输入），再复制。" }
+            }
+        }
+        require(saved.steps.size <= ProjectLimits.MAX_STEPS && edgeCount(saved) <= ProjectLimits.MAX_EDGES &&
+            saved.steps.all { it.hotspots.size <= ProjectLimits.MAX_HOTSPOTS_PER_STEP && it.regions.size <= ProjectLimits.MAX_REGIONS_PER_STEP } &&
+            saved.steps.sumOf { it.regions.size } <= ProjectLimits.MAX_REGIONS) { "原项目的步骤、连线或区域超过复制限额。" }
+        require(transitions(saved).values.sumOf { it.asset.durationUs } <= ProjectLimits.MAX_TOTAL_TRANSITION_US) { "项目过渡累计超过 60 秒。" }
+        check(saved.steps.filter { it.evidenceKind == "imported" }.all { step ->
+            count(db, "package_step_origins", "project_id=? AND state_id=?", id, step.id) == 1
+        }) { "项目的外部包来源记录不完整。" }
+        return saved
+    }
+
+    private data class ProjectCopyCapture(val snapshot: ProjectSnapshot, val rows: Map<String, List<ContentValues>>,
+        val workspace: List<SourceDraft>, val videos: List<ImportedSource>, val images: List<ImportedImageSource>,
+        val configJson: String?, val configRevision: Long?, val configNeedsRepair: Boolean)
+    private data class ProjectCopyFile(val id: String, val kind: String, val source: File, val path: String,
+        val sha: String, val bytes: Long, val width: Int = 0, val height: Int = 0,
+        val masks: List<OpaqueMask> = emptyList(), val missing: Boolean = false)
+
+    private fun copyRows(db: SQLiteDatabase, table: String, projectId: String): List<ContentValues> {
+        check(table in PROJECT_COPY_TABLES)
+        return db.rawQuery("SELECT * FROM $table WHERE project_id=? ORDER BY rowid", arrayOf(projectId)).use { rows ->
+            buildList { while (rows.moveToNext()) add(ContentValues().apply {
+                rows.columnNames.forEachIndexed { index, name -> when (rows.getType(index)) {
+                    Cursor.FIELD_TYPE_NULL -> putNull(name)
+                    Cursor.FIELD_TYPE_INTEGER -> put(name, rows.getLong(index))
+                    Cursor.FIELD_TYPE_FLOAT -> put(name, rows.getDouble(index))
+                    Cursor.FIELD_TYPE_STRING -> put(name, rows.getString(index))
+                    else -> error("项目包含无法复制的字段。")
+                } }
+            }) }
+        }
+    }
+
+    /** Caller holds WorkspaceStore's lock before ProjectStore's lock (recording uses this order too). */
+    private fun captureProjectCopy(db: SQLiteDatabase, sourceId: String, revision: Long): ProjectCopyCapture {
+        val snapshot = requireProjectCopySource(db, sourceId, revision)
+        val rows = PROJECT_COPY_TABLES.associateWith { copyRows(db, it, sourceId) }
+        val workspace = WorkspaceStore(app, sourceId).read()
+        val videos = (rows.getValue("sources").map { parseSource(JSONObject(it.getAsString("source_json"))) } + workspace.map { it.source })
+            .groupBy { it.sourceId }.map { (_, values) -> check(values.distinct().size == 1) { "原录屏来源记录不一致。" }; values.first() }
+        val images = rows.getValue("image_sources").map { parseImageSource(JSONObject(it.getAsString("source_json"))) }
+        require(videos.size <= 3 && videos.all { it.metadata.byteLength in 1..200L * 1024 * 1024 &&
+            it.metadata.durationUs in 1..180_000_000L } && videos.sumOf { it.metadata.byteLength } <= 500L * 1024 * 1024 &&
+            videos.sumOf { it.metadata.durationUs } <= 300_000_000L && images.size <= ProjectLimits.MAX_SCREENSHOTS &&
+            images.all { it.metadata.byteLength in 1..10L * 1024 * 1024 }) { "原素材超过项目容量限制。" }
+        check(rows.getValue("states").size == snapshot.steps.size && rows.getValue("hotspots").size == snapshot.steps.sumOf { it.hotspots.size } &&
+            rows.getValue("edges").size == snapshot.steps.sumOf { it.hotspots.size } &&
+            rows.getValue("edge_transitions").size == transitions(snapshot).size) { "项目图或过渡记录不完整。" }
+        val config = readDraftAiConfig(db, sourceId)
+        return ProjectCopyCapture(snapshot, rows, workspace, videos, images, config?.let(DraftAiConfigCodec::encode), config?.boundRevision, config?.needsRepair ?: false)
+    }
+
+    /** Every graph/media identity is local to this operation, including unresolved historical IDs. */
+    private fun copiedId(operationId: String, domain: String, original: String): String =
+        UUID.nameUUIDFromBytes("tapscene-project-copy:$operationId:$domain:$original".toByteArray(Charsets.UTF_8)).toString()
+
+    /** Saved graph, media and COMMITTED receipt become visible together; files are prepared first.
+     * The exact file journal is durable before any new private bytes are created. */
+    suspend fun copySavedProject(sourceProjectId: String, expectedRevision: Long, operationId: String): ProjectCopyReceipt {
+        validId(sourceProjectId); validId(operationId)
+        val captured = WorkspaceStore.withProjectCopyLock { access { db ->
+            val receipt = readProjectCopy(db, operationId) ?: error("请重新开始项目复制。")
+            check(receipt.sourceProjectId == sourceProjectId && receipt.sourceRevision == expectedRevision) { "复制操作与原项目不一致。" }
+            if (receipt.status == "committed") return@access null
+            check(receipt.status == "preparing") { "这次复制已结束，请重新开始。" }
+            check(importKey(operationId) !in activeProjectCopies) { "项目正在复制，请稍候。" }
+            val value = try { captureProjectCopy(db, sourceProjectId, expectedRevision) }
+            catch (failure: Throwable) {
+                // A known source change invalidates this identity. Unreadable SQL is not evidence
+                // that an earlier commit failed; access/recovery must establish that first.
+                if (failure is IllegalStateException || failure is IllegalArgumentException) transaction(db) {
+                    db.update("project_copy_operations", ContentValues().apply { put("status", "aborted") }, "operation_id=? AND status='preparing'", arrayOf(operationId))
+                }
+                throw failure
+            }
+            activeProjectCopies.add(importKey(operationId)); value
+        } }
+        if (captured == null) return requireNotNull(readProjectCopy(operationId))
+        var failure: Throwable? = null
+        try {
+            fun id(domain: String, old: String) = copiedId(operationId, domain, old)
+            val snapshot = captured.snapshot
+            val stepsByAsset = snapshot.steps.associateBy { it.asset.id }
+            val files = captured.rows.getValue("local_assets").map { asset ->
+                val oldId = asset.getAsString("asset_id"); val newId = id("asset", oldId)
+                val originalPath = asset.getAsString("relative_path")
+                val extension = originalPath.substringAfterLast('.')
+                check(extension in setOf("png", "mp4"))
+                val bytes = asset.getAsLong("byte_length")
+                require(bytes in 1..MAX_PNG_BYTES && asset.getAsInteger("width") > 0 && asset.getAsInteger("height") > 0 &&
+                    asset.getAsInteger("width").toLong() * asset.getAsInteger("height") <= MAX_IMAGE_PIXELS) { "已保存媒体尺寸或容量无效。" }
+                ProjectCopyFile(newId, "asset_$extension", checkedAssetFile(sourceProjectId, originalPath), assetPath(operationId, newId, extension),
+                    asset.getAsString("sha256"), bytes, asset.getAsInteger("width"), asset.getAsInteger("height"), stepsByAsset[oldId]?.masks.orEmpty())
+            } + captured.videos.map { source ->
+                validId(source.sourceId); check(source.privateRelativePath == "sources/${source.sourceId}.mp4") { "原录屏路径无效。" }
+                val newId = id("video", source.sourceId); val original = checkedProjectCopyInput(source.privateRelativePath)
+                ProjectCopyFile(newId, "video", original, "sources/$newId.mp4", source.metadata.sha256, source.metadata.byteLength, missing = !original.exists())
+            } + captured.images.map { source ->
+                check(source.privateRelativePath == imageSourcePath(source.sourceId, source.metadata.mime)) { "原截图路径无效。" }
+                val newId = id("image", source.sourceId); val original = checkedProjectCopyInput(source.privateRelativePath)
+                ProjectCopyFile(newId, if (source.metadata.mime == "image/png") "image_png" else "image_jpeg", original,
+                    imageSourcePath(newId, source.metadata.mime), source.metadata.sha256, source.metadata.byteLength, missing = !original.exists())
+            }
+            check(files.map { it.path }.distinct().size == files.size)
+            require(root.usableSpace > files.filterNot { it.missing }.sumOf { it.bytes } + 8L * 1024 * 1024) { "本机空间不足，无法建立完整独立副本。" }
+            access { db -> transaction(db) {
+                check(count(db, "projects", "project_id=?", operationId) == 0) { "新项目身份已被占用。" }
+                check(count(db, "project_copy_files", "operation_id=?", operationId) == 0) { "上次复制清理未完成，请重试。" }
+                files.forEach { file ->
+                    check(!File(root, file.path).exists()) { "副本文件身份冲突，请保留本机数据。" }
+                    db.insertOrThrow("project_copy_files", null, ContentValues().apply {
+                        put("operation_id", operationId); put("file_id", file.id); put("kind", file.kind)
+                    })
+                }
+                check(listOf("", ".bak", ".new").none { File(root, "project-media-$operationId.json$it").exists() }) { "副本素材记录身份冲突。" }
+                db.update("project_copy_operations", ContentValues().apply { put("workspace_owned", 1) }, "operation_id=?", arrayOf(operationId))
+            } }
+            val stagingRoot = privateDirectory(File(root, "project-copy-staging"), root)
+            val staging = privateDirectory(File(stagingRoot, operationId), stagingRoot)
+            files.filterNot { it.missing }.forEach { file ->
+                currentCoroutineContext().ensureActive()
+                check(file.source.isFile && file.source.length() == file.bytes) { "已保存媒体缺失或改变；复制未完成，不会改用原片。" }
+                val output = File(staging, "${file.id}.part")
+                check(!output.exists()) { "复制暂存尚未清理，请重试。" }
+                var bytes = 0L
+                val digest = MessageDigest.getInstance("SHA-256")
+                file.source.inputStream().use { input -> FileOutputStream(output).use { sink ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val n = input.read(buffer); if (n < 0) break
+                        check(n > 0); bytes += n; check(bytes <= file.bytes) { "原文件在复制期间改变。" }
+                        digest.update(buffer, 0, n); sink.write(buffer, 0, n)
+                    }
+                    check(bytes == file.bytes && hex(digest.digest()) == file.sha) { "媒体副本摘要不一致，原项目保持不变。" }
+                    sink.fd.sync()
+                } }
+                if (file.kind == "asset_png") SafeMediaWriterValidation.verifyPng(output, file.width, file.height, file.masks)
+            }
+            val copiedVideos = captured.videos.associate { source -> source.sourceId to source.copy(
+                sourceId = id("video", source.sourceId), privateRelativePath = "sources/${id("video", source.sourceId)}.mp4") }
+            val copiedWorkspace = captured.workspace.map { it.copy(source = copiedVideos.getValue(it.source.sourceId)) } +
+                captured.videos.filter { source -> captured.workspace.none { it.source.sourceId == source.sourceId } }.map { SourceDraft(copiedVideos.getValue(it.sourceId)) }
+            currentCoroutineContext().ensureActive()
+            return withContext(NonCancellable) { WorkspaceStore.withProjectCopyLock { synchronized(lock) {
+                val db = database()
+                val receipt = requireNotNull(readProjectCopy(db, operationId))
+                if (receipt.status == "committed") return@synchronized receipt
+                check(receipt.status == "preparing") { "复制已取消。" }
+                check(captureProjectCopy(db, sourceProjectId, expectedRevision) == captured) { "原项目或素材已改变，请重新读取后复制。" }
+                check(count(db, "projects", "project_id=?", operationId) == 0) { "新项目身份已被占用。" }
+                files.filterNot { it.missing }.forEach { file ->
+                    val temporary = File(staging, "${file.id}.part")
+                    check(temporary.isFile && temporary.length() == file.bytes && sha256(temporary) == file.sha) { "复制暂存已改变，请重试。" }
+                    val target = projectCopyOutput(operationId, file.id, file.kind, createParent = true)
+                    check(!target.exists()) { "副本媒体身份冲突。" }
+                    Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE)
+                    syncDirectory(requireNotNull(target.parentFile))
+                }
+                // Workspace lock stays held through SQLite COMMIT: recording/deletion cannot
+                // change the source between our exact snapshot check and commit.
+                WorkspaceStore(app, operationId).write(copiedWorkspace)
+                transaction(db) {
+                    check(captureProjectCopy(db, sourceProjectId, expectedRevision) == captured) { "原项目已改变，复制未提交。" }
+                    installProjectCopy(db, captured, operationId)
+                    db.update("project_copy_operations", ContentValues().apply {
+                        put("status", "committed"); put("missing_raw_count", files.count { it.missing })
+                    }, "operation_id=? AND status='preparing'", arrayOf(operationId))
+                    requireNotNull(readProjectCopy(db, operationId))
+                }
+            } } }
+        } catch (error: Throwable) { failure = error; throw error }
+        finally {
+            val cleanup = synchronized(lock) {
+                activeProjectCopies.remove(importKey(operationId))
+                // Open a healthy connection and read the durable receipt first. Unknown commit
+                // outcome or close failure must preserve every file and its ownership journal.
+                runCatching { cleanupProjectCopy(database(), operationId) }.exceptionOrNull()
+            }
+            if (cleanup != null) failure?.addSuppressed(cleanup)
+        }
+    }
+
+    private fun installProjectCopy(db: SQLiteDatabase, captured: ProjectCopyCapture, operationId: String) {
+        fun id(domain: String, old: String) = copiedId(operationId, domain, old)
+        val sourceId = captured.snapshot.project.id
+        val now = System.currentTimeMillis()
+        db.insertOrThrow("projects", null, ContentValues().apply {
+            put("project_id", operationId); put("title", (captured.snapshot.project.title.take(117) + " 副本"))
+            put("goal", captured.snapshot.project.goal); put("created_at", now); put("updated_at", now); put("draft_revision", 1L)
+            put("start_state_id", captured.snapshot.project.startStepId?.let { id("state", it) })
+        })
+        captured.videos.forEach { source -> db.insertOrThrow("sources", null, ContentValues().apply {
+            val newId = id("video", source.sourceId)
+            put("project_id", operationId); put("source_id", newId)
+            put("source_json", sourceJson(source.copy(sourceId = newId, privateRelativePath = "sources/$newId.mp4")).toString())
+        }) }
+        captured.images.forEach { source -> db.insertOrThrow("image_sources", null, ContentValues().apply {
+            val newId = id("image", source.sourceId)
+            put("project_id", operationId); put("source_id", newId); put("mime", source.metadata.mime)
+            put("source_json", imageSourceJson(source.copy(sourceId = newId, privateRelativePath = imageSourcePath(newId, source.metadata.mime))).toString())
+        }) }
+        for (table in PROJECT_COPY_TABLES.filterNot { it in setOf("sources", "image_sources") }) {
+            captured.rows.getValue(table).forEach { original ->
+                val row = ContentValues(original)
+                fun remap(column: String, domain: String) { row.getAsString(column)?.let { row.put(column, id(domain, it)) } }
+                row.put("project_id", operationId)
+                when (table) {
+                    "local_assets" -> { remap("asset_id", "asset"); row.put("relative_path", assetPath(operationId, row.getAsString("asset_id"), original.getAsString("relative_path").substringAfterLast('.'))) }
+                    "states" -> {
+                        remap("state_id", "state"); remap("input_asset_id", "asset"); remap("source_id", "video"); remap("image_source_id", "image")
+                        remap("base_asset_id", "asset"); row.put("capture_id", "project-copy:$operationId:${row.getAsString("state_id")}")
+                        if (row.getAsString("base_asset_id") != null) row.put("base_revision", 1L)
+                    }
+                    "package_step_origins" -> remap("state_id", "state") // External identity/digest/import stay unchanged.
+                    "hotspots" -> { remap("hotspot_id", "hotspot"); remap("state_id", "state") }
+                    "edges" -> { remap("edge_id", "edge"); remap("hotspot_id", "hotspot"); remap("from_state_id", "state"); remap("to_state_id", "state") }
+                    "next_actions" -> { remap("action_id", "edge"); remap("from_state_id", "state"); remap("to_state_id", "state") }
+                    "edge_transitions" -> { remap("edge_id", "edge"); remap("asset_id", "asset"); remap("source_id", "video"); row.put("review_id", "project-copy:$operationId:${row.getAsString("edge_id")}") }
+                    "regions" -> { remap("region_id", "region"); remap("state_id", "state"); remap("base_asset_id", "asset"); remap("asset_id", "asset"); row.putNull("reviewed_at") }
+                }
+                db.insertOrThrow(table, null, row)
+            }
+        }
+        captured.configJson?.let { encoded ->
+            val old = DraftAiConfigCodec.decode(encoded, requireNotNull(captured.configRevision), captured.configNeedsRepair)
+            // The same domain map handles valid and dangling IDs. Dangling references cannot
+            // accidentally become references to a different existing object and are not dropped.
+            val config = old.copy(boundRevision = 1L, needsRepair = true,
+                visits = old.visits.map { visit -> com.tapscene.packageformat.RenderPlan.Visit(id("visit", visit.visitId), id("state", visit.stateId), visit.selectedEdgeId?.let { id("edge", it) }, visit.holdFrames) },
+                effects = old.effects.map { entry -> val effect = entry.value
+                    DraftAiEffect(id("effect", entry.id), com.tapscene.packageformat.RenderPlan.Effect(effect.type, id("visit", effect.visitId), effect.startFrame,
+                        effect.durationFrames, effect.hotspotId?.let { id("hotspot", it) }, effect.regionId?.let { id("region", it) }, effect.text, effect.rect))
+                })
+            writeDraftAiConfig(db, operationId, config)
+        }
+        val actual = requireSnapshot(db, operationId)
+        check(actual.steps.size == captured.snapshot.steps.size && actual.project.startStepId == captured.snapshot.project.startStepId?.let { id("state", it) })
+        check(count(db, "editor_drafts", "project_id=?", operationId) == 0)
+        check(requireSnapshot(db, sourceId) == captured.snapshot) { "原项目不能因复制改变。" }
+    }
+
+    private fun checkedProjectCopyInput(path: String): File = File(root, path).also { file ->
+        check(file.canonicalFile == file.absoluteFile && !Files.isSymbolicLink(file.toPath())) { "原素材路径无效。" }
+    }
+
+    private fun projectCopyOutput(operationId: String, id: String, kind: String, createParent: Boolean = false): File {
+        validId(operationId); validId(id)
+        val path = when (kind) {
+            "asset_png" -> assetPath(operationId, id)
+            "asset_mp4" -> assetPath(operationId, id, "mp4")
+            "video" -> "sources/$id.mp4"
+            "image_png" -> imageSourcePath(id, "image/png")
+            "image_jpeg" -> imageSourcePath(id, "image/jpeg")
+            else -> error("复制文件日志种类无效。")
+        }
+        val file = File(root, path)
+        check(file.canonicalFile == file.absoluteFile) { "复制文件路径无效。" }
+        if (createParent) when {
+            kind.startsWith("asset_") -> projectAssetDirectory(operationId)
+            kind == "video" -> privateDirectory(requireNotNull(file.parentFile), root)
+            else -> privateImageDirectory(id)
+        }
+        return file
+    }
+
+    /** Exact manifest only. No directory sweep and no cleanup based on an uncertain result. */
+    private fun cleanupProjectCopy(db: SQLiteDatabase, operationId: String) {
+        validId(operationId)
+        check(importKey(operationId) !in activeProjectCopies)
+        val receipt = readProjectCopy(db, operationId) ?: error("复制记录缺失，保留文件等待恢复。")
+        val committed = receipt.status == "committed"
+        if (!committed) check(count(db, "projects", "project_id=?", receipt.projectId) == 0) { "副本提交结果不一致，保留文件。" }
+        val files = db.rawQuery("SELECT file_id,kind FROM project_copy_files WHERE operation_id=?", arrayOf(operationId)).use { cursor ->
+            buildList { while (cursor.moveToNext()) add(cursor.getString(0) to cursor.getString(1)) }
+        }
+        val staging = File(root, "project-copy-staging/$operationId")
+        check(staging.canonicalFile == staging.absoluteFile)
+        files.forEach { (id, kind) ->
+            val output = projectCopyOutput(operationId, id, kind)
+            val part = File(staging, "$id.part"); check(part.canonicalFile == part.absoluteFile)
+            deleteImportFile(part)
+            if (!committed) {
+                check(count(db, "local_assets", "relative_path=?", output.relativeTo(root).path) == 0)
+                if (kind.startsWith("image_")) check(count(db, "image_sources", "source_id=?", id) == 0)
+                if (kind == "video") check(count(db, "sources", "source_id=?", id) == 0)
+                deleteImportFile(output)
+                if (kind.startsWith("image_") && output.parentFile?.isDirectory == true) {
+                    check(output.parentFile!!.delete()) { "副本原图目录清理未完成。" }
+                    syncDirectory(requireNotNull(output.parentFile!!.parentFile))
+                }
+            }
+        }
+        if (staging.exists()) { check(staging.isDirectory && staging.delete()); syncDirectory(requireNotNull(staging.parentFile)) }
+        val ownsWorkspace = db.rawQuery("SELECT workspace_owned FROM project_copy_operations WHERE operation_id=?", arrayOf(operationId)).use {
+            check(it.moveToFirst()); it.getInt(0) == 1
+        }
+        if (!committed && ownsWorkspace) {
+            // This reserved project was never exposed. These are its only possible AtomicFile names.
+            for (suffix in listOf("", ".bak", ".new")) {
+                val workspace = File(root, "project-media-$operationId.json$suffix")
+                check(workspace.canonicalFile == workspace.absoluteFile); deleteImportFile(workspace)
+            }
+        }
+        transaction(db) {
+            db.delete("project_copy_files", "operation_id=?", arrayOf(operationId))
+            db.update("project_copy_operations", ContentValues().apply { put("workspace_owned", 0) }, "operation_id=?", arrayOf(operationId))
+        }
+    }
+
     fun listProjects(): List<ProjectSummary> = access { db ->
         db.rawQuery("$SUMMARY_SQL ORDER BY p.updated_at DESC, p.project_id", null).use { cursor ->
             buildList { while (cursor.moveToNext()) add(summary(cursor)) }
@@ -1784,6 +2154,10 @@ class ProjectStore(context: Context) {
 
     /** Called only under the process-shared lock. Recovery is journal-driven, never a sweep. */
     private fun recoverImports(db: SQLiteDatabase) {
+        val copies = db.rawQuery("SELECT operation_id FROM project_copy_operations WHERE workspace_owned=1 OR EXISTS(SELECT 1 FROM project_copy_files f WHERE f.operation_id=project_copy_operations.operation_id)", null).use { cursor ->
+            buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
+        }
+        copies.filterNot { importKey(it) in activeProjectCopies }.forEach { runCatching { cleanupProjectCopy(db, it) } }
         runCatching {
             val imports = db.rawQuery("SELECT project_id,asset_id,'png' FROM asset_imports UNION ALL SELECT project_id,asset_id,'mp4' FROM transition_imports", null).use { cursor ->
                 buildList { while (cursor.moveToNext()) add(Triple(cursor.getString(0), cursor.getString(1), cursor.getString(2))) }
@@ -2129,7 +2503,7 @@ class ProjectStore(context: Context) {
     internal class Database(
         context: Context, path: String,
         private val migrationCheckpoint: ((String) -> Unit)? = null,
-    ) : SQLiteOpenHelper(context, path, null, 8) {
+    ) : SQLiteOpenHelper(context, path, null, 9) {
         override fun onConfigure(db: SQLiteDatabase) {
             // SQLiteOpenHelper calls this BEFORE its upgrade transaction. Changing a PRAGMA
             // inside onUpgrade is ineffective and dropping states would cascade child rows.
@@ -2190,6 +2564,7 @@ class ProjectStore(context: Context) {
             createTransitions(db)
             createRegions(db)
             createEditorDrafts(db)
+            createProjectCopies(db)
         }
 
         private fun createNextActions(db: SQLiteDatabase) {
@@ -2259,7 +2634,8 @@ class ProjectStore(context: Context) {
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            check(oldVersion in 1..7 && newVersion == 8 && foreignKeys(db) == 0) {
+            check((oldVersion in 1..7 && newVersion in 8..9 && foreignKeys(db) == 0) ||
+                (oldVersion == 8 && newVersion == 9 && foreignKeys(db) == 1)) {
                 "项目数据库需要安全迁移；请保留现有本机数据。"
             }
             if (oldVersion < 2) createNextActions(db)
@@ -2267,8 +2643,30 @@ class ProjectStore(context: Context) {
             if (oldVersion < 4) createRegions(db)
             if (oldVersion < 5) createEditorDrafts(db)
             if (oldVersion < 7) createImageSources(db)
-            createAiImportTables(db)
-            migrateOrigins(db, oldVersion)
+            if (oldVersion < 8) {
+                createAiImportTables(db)
+                migrateOrigins(db, oldVersion)
+            }
+            if (newVersion >= 9) createProjectCopies(db)
+        }
+
+        private fun createProjectCopies(db: SQLiteDatabase) {
+            // No project FK: receipts must survive deletion and prevent retry resurrection.
+            db.execSQL("""CREATE TABLE project_copy_operations (
+                operation_id TEXT PRIMARY KEY NOT NULL, source_project_id TEXT NOT NULL,
+                source_revision INTEGER NOT NULL CHECK(source_revision>0), project_id TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL CHECK(status IN ('preparing','committed','aborted')),
+                missing_raw_count INTEGER NOT NULL DEFAULT 0 CHECK(missing_raw_count>=0),
+                acknowledged INTEGER NOT NULL DEFAULT 0 CHECK(acknowledged IN (0,1)), created_at INTEGER NOT NULL,
+                workspace_owned INTEGER NOT NULL DEFAULT 0 CHECK(workspace_owned IN (0,1)),
+                CHECK(acknowledged=0 OR status='committed'), CHECK(project_id=operation_id AND source_project_id!=project_id)
+            )""")
+            db.execSQL("""CREATE TABLE project_copy_files (
+                operation_id TEXT NOT NULL, file_id TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('asset_png','asset_mp4','video','image_png','image_jpeg')),
+                PRIMARY KEY(operation_id,file_id), UNIQUE(file_id),
+                FOREIGN KEY(operation_id) REFERENCES project_copy_operations(operation_id)
+            )""")
         }
 
         private fun createImageSources(db: SQLiteDatabase) {
@@ -2461,6 +2859,8 @@ class ProjectStore(context: Context) {
         private val lock = Any()
         /** Guarded by lock; shared across every store using the same app-private root. */
         private val activeImports = mutableSetOf<String>()
+        private val activeProjectCopies = mutableSetOf<String>()
+        private val PROJECT_COPY_TABLES = listOf("sources", "image_sources", "local_assets", "package_step_origins", "states", "hotspots", "edges", "next_actions", "edge_transitions", "regions")
         private val PNG_SIGNATURE = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10)
         private val SHA = Regex("[0-9a-fA-F]{64}")
         private const val MAX_PNG_BYTES = 50L * 1024 * 1024

@@ -208,15 +208,19 @@ class WorkspaceStore(context: Context, projectId: String? = null) {
     companion object {
         private val lock = Any()
 
+        /** Recording registration already uses Workspace → Project; copying follows that order. */
+        internal fun <T> withProjectCopyLock(action: () -> T): T = synchronized(lock) { action() }
+
         /** Reuse existing records after project deletion; no new archive or duplicate media. */
         fun retainedWorkspaces(context: Context, liveProjectIds: Set<String>): List<RetainedMediaWorkspace> = synchronized(lock) {
             val root = context.noBackupFilesDir
+            val reservedCopies = ProjectStore.withTemporary(context) { it.uncommittedCopyProjectIds() }
             val result = mutableListOf<RetainedMediaWorkspace>()
             val legacy = runCatching { WorkspaceStore(context).read() }.getOrNull()
             result += RetainedMediaWorkspace(null, "原素材工作台", legacy?.size ?: 0)
             val pattern = Regex("project-media-([0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12})\\.json(?:\\.bak|\\.new)?")
             val ids = root.listFiles().orEmpty().mapNotNull { pattern.matchEntire(it.name)?.groupValues?.get(1) }
-                .distinct().filterNot { it in liveProjectIds }.sorted()
+                .distinct().filterNot { it in liveProjectIds || it in reservedCopies }.sorted()
             ids.forEach { id ->
                 val drafts = runCatching { WorkspaceStore(context, id).read() }.getOrNull()
                 if (drafts == null) result += RetainedMediaWorkspace(id, "保留素材（记录待恢复）", 0)

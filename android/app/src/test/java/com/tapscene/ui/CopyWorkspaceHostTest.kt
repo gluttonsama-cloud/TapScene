@@ -171,6 +171,114 @@ class CopyWorkspaceHostTest {
         }
     }
 
+    @Test fun projectCopyBlocksAllDraftsAndReconcilesDurableResult() = runBlocking {
+        check(Looper.myLooper() != Looper.getMainLooper())
+        withTimeout(120_000) {
+            HostProjectFixture().use { fixture ->
+                HostFileSyncShadow.begin(fixture.root)
+                materializeSafeImages(fixture)
+                val original = fixture.snapshot()
+                val p = fixture.project
+                var owner = ViewModelStore()
+                var workspace = newWorkspace(fixture, owner)
+                var sortColumnHidden = false
+                try {
+                    command(workspace) { openProject(p) }
+                    command(workspace) { openStep(fixture.b) }
+                    main { workspace.editDescription("Unsaved input on a different source step") }
+                    settled(workspace)
+                    val typed = fixture.store.readEditorDrafts(p)
+                    command(workspace) { copySavedProject(p) }
+                    check(fixture.store.listProjects().size == 1 && fixture.snapshot() == original)
+                    check(fixture.store.readEditorDrafts(p) == typed)
+                    check(workspace.state.value.message.orEmpty().contains("所有步骤"))
+                    command(workspace) { discardStepDraft() }
+                    command(workspace) { openStep(fixture.a) }
+                    val pending = EditorPendingForm(EditorFormKind.HOTSPOT, objectId = fixture.id(), edgeId = fixture.id(),
+                        label = "Keep this restored panel", left = "-", top = "invalid", targetStepId = fixture.b)
+                    main { workspace.editPendingForm(p, fixture.a, pending) }
+                    settled(workspace)
+                    val staged = fixture.store.readEditorDrafts(p)
+                    clearWorkspace(fixture, owner, workspace)
+                    owner = ViewModelStore()
+                    workspace = newWorkspace(fixture, owner)
+                    check(workspace.state.value.route == ProjectRoute.PROJECTS && workspace.state.value.project == null)
+                    command(workspace) { copySavedProject(p) }
+                    check(fixture.store.listProjects().size == 1 && fixture.snapshot() == original)
+                    check(fixture.store.readEditorDrafts(p) == staged) { "Home copy changed restored source input" }
+                    check(workspace.state.value.project == null) { "Checking home drafts unexpectedly opened the source" }
+                    check(workspace.state.value.message.orEmpty().contains("所有步骤"))
+                    command(workspace) { openProject(p) }
+                    command(workspace) { openStep(fixture.a) }
+                    check(workspace.state.value.stepDraft!!.pendingForm == pending)
+                    command(workspace) { discardStepDraft() }
+
+                    // A draft belonging to another project must survive copying this source unchanged.
+                    val otherAttempt = fixture.store.beginProjectCopy(p, original.project.revision)
+                    val otherReceipt = fixture.store.copySavedProject(p, original.project.revision, otherAttempt.operationId)
+                    fixture.store.acknowledgeProjectCopy(otherReceipt.operationId)
+                    val other = checkNotNull(fixture.store.readProject(otherReceipt.projectId))
+                    command(workspace) { openProject(other.project.id) }
+                    command(workspace) { openStep(other.steps.first().id) }
+                    main { workspace.editDescription("Keep another project's independent draft") }
+                    settled(workspace)
+                    val otherDrafts = fixture.store.readEditorDrafts(other.project.id)
+                    command(workspace) { leaveEditor() }
+                    command(workspace) { back() }
+                    val existingIds = fixture.store.listProjects().map { it.id }.toSet()
+
+                    // Commit for real, cancel the caller, and make its authoritative refresh fail.
+                    // Recreating the ViewModel must still find the original durable operation.
+                    cancelAfterCommit(workspace, { copySavedProject(p); copySavedProject(p) }, afterCommit = {
+                        fixture.database { execSQL("ALTER TABLE projects RENAME COLUMN updated_at TO project_copy_test_updated_at") }
+                        sortColumnHidden = true
+                        val failure = runCatching { fixture.store.listProjects() }.exceptionOrNull()
+                        check(failure is SQLiteException && failure.message.orEmpty().contains("updated_at"))
+                    }) { fixture.store.listProjects().size == existingIds.size + 1 }
+                    check(workspace.state.value.loadFailed)
+                    check(workspace.state.value.projectCopyNotice == null) { "Unreadable result became acknowledged UI state" }
+                    fixture.database { execSQL("ALTER TABLE projects RENAME COLUMN project_copy_test_updated_at TO updated_at") }
+                    sortColumnHidden = false
+                    val copiedId = fixture.store.listProjects().single { it.id !in existingIds }.id
+                    // Source edits after commit must not prevent recovery of that earlier result.
+                    val interveningDraft = fixture.draft(fixture.b, "New source input after the copy committed")
+                    val interveningSession = fixture.store.beginEditorDraftSession(p)
+                    check(fixture.store.writeEditorDraft(p, fixture.b, interveningSession, interveningDraft))
+                    clearWorkspace(fixture, owner, workspace)
+                    owner = ViewModelStore()
+                    workspace = newWorkspace(fixture, owner)
+                    command(workspace) { copySavedProject(p) }
+                    val notice = checkNotNull(workspace.state.value.projectCopyNotice)
+                    check(workspace.state.value.project?.project?.id == copiedId)
+                    check(workspace.state.value.message.orEmpty().contains("重新复核"))
+                    check(fixture.store.listProjects().map { it.id }.toSet() == existingIds + copiedId)
+                    command(workspace) { copySavedProject(p) }
+                    check(workspace.state.value.projectCopyNotice?.operationId == notice.operationId)
+                    check(fixture.store.listProjects().size == existingIds.size + 1)
+                    check(fixture.snapshot() == original && fixture.store.readEditorDrafts(p) == mapOf(fixture.b to interveningDraft))
+                    check(fixture.store.readEditorDrafts(other.project.id) == otherDrafts)
+
+                    fixture.store.deleteProject(copiedId)
+                    command(workspace) { copySavedProject(p) }
+                    check(fixture.store.listProjects().map { it.id }.toSet() == existingIds)
+                    check(workspace.state.value.message.orEmpty().contains("已被删除"))
+                    check(workspace.state.value.projectCopyNotice?.operationId == notice.operationId)
+                    main { workspace.acknowledgeProjectCopyResult(notice.operationId) }
+                    withTimeout(10_000) { workspace.state.first { it.projectCopyNotice == null } }
+                    check(fixture.store.readEditorDrafts(other.project.id) == otherDrafts)
+                    check(fixture.snapshot() == original)
+                    check(fixture.store.readEditorDrafts(p) == mapOf(fixture.b to interveningDraft))
+                    println("HOST_PROJECT_COPY_WORKSPACE all-source-input/home-restored-panel=blocked other-project-draft=unchanged commit-read-failure/reopen=one-copy deleted-copy=no-resurrection receipt-ack=after-report")
+                } finally {
+                    if (sortColumnHidden) fixture.database {
+                        execSQL("ALTER TABLE projects RENAME COLUMN project_copy_test_updated_at TO updated_at")
+                    }
+                    clearWorkspace(fixture, owner, workspace)
+                }
+            }
+        }
+    }
+
     private fun materializeSafeImages(fixture: HostProjectFixture) {
         val bitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLUE) }
         val bytes = try { ByteArrayOutputStream().use { output ->
