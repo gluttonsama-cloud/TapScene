@@ -131,7 +131,7 @@ class AndroidKeystoreSessionVault(context: Context) : SessionVault {
         private val lock = Any()
         private fun aad(file: File) = "tapscene-session-v1:${HostedApi.ENDPOINT}:${file.name}".toByteArray(Charsets.US_ASCII)
         internal fun syncDirectory(directory: File) {
-            val descriptor = Os.open(directory.absolutePath, OsConstants.O_RDONLY or OsConstants.O_DIRECTORY or OsConstants.O_NOFOLLOW, 0)
+            val descriptor = Os.open(directory.absolutePath, OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW, 0)
             try { check(OsConstants.S_ISDIR(Os.fstat(descriptor).st_mode)); Os.fsync(descriptor) }
             finally { Os.close(descriptor) }
         }
