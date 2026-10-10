@@ -572,7 +572,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     fun shareChooserLaunched() {
-        message("已打开系统分享，请在所选应用中确认；返回不代表已发送。")
+        message("已打开系统分享，是否发送以所选应用为准；返回不代表已发送。")
     }
 
     fun finishShareChooser(failed: Boolean = false) {
