@@ -71,6 +71,7 @@ fun ProjectHomeContent(
     onRenameProject: (ProjectSummary) -> Unit,
     onDeleteProject: (ProjectSummary) -> Unit,
     modifier: Modifier = Modifier,
+    onCopyProject: (String) -> Unit = {},
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     val visibleProjects = remember(state.projects, query) {
@@ -121,6 +122,7 @@ fun ProjectHomeContent(
                 enabled = !state.busy && !state.loadFailed,
                 onOpen = { onOpenProject(project.id) },
                 onRename = { onRenameProject(project) },
+                onCopy = { onCopyProject(project.id) },
                 onDelete = { onDeleteProject(project) },
             )
         }
@@ -139,6 +141,7 @@ private fun ProjectRow(
     enabled: Boolean,
     onOpen: () -> Unit,
     onRename: () -> Unit,
+    onCopy: () -> Unit,
     onDelete: () -> Unit,
 ) {
     var menuOpen by rememberSaveable(project.id) { mutableStateOf(false) }
@@ -169,16 +172,26 @@ private fun ProjectRow(
             Box {
                 MoreButton("${project.title}，项目更多操作", enabled) { menuOpen = true }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    DropdownMenuItem(text = { Text("重命名") }, onClick = { menuOpen = false; onRename() },
-                        enabled = enabled, modifier = Modifier.heightIn(min = 48.dp))
-                    DropdownMenuItem(text = { Text("删除本机项目", color = MaterialTheme.colorScheme.error) },
-                        onClick = { menuOpen = false; onDelete() }, enabled = enabled,
-                        modifier = Modifier.heightIn(min = 48.dp))
+                    ProjectActionsMenuContent(enabled,
+                        onRename = { menuOpen = false; onRename() },
+                        onCopy = { menuOpen = false; onCopy() },
+                        onDelete = { menuOpen = false; onDelete() })
                 }
             }
         }
         HorizontalDivider(Modifier.padding(top = 12.dp), color = MaterialTheme.colorScheme.outlineVariant)
     }
+}
+
+/** Production project menu, also exercised by the small-screen Layoutlib previews. */
+@Composable
+internal fun ProjectActionsMenuContent(enabled: Boolean, onRename: () -> Unit, onCopy: () -> Unit, onDelete: () -> Unit) {
+    DropdownMenuItem(text = { Text("重命名") }, onClick = onRename,
+        enabled = enabled, modifier = Modifier.heightIn(min = 48.dp))
+    DropdownMenuItem(text = { Text("复制项目") }, onClick = onCopy,
+        enabled = enabled, modifier = Modifier.heightIn(min = 48.dp))
+    DropdownMenuItem(text = { Text("删除本机项目", color = MaterialTheme.colorScheme.error) },
+        onClick = onDelete, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp))
 }
 
 /** Never resolves source paths. [stepThumbnail] may only return the step's derived PNG. */

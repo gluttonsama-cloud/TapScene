@@ -91,6 +91,23 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     var exportPickerPending by rememberSaveable { mutableStateOf(false) }
     val projectId = state.project?.project?.id
     val unavailable = state.busy || state.loadFailed || candidateState.busy || releaseState.busy || screenshotPickerPending || aiPickerPending || aiImportState.busy || draftAiState.busy
+    val copyProject: (String) -> Unit = { id ->
+        if (!unavailable && !mediaState.busy) {
+            val blockedReason = when {
+                draftAiState.project?.project?.id == id && (draftAiState.dirty || draftAiState.pendingPath != null || draftAiState.saveOutcomeUnknown) ->
+                    "请先处理原项目未保存的动画计划，再复制"
+                screenshotState.targetProjectId == id && screenshotState.sessionId != null && screenshotState.completed == null ->
+                    "请先保存或放弃原项目正在编辑的截图，再复制"
+                media.projectId == id && (mediaState.unsavedEdits || mediaState.correction != null) ->
+                    "请先处理原项目未保存的画面修改，再复制"
+                recording.projectId == id && (recording.isBusy || recording.canRetry) ->
+                    "请先停止或处理原项目的未完成录制，再复制"
+                else -> null
+            }
+            tab = ProjectTab.STEPS
+            projects.copySavedProject(id, blockedReason)
+        }
+    }
     val openReleaseReview: () -> Unit = {
         if (!releaseState.busy) { reviewCandidateId = null; push("review") }
     }
@@ -463,6 +480,15 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                             Text(it, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = ShellColors.Accent)
                             TextButton(onClick = { projects.clearMessage(); media.clearMessage() }) { Text("关闭") }
                         }
+                        state.projectCopyNotice?.takeIf { notice -> notice.message == it }?.let { notice ->
+                            LaunchedEffect(notice.operationId, state.busy) {
+                                if (!state.busy) {
+                                    pages.clear()
+                                    library = false
+                                    projects.acknowledgeProjectCopyResult(notice.operationId)
+                                }
+                            }
+                        }
                     }
                     if (state.loadFailed) Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("项目暂时无法读取，已保存内容仍保留。", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
@@ -753,7 +779,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                             GlobalNavigation(true, { library = false }, {})
                         }
                         else -> ProjectHomeFrame({ push("record") }, requestImport, { push("settings") }, { library = true; releases.reloadLibrary() }, onImportScreenshot = requestScreenshot, onImportAi = openAiImport) {
-                            ProjectHomeContent(state, { tab = ProjectTab.STEPS; projects.openProject(it) }, { renaming = it }, { deletingProject = it })
+                            ProjectHomeContent(state, { tab = ProjectTab.STEPS; projects.openProject(it) }, { renaming = it },
+                                { deletingProject = it }, onCopyProject = copyProject)
                         }
                     }
                 }
@@ -823,6 +850,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
             if (projectMore) AlertDialog(onDismissRequest = { projectMore = false }, title = { Text("项目") }, text = {
                 Column {
                     ShellActionRow("重命名", onClick = { projectMore = false; renaming = state.project?.project })
+                    ShellActionRow("复制项目", "复制已保存内容，独立编辑", enabled = !unavailable && !mediaState.busy,
+                        onClick = { projectMore = false; state.project?.project?.id?.let(copyProject) })
                     ShellActionRow("动画计划", "保留并编辑完整访问与效果", onClick = { projectMore = false; openDraftAi() })
                     ShellActionRow("任务详情", onClick = { projectMore = false; push("task") })
                     ShellActionRow("托管版本", onClick = { projectMore = false; push("versions") })

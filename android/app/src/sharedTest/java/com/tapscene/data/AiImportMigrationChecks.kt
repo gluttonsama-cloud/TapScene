@@ -56,7 +56,7 @@ internal object AiImportMigrationChecks {
                 verifyMigration(context, file, before, verifyDatabase)
             }
         }
-        status("PASS Android SQLite v1–v7-to-v8 exact typed fields, graph, image sources, drafts and journals; all five migration rollback points and successful retry")
+        status("PASS Android SQLite v1–v7-to-v9 exact typed fields, graph, image sources, drafts and journals; all five migration rollback points and successful retry")
     }
 
     fun rejectInvalidSchemasAndRelations(context: Context, status: (String) -> Unit,
@@ -181,7 +181,7 @@ internal object AiImportMigrationChecks {
         try {
             val db = helper.writableDatabase
             verifyDatabase(db)
-            check(db.version == 8)
+            check(db.version == 9)
             for ((table, expected) in before.tables) check(rows(db, table, expected.columns) == expected.rows) { "Migration altered $table" }
             check(scalar(db, "PRAGMA foreign_keys") == 1L)
             db.rawQuery("PRAGMA foreign_key_check", null).use { check(!it.moveToFirst()) }

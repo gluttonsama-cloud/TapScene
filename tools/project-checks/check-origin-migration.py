@@ -24,7 +24,7 @@ assert image_tables == v7_images, 'Shipped v7 image DDL changed; preserve its fr
 ai_tables = [sql for sql in re.findall(r'db.execSQL\("""(CREATE TABLE.*?)"""\)', source, re.S) if sql.startswith(('CREATE TABLE package_step_origins ', 'CREATE TABLE ai_import_sessions ', 'CREATE TABLE draft_ai_configs '))]
 assert len(ai_tables) == 3
 assert 'db.setForeignKeyConstraintsEnabled(db.version !in 1..7)' in source
-assert 'oldVersion in 1..7 && newVersion == 8 && foreignKeys(db) == 0' in source
+assert 'oldVersion in 1..7 && newVersion in 8..9 && foreignKeys(db) == 0' in source
 
 def introduced(sql):
     if 'editor_draft' in sql: return 5
@@ -300,3 +300,25 @@ for reverse in (False,True):
 print('PASS v8 deferred circular provenance FK, both insertion orders, orphan/mismatch/mixed-source rejection, imported evidence and retained history')
 print('PASS v8 durable import receipts, unique project reservation, ready/commit completeness, UTF-8 JSON limits and config/provenance cascades')
 print('NOT_RUN Android SQLiteOpenHelper connection-pool/lifecycle and device migration; host SQLite '+sqlite3.sqlite_version)
+
+# v9 is additive: exact v8 rows/schema remain; operation receipts outlive either project.
+copy_tables = [sql for sql in re.findall(r'db.execSQL\("""(CREATE TABLE.*?)"""\)', source, re.S)
+               if sql.startswith(('CREATE TABLE project_copy_operations ', 'CREATE TABLE project_copy_files '))]
+assert len(copy_tables) == 2
+db = fixture(7)
+db.execute('PRAGMA foreign_keys=OFF'); db.execute('BEGIN EXCLUSIVE'); migrate(db, 7); db.commit()
+db.execute('PRAGMA foreign_keys=ON')
+before_rows, before_schema, _ = snapshot(db)
+for sql in copy_tables: db.execute(sql)
+db.execute('PRAGMA user_version=9')
+assert before_rows == {name: typed_rows(db, name) for name in before_rows}
+assert set(before_schema).issubset(set(snapshot(db)[1]))
+db.execute("INSERT INTO project_copy_operations(operation_id,source_project_id,source_revision,project_id,status,created_at) VALUES('copy','p',9,'copy','preparing',1)")
+db.execute("INSERT INTO project_copy_files VALUES('copy','independent-file','asset_png')")
+db.execute("UPDATE projects SET start_state_id=NULL WHERE project_id='p'")
+db.execute("DELETE FROM projects WHERE project_id='p'"); db.commit()
+assert db.execute('SELECT source_project_id,project_id,status,workspace_owned FROM project_copy_operations').fetchall() == [('p','copy','preparing',0)]
+assert db.execute('SELECT COUNT(*) FROM project_copy_files').fetchone() == (1,)
+assert not list(db.execute('PRAGMA foreign_key_check'))
+db.close()
+print('PASS v8->v9 additive exact rows/schema, durable independent copy receipt and file ownership journal')
