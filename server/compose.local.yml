@@ -1,0 +1,19 @@
+# Synthetic local development only; never expose this credential or port publicly.
+services:
+  postgres:
+    image: postgres:17.11
+    environment:
+      POSTGRES_USER: tapscene
+      POSTGRES_PASSWORD: tapscene-local-only
+      POSTGRES_DB: tapscene
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - tapscene-local-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tapscene -d tapscene"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+volumes:
+  tapscene-local-db:

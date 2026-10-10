@@ -10,3 +10,9 @@
 store.pass
 **/__pycache__/
 android/app/src/androidTest/assets/*.mp4
+
+# Local hosted development data and generated web output
+node_modules/
+**/dist/
+**/.local-data/
+**/playwright-results/

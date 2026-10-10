@@ -1,0 +1,28 @@
+{
+  "name": "@tapscene/server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "start": "node --import tsx src/main.ts",
+    "migrate": "node --import tsx src/migrate.ts",
+    "fixture": "node --import tsx scripts/fixture.ts",
+    "test:browser": "node --import tsx test/browser-hosted.ts"
+  },
+  "dependencies": {
+    "@tapscene/runtime-ts": "0.1.0",
+    "fastify": "5.12.5",
+    "pg": "8.23.1",
+    "pngjs": "7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "@types/pg": "8.23.1",
+    "@types/pngjs": "6.0.5",
+    "playwright": "1.56.1",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "tapscene-hosted-workspace",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "workspaces": [
+    "runtime-ts",
+    "server",
+    "web-player"
+  ],
+  "scripts": {
+    "check:hosted": "npm run check -w runtime-ts && npm run check -w server && npm run check -w web-player",
+    "build:viewer": "npm run build -w web-player",
+    "start:hosted": "npm run start -w server",
+    "migrate:hosted": "npm run migrate -w server",
+    "fixture:hosted": "npm run fixture -w server",
+    "test:hosted": "npm run test -w runtime-ts && npm run test -w server && npm run check -w web-player"
+  }
+}
