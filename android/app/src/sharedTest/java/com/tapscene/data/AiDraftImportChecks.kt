@@ -205,6 +205,27 @@ object AiDraftImportChecks {
         check(ViewerPackageCodec.writeScene(readBack.scene).contentEquals(ViewerPackageCodec.writeScene(sealedScene)))
         unchanged()
         status("PASS AI round trip: synthetic local review required, new release sealed, exact full graph/regions/visits/effects preserved, rebound exported package read by Java")
+        if (output != null) {
+            rejected { releases.prepareOfflineShare(sealed.id, "0".repeat(64)) }
+            val shared = releases.prepareOfflineShare(sealed.id, sealed.contentDigest)
+            val sharedFile = File(File(File(context.cacheDir, "offline-shares"), shared.token), "TapScene-offline.tapscene")
+            val sharedRoot = File(context.cacheDir, "shared-package-check").apply { check(mkdir()) }
+            val sharedPackage = ViewerPackageCodec.readPackage(sharedFile, sharedRoot, {}, null)
+            check(sharedPackage.contentDigest == sealed.contentDigest)
+            check(ViewerPackageCodec.writeScene(sharedPackage.scene).contentEquals(ViewerPackageCodec.writeScene(sealedScene)))
+            AiDraftImportFixtures.isolated(context, "share-import-gate") { importedContext ->
+                val importedStore = ReleaseStore(importedContext)
+                val external = sharedFile.inputStream().use { importedStore.importPackage(it) }
+                check(external.origin == "imported")
+                rejected { importedStore.prepareOfflineShare(external.id, external.contentDigest) }
+            }
+            val originalHash = ViewerPackageCodec.sha256(sharedFile)
+            releases.exportRelease(sealed.id).writeText("Synthetic mutable export replacement")
+            check(ViewerPackageCodec.sha256(sharedFile) == originalHash)
+            sharedFile.copyTo(File(output, "shared-viewer.tapscene"))
+            check(sharedRoot.deleteRecursively())
+            status("PASS offline share: real sealed static ZIP, digest binding and independent immutable snapshot")
+        }
 
         val beforeVideo = projects.listProjects().map { it.id }.toSet()
         val video = AiDraftImportFixtures.videoOnUnselectedBranch(context, fixture)

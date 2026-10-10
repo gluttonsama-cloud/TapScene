@@ -10,6 +10,7 @@ import androidx.lifecycle.viewModelScope
 import com.tapscene.data.ReleaseCandidate
 import com.tapscene.data.ReleaseStore
 import com.tapscene.data.ReleaseSummary
+import com.tapscene.sharing.OfflineShare
 import com.tapscene.packageformat.RenderPlan
 import com.tapscene.packageformat.ViewerPackageCodec
 import com.tapscene.packageformat.ViewerScene
@@ -85,6 +86,8 @@ data class ReleaseUiState(
     val lastSealedId: String? = null,
     val lastImportedId: String? = null,
     val exportFile: File? = null,
+    val pendingShare: OfflineShare? = null,
+    val shareChooserOpen: Boolean = false,
     val aiConfiguration: AiPackageConfiguration? = null,
 )
 
@@ -107,6 +110,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     private var exportLength: Long? = null
     private var pendingExportFile: File? = null
     private var savePickerPending = false
+    private var sharePreparationActive = false
     private var cancellationNote: String? = null
 
     init { reloadLibrary() }
@@ -529,6 +533,54 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         mutableState.update { it.copy(exportFile = file) }
     }
 
+    fun prepareOfflineShare(id: String) {
+        val selected = state.value.releases.singleOrNull { it.id == id && it.origin == "local" }
+        if (selected == null || state.value.lastSealedId != id) {
+            message("请选择当前已复核封存的本机版本。")
+            return
+        }
+        execute("准备离线观看包分享") {
+            sharePreparationActive = true
+            try {
+                mutableState.update { it.copy(pendingShare = null) }
+                val share = withContext(Dispatchers.IO) { store.prepareOfflineShare(id, selected.contentDigest) }
+                currentCoroutineContext().ensureActive()
+                mutableState.update { it.copy(pendingShare = share) }
+            } finally { sharePreparationActive = false }
+        }
+    }
+
+    /** Consumed synchronously before launching. Recomposition/rotation must never launch twice. */
+    fun beginShareChooser(visibleReleaseId: String?): OfflineShare? {
+        val current = state.value
+        if (current.busy || current.shareChooserOpen || savePickerPending) return null
+        val share = current.pendingShare ?: return null
+        mutableState.update { it.copy(pendingShare = null) }
+        if (visibleReleaseId != share.releaseId || current.lastSealedId != share.releaseId ||
+            current.releases.none { it.id == share.releaseId && it.origin == "local" }) return null
+        if (System.currentTimeMillis() >= share.expiresAt) {
+            message("分享副本已过期，请重新点击系统分享。")
+            return null
+        }
+        mutableState.update { it.copy(shareChooserOpen = true) }
+        return share
+    }
+
+    fun leaveSharePage() {
+        if (sharePreparationActive) task?.cancel()
+        mutableState.update { it.copy(pendingShare = null) }
+    }
+
+    fun shareChooserLaunched() {
+        message("已打开系统分享，请在所选应用中确认；返回不代表已发送。")
+    }
+
+    fun finishShareChooser(failed: Boolean = false) {
+        mutableState.update { it.copy(shareChooserOpen = false, pendingShare = null) }
+        if (failed) message("无法打开系统分享，请重试或使用保存到文件。")
+        // Keep the snapshot for receivers that open asynchronously. There is no delivery receipt.
+    }
+
     fun openAiPackage(id: String) = execute("读取固定版本与动画配置") {
         mutableState.update { it.copy(aiConfiguration = null) }
         val scene = withContext(Dispatchers.IO) { store.loadRelease(id) }
@@ -611,7 +663,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     fun beginExportPicker(): Boolean {
-        if (state.value.busy || savePickerPending || state.value.exportFile == null || exportDigest == null) return false
+        if (state.value.busy || savePickerPending || state.value.shareChooserOpen || state.value.pendingShare != null || state.value.exportFile == null || exportDigest == null) return false
         savePickerPending = true
         pendingExportFile = state.value.exportFile
         mutableState.update { it.copy(exportFile = null) }
@@ -714,18 +766,18 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         history = next.history, ended = next.ended, endLabel = next.endLabel, endEdgeId = next.endEdgeId,
         matchingHotspotIds = emptyList(), visitedEdgeIds = next.visitedEdgeIds, completedFromStart = next.completedFromStart)
 
-    fun cancel() { task?.cancel() }
+    fun cancel() { task?.cancel(); mutableState.update { it.copy(pendingShare = null) } }
     fun message(text: String) { mutableState.update { it.copy(message = text) } }
     fun clearMessage() { mutableState.update { it.copy(message = null) } }
 
     private fun execute(label: String, block: suspend () -> Unit) {
-        if (state.value.busy || savePickerPending) return
+        if (state.value.busy || savePickerPending || state.value.shareChooserOpen || state.value.pendingShare != null || state.value.exportFile != null) return
         cancellationNote = null
         mutableState.update { it.copy(busy = true, stage = label, message = null) }
         task = viewModelScope.launch {
             try { block() }
             catch (cancelled: CancellationException) {
-                mutableState.update { it.copy(player = null, playerBitmap = null) }
+                mutableState.update { it.copy(player = null, playerBitmap = null, pendingShare = null) }
                 message(cancellationNote ?: "已取消当前处理；完整保存的版本保留")
                 throw cancelled
             } catch (error: Exception) {

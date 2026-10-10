@@ -242,6 +242,8 @@ jobs:
             --tests com.tapscene.data.ProjectStoreHostTest \
             --tests com.tapscene.ui.ProjectWorkspaceHostTest \
             --tests com.tapscene.data.AiRoundTripHostTest \
+            --tests com.tapscene.sharing.OfflineShareHostTest \
+            --tests com.tapscene.ui.OfflineShareWorkspaceHostTest \
             2>&1 | tee "$RUNNER_TEMP/host-data-checks.txt"
       - name: Verify the exact host checks executed without failures or skips
         if: always() && steps.host_data.outcome != 'skipped' && steps.scope.outputs.android == 'true'
@@ -263,6 +265,9 @@ jobs:
               ("com.tapscene.ui.ProjectWorkspaceHostTest", "cancellationAndDiscardDoNotReviveCommittedForms"): 1,
               ("com.tapscene.ui.ProjectWorkspaceHostTest", "singleEditorUndoCoalescesAndHonorsSaveNavigationAndRevisionBoundaries"): 1,
               ("com.tapscene.data.AiRoundTripHostTest", "completeStaticPackageReturnsAsReviewedRelease"): 1,
+              ("com.tapscene.sharing.OfflineShareHostTest", "exactReadOnlyUrisRejectTraversalTamperingAndExpiry"): 2,
+              ("com.tapscene.sharing.OfflineShareHostTest", "cacheLimitsAndCancelledPreparationPreserveExistingSnapshots"): 2,
+              ("com.tapscene.ui.OfflineShareWorkspaceHostTest", "chooserRequestIsConsumedOnceAndNeverRestoredAfterExit"): 1,
           }
           actual = Counter()
           failures = errors = skipped = 0
@@ -281,7 +286,7 @@ jobs:
                   stderr = "\n".join(node.text or "" for node in suite.iter("system-err"))
                   assert "Explicit termination method 'close' not called" not in stderr, "Static AI round trip leaked a CloseGuard resource"
           summary = (f"HOST_DATA_EXECUTION tests={sum(actual.values())} failures={failures} errors={errors} "
-                     f"skipped={skipped} test_seconds={seconds:.3f}; expected=6 original data executions + 1 temporary-store lifecycle + 1 static AI round trip + 1 editor undo / 8 entry points / 3 classes")
+                     f"skipped={skipped} test_seconds={seconds:.3f}; expected=6 original data executions + 1 temporary-store lifecycle + 1 static AI round trip + 1 editor undo + 5 offline share executions / 11 entry points / 5 classes")
           print(summary)
           (Path(os.environ["RUNNER_TEMP"]) / "host-data-execution.txt").write_text(summary + "\n", encoding="utf-8")
           assert actual == Counter(expected), f"Missing/unexpected executed tests: {actual}"
@@ -295,9 +300,14 @@ jobs:
           assert "HOST_AI_ROUNDTRIP api=35 graphics=NATIVE sqlite=NATIVE" in evidence
           assert "HOST_FILE_SYNC backend=Linux/JDK actualDirectorySyncs=" in evidence and "openDescriptors=0" in evidence
           assert "PASS AI round trip video gate:" in evidence
+          assert "PASS offline share: real sealed static ZIP" in evidence
+          for api in (26, 35):
+              assert f"HOST_OFFLINE_SHARE api={api} " in evidence
+              assert f"HOST_OFFLINE_SHARE_LIMIT api={api} " in evidence
+          assert "HOST_OFFLINE_SHARE_UI one-shot/route/version/expiry/failure-return PASS" in evidence
           assert "HOST_TEMP_STORE api=26 repeated-success=closed exceptional-exit=closed primary-error=preserved other-owner=read/write/open" in evidence
           assert "PASS AI candidate lifecycle: three real candidate copies" in evidence
-          print("TAPSCENE_HOST_DATA_CHECKS_OK: original six checks plus temporary-store lifecycle, static native-PNG round trip and editor undo executed; device/video/power-loss checks remain separate")
+          print("TAPSCENE_HOST_DATA_CHECKS_OK: original six checks plus temporary-store lifecycle, static native-PNG round trip, editor undo and offline sharing executed; device/video/power-loss checks remain separate")
           PY_HOST
       - name: Read the actual Android round-trip export with the independent TS reader
         if: steps.scope.outputs.android == 'true'
@@ -386,7 +396,9 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 54, f"Expected fifty-four Compose review images, found {len(images)}"
+          assert len(images) == 56, f"Expected fifty-six Compose review images, found {len(images)}"
+          share_images = [image for image in images if "OfflineShareScreenshotPreviewsKt" in str(image)]
+          assert len(share_images) == 2, f"Expected two delivery share review images, found {len(share_images)}"
           ai_draft_images = [image for image in images if "AiDraftScreenshotPreviewsKt" in str(image)]
           assert len(ai_draft_images) == 8, f"Expected eight AI draft review images, found {len(ai_draft_images)}"
           lines = [
@@ -401,7 +413,7 @@ jobs:
               assert data[:8] == b"\x89PNG\r\n\x1a\n", image
               width, height = struct.unpack(">II", data[16:24])
               assert width > 0 and height > 0, image
-              if any(name in str(image) for name in ("EditorDraftRecovery", "SafeImage", "ScreenshotImport", "EditorNavigation", "ReviewAiNavigation", "AiDraftScreenshot")):
+              if any(name in str(image) for name in ("EditorDraftRecovery", "SafeImage", "ScreenshotImport", "EditorNavigation", "ReviewAiNavigation", "AiDraftScreenshot", "OfflineShareScreenshot")):
                   # A modal window can yield a valid but blank PNG in Layoutlib. Reject that
                   # before treating form and AI import images as usable review evidence.
                   import zlib
