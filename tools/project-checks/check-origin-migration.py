@@ -24,7 +24,7 @@ assert image_tables == v7_images, 'Shipped v7 image DDL changed; preserve its fr
 ai_tables = [sql for sql in re.findall(r'db.execSQL\("""(CREATE TABLE.*?)"""\)', source, re.S) if sql.startswith(('CREATE TABLE package_step_origins ', 'CREATE TABLE ai_import_sessions ', 'CREATE TABLE draft_ai_configs '))]
 assert len(ai_tables) == 3
 assert 'db.setForeignKeyConstraintsEnabled(db.version !in 1..7)' in source
-assert 'oldVersion in 1..7 && newVersion in 8..9 && foreignKeys(db) == 0' in source
+assert 'oldVersion in 1..7 && newVersion in 8..10 && foreignKeys(db) == 0' in source
 
 def introduced(sql):
     if 'editor_draft' in sql: return 5
@@ -322,3 +322,38 @@ assert db.execute('SELECT COUNT(*) FROM project_copy_files').fetchone() == (1,)
 assert not list(db.execute('PRAGMA foreign_key_check'))
 db.close()
 print('PASS v8->v9 additive exact rows/schema, durable independent copy receipt and file ownership journal')
+
+# v10 adds independent click-chain imports without replaying v9 table creation.
+assert 'if (oldVersion < 9 && newVersion >= 9) createProjectCopies(db)' in source
+assert 'oldVersion in 8..9 && newVersion == 10 && foreignKeys(db) == 1' in source
+chain_tables = [sql for sql in re.findall(r'db.execSQL\("""(CREATE TABLE.*?)"""\)', source, re.S)
+                if sql.startswith(('CREATE TABLE click_chain_imports ', 'CREATE TABLE click_chain_files ', 'CREATE TABLE click_chain_origins '))]
+assert len(chain_tables) == 3
+for fail_after in range(4):
+    db = fixture(7)
+    db.execute('PRAGMA foreign_keys=OFF'); db.execute('BEGIN EXCLUSIVE'); migrate(db, 7); db.commit()
+    db.execute('PRAGMA foreign_keys=ON')
+    for sql in copy_tables: db.execute(sql)
+    db.execute('PRAGMA user_version=9'); db.commit()
+    before = snapshot(db)
+    db.execute('BEGIN EXCLUSIVE')
+    for index, sql in enumerate(chain_tables):
+        db.execute(sql)
+        if index == fail_after: break
+    if fail_after < 3:
+        db.rollback(); assert snapshot(db) == before
+    else:
+        db.execute('PRAGMA user_version=10'); db.commit()
+        assert before[0] == {name: typed_rows(db, name) for name in before[0]}
+        assert set(before[1]).issubset(set(snapshot(db)[1]))
+        db.execute("INSERT INTO click_chain_imports(operation_id,project_id,input_sha,status,created_at) VALUES('batch','batch',?,'committed',1)", ('a'*64,))
+        db.execute("INSERT INTO click_chain_files VALUES('batch','new-raw','video')")
+        db.execute("INSERT INTO click_chain_origins VALUES('p','state','frame','historical source and sample facts')")
+        db.execute("UPDATE projects SET start_state_id=NULL WHERE project_id='p'")
+        db.execute("DELETE FROM projects WHERE project_id='p'"); db.commit()
+        assert db.execute('SELECT status FROM click_chain_imports').fetchall() == [('committed',)]
+        assert db.execute('SELECT COUNT(*) FROM click_chain_files').fetchone() == (1,)
+        assert db.execute('SELECT COUNT(*) FROM click_chain_origins').fetchone() == (0,)
+        assert not list(db.execute('PRAGMA foreign_key_check'))
+    db.close()
+print('PASS v9->v10 additive exact rows/schema, rollback, independent durable batch receipt/file journal, private historical lineage cascade')

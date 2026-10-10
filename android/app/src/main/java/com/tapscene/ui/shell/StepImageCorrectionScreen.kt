@@ -329,7 +329,7 @@ private fun CorrectionEmptyCanvas(message: String) {
 
 /** Both review and safe fallback display a complete bitmap, without editable overlays. */
 @Composable
-private fun CorrectionImage(bitmap: Bitmap, description: String, enabled: Boolean, modifier: Modifier) {
+internal fun CorrectionImage(bitmap: Bitmap, description: String, enabled: Boolean, modifier: Modifier) {
     var scale by remember(bitmap) { mutableFloatStateOf(1f) }
     var pan by remember(bitmap) { mutableStateOf(Offset.Zero) }
     Box(modifier.background(ShellColors.Quiet, RoundedCornerShape(8.dp)).clipToBounds()

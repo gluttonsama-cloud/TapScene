@@ -262,6 +262,9 @@ jobs:
             --tests com.tapscene.clickplan.ClickWindowPolicyTest \
             --tests com.tapscene.clickplan.ClickTargetArmTest \
             --tests com.tapscene.clickplan.ClickViewportTest \
+            --tests com.tapscene.clickplan.ClickChainReviewPolicyTest \
+            --tests com.tapscene.clickplan.ClickChainReviewStoreHostTest \
+            --tests com.tapscene.data.ClickChainImportHostTest \
             --tests com.tapscene.recording.RecordingClickGateTest \
             --tests com.tapscene.recording.RecordingFrameLedgerTest \
             --tests com.tapscene.recording.FrameLeasePoolTest \
@@ -306,6 +309,14 @@ jobs:
               ("com.tapscene.clickplan.ClickRunEngineTest", "frameHookReentrantPauseOrStopCannotBypassDispatchGates"): 1,
               ("com.tapscene.clickplan.ClickRunEngineTest", "auxiliaryHookCannotOverwriteReentrantTerminalGestureState"): 1,
               ("com.tapscene.clickplan.ClickRunEngineTest", "cancellationHookFailureCannotPreventPauseStopOrAtMostOnceResume"): 1,
+
+              ("com.tapscene.clickplan.ClickChainReviewPolicyTest", "representativesKeepContinuityWithoutMergingDifferentCapturedFrames"): 1,
+              ("com.tapscene.clickplan.ClickChainReviewPolicyTest", "missingUnknownEpochBreaksAndLimitsNeverBecomeImplicitEdgesOrTruncation"): 1,
+              ("com.tapscene.clickplan.ClickChainReviewStoreHostTest", "authorInputsReviewedPixelsAndOutputOwnershipSurviveReopenWhileOldWritersFail"): 1,
+              ("com.tapscene.data.ClickChainImportHostTest", "reviewedRouteCreatesIndependentProjectAndReceiptOutlivesBothOwners"): 1,
+              ("com.tapscene.data.ClickChainImportHostTest", "failedCommitCancellationAndRetryAreAtomic"): 1,
+              ("com.tapscene.data.ClickChainImportHostTest", "tamperedMediaWrongPixelsAndUnknownActionsCannotBecomeEvidence"): 1,
+              ("com.tapscene.data.ClickChainImportHostTest", "staticFrameSelfLoopsArePreservedAndSeventhHotspotRejectsWholeBatch"): 1,
               ("com.tapscene.clickplan.ClickViewportTest", "actualSystemInsetsLeaveAppNavigationAvailable"): 1,
               ("com.tapscene.clickplan.ClickViewportTest", "actualOverlayOriginMustAgreeWithRawScreenCoordinates"): 1,
               ("com.tapscene.clickplan.ClickViewportTest", "browsingOnlyRestoresEditorAndOldControlsCannotReopenClosedSession"): 1,
@@ -516,7 +527,9 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 68, f"Expected sixty-eight Compose review images, found {len(images)}"
+          assert len(images) == 70, f"Expected seventy Compose review images, found {len(images)}"
+          click_review_images = [image for image in images if "ClickChainReviewScreenshotPreviewsKt" in str(image)]
+          assert len(click_review_images) == 2, f"Expected two click-chain author review images, found {len(click_review_images)}"
           click_plan_images = [image for image in images if "ClickPlanScreenshotPreviewsKt" in str(image)]
           assert len(click_plan_images) == 2, f"Expected two click-plan review images, found {len(click_plan_images)}"
           text_region_images = [image for image in images if "TextRegionScreenshotPreviewsKt" in str(image)]
@@ -543,7 +556,7 @@ jobs:
               assert data[:8] == b"\x89PNG\r\n\x1a\n", image
               width, height = struct.unpack(">II", data[16:24])
               assert width > 0 and height > 0, image
-              if any(name in str(image) for name in ("EditorDraftRecovery", "SafeImage", "ScreenshotImport", "EditorNavigation", "ReviewAiNavigation", "AiDraftScreenshot", "OfflineShareScreenshot", "SavedStepCopyScreenshot", "SavedProjectCopyScreenshot", "HostingScreenshot", "ClickPlanScreenshot")):
+              if any(name in str(image) for name in ("EditorDraftRecovery", "SafeImage", "ScreenshotImport", "EditorNavigation", "ReviewAiNavigation", "AiDraftScreenshot", "OfflineShareScreenshot", "SavedStepCopyScreenshot", "SavedProjectCopyScreenshot", "HostingScreenshot", "ClickPlanScreenshot", "ClickChainReviewScreenshot")):
                   # A modal window can yield a valid but blank PNG in Layoutlib. Reject that
                   # before treating form and AI import images as usable review evidence.
                   import zlib

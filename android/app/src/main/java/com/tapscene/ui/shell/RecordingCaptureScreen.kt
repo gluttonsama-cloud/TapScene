@@ -21,6 +21,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.tapscene.clickplan.ClickPlayback
+import com.tapscene.clickplan.ClickPlanStore
+import com.tapscene.clickplan.ClickRun
 import com.tapscene.data.SourceRepository
 import com.tapscene.recording.RecordingCoordinator
 import com.tapscene.recording.RecordingPhase
@@ -49,12 +52,22 @@ fun RecordingCaptureRoute(
     val app = context.applicationContext
     val projectState by projects.state.collectAsStateWithLifecycle()
     val recording by RecordingCoordinator.state.collectAsStateWithLifecycle()
+    val clickPlayback by ClickPlayback.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val preferences = remember(app) { app.getSharedPreferences("recording-ui", Context.MODE_PRIVATE) }
     var showNotice by rememberSaveable { mutableStateOf(false) }
     var waitingProject by rememberSaveable { mutableStateOf(false) }
     var clickPlanRequested by rememberSaveable { mutableStateOf(false) }
     var showClickPlan by rememberSaveable { mutableStateOf(false) }
+    var recordedRuns by remember { mutableStateOf<List<ClickRun>>(emptyList()) }
+    var reviewRunId by rememberSaveable { mutableStateOf<String?>(null) }
+    var chooseRecordedRun by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(projectState.project?.project?.id, recording.phase, showClickPlan, clickPlayback.run?.runId, clickPlayback.run?.phase) {
+        val projectId = projectState.project?.project?.id
+        recordedRuns = if (projectId == null) emptyList() else withContext(Dispatchers.IO) {
+            runCatching { ClickPlanStore(app).readRuns(projectId).filter { it.terminal } }.getOrDefault(emptyList())
+        }
+    }
     var pendingProject by rememberSaveable { mutableStateOf<String?>(null) }
     var checkingBudget by remember { mutableStateOf(false) }
     var budgetJob by remember { mutableStateOf<Job?>(null) }
@@ -139,8 +152,14 @@ fun RecordingCaptureRoute(
         organizeAfterStop = false
         onBack()
     }
+    if (reviewRunId != null) {
+        ClickChainReviewRoute(requireNotNull(reviewRunId), onBack = { reviewRunId = null },
+            onOpenProject = { id -> reviewRunId = null; projects.openProject(id); onBack() })
+        return
+    }
     if (showClickPlan && projectState.project?.project?.id != null) {
-        ClickPlanRoute(requireNotNull(projectState.project?.project?.id), onBack = { showClickPlan = false })
+        ClickPlanRoute(requireNotNull(projectState.project?.project?.id), onBack = { showClickPlan = false },
+            onOpenProject = { id -> showClickPlan = false; projects.openProject(id); onBack() })
         return
     }
     BackHandler(onBack = leave)
@@ -162,6 +181,9 @@ fun RecordingCaptureRoute(
                 if (id != null && source != null) onCandidates(id, source, true)
             },
             onImportVideo = onImportVideo,
+            onReviewClickChain = if (recordedRuns.isEmpty()) null else {
+                { if (recordedRuns.size == 1) reviewRunId = recordedRuns.single().runId else chooseRecordedRun = true }
+            },
             onClickPlan = {
                 if (projectState.project?.project?.id != null) showClickPlan = true
                 else if (!projectState.busy) {
@@ -171,6 +193,12 @@ fun RecordingCaptureRoute(
             },
         ),
     )
+    if (chooseRecordedRun) AlertDialog(onDismissRequest = { chooseRecordedRun = false }, title = { Text("选择已录制点击链") },
+        text = { Column(Modifier.verticalScroll(rememberScrollState())) {
+            recordedRuns.forEachIndexed { index, run -> TextButton(onClick = { chooseRecordedRun = false; reviewRunId = run.runId }) {
+                Text("第 ${recordedRuns.size - index} 次 · ${run.plan.actions.size} 个动作")
+            } }
+        } }, confirmButton = { TextButton(onClick = { chooseRecordedRun = false }) { Text("返回") } })
     if (showNotice) AlertDialog(onDismissRequest = { showNotice = false }, title = { Text("开始前请留意") },
         text = { Text("在系统授权中选择目标 App。录屏仅存本机，不会上传；从通知或返回这里都能停止。\n\n画面可能包含敏感输入，整理步骤时仍需复核。通知授权用于在应用外快速停止，拒绝也可回到这里停止。") },
         confirmButton = { TextButton(onClick = { showNotice = false; preferences.edit().putBoolean("notice-v1", true).apply(); start() }) { Text("继续并授权") } },
@@ -187,6 +215,7 @@ data class RecordingCaptureCallbacks(
     val onCandidates: () -> Unit,
     val onImportVideo: () -> Unit,
     val onClickPlan: (() -> Unit)? = null,
+    val onReviewClickChain: (() -> Unit)? = null,
 )
 
 /** Real page content; Android consent, persistence and coordinator calls stay in the route. */
@@ -226,7 +255,7 @@ fun RecordingCaptureContent(
                     Text(recordingElapsed(recording.elapsedMs), style = MaterialTheme.typography.headlineLarge)
                     Text("在目标 App 中正常操作。完成后从通知或回到这里停止。", style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
                 } else LinearProgressIndicator(Modifier.fillMaxWidth())
-            } else Text("录完按画面变化提出候选步骤，再由你选择和校正。", style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
+            } else Text("点击链录完可按动作整理画面与点击区域；手动录屏可选择候选步骤。", style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
             recording.stopReason?.takeIf { it != RecordingStopReason.User }?.let {
                 Text(recordingStopLabel(it), style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
             }
@@ -249,6 +278,10 @@ fun RecordingCaptureContent(
                             Text("删除未完成录制")
                         }
                         Text("请先继续检查或删除未完成录制，再开始新录制。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    }
+                    callbacks.onReviewClickChain?.let { reviewChain ->
+                        Button(onClick = reviewChain, enabled = !projectState.busy && !preparingConsent,
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("整理已录制点击链") }
                     }
                     callbacks.onClickPlan?.let { openPlan ->
                         Button(onClick = openPlan, enabled = !recording.canRetry && !projectState.busy && !preparingConsent,

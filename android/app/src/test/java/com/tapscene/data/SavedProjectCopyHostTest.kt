@@ -378,16 +378,16 @@ class SavedProjectCopyHostTest {
             val helper = ProjectStore.Database(context, path.path)
             try {
                 val db = helper.writableDatabase
-                HostSqlite.verify(db); check(db.version == 9)
+                HostSqlite.verify(db); check(db.version == 10)
                 val after = databaseRows(db)
                 before.forEach { (table, rows) -> check(after[table] == rows) { "v8 migration changed $table" } }
                 val newSchema = databaseSchema(db)
                 schema.forEach { (name, sql) -> check(newSchema[name] == sql) { "v8 migration rewrote $name" } }
-                check(after.keys - before.keys == setOf("project_copy_operations", "project_copy_files"))
-                check(after["project_copy_operations"].orEmpty().isEmpty() && after["project_copy_files"].orEmpty().isEmpty())
+                val added = setOf("project_copy_operations", "project_copy_files", "click_chain_imports", "click_chain_files", "click_chain_origins")
+                check(after.keys - before.keys == added && added.all { after[it].orEmpty().isEmpty() })
                 db.rawQuery("PRAGMA foreign_key_check", null).use { check(!it.moveToFirst()) }
             } finally { helper.close() }
-            println("HOST_SAVED_PROJECT_COPY migration: frozen shipped v8 DDL to v9; exact graph/origins/AI/review/editor/journal values and original schema preserved; only two additive empty tables")
+            println("HOST_SAVED_PROJECT_COPY migration: frozen shipped v8 DDL to v10; exact graph/origins/AI/review/editor/journal values and original schema preserved; only five additive empty tables")
         }
     }
 
