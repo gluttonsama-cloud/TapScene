@@ -123,14 +123,17 @@ internal object HostSqlite {
         ShadowSQLiteConnection.setDefaultSyncMode("FULL")
         val app = RuntimeEnvironment.getApplication()
         val file = File(app.noBackupFilesDir, "sqlite-probe-${UUID.randomUUID()}.sqlite")
+        // SQLiteOpenHelper does not implement AutoCloseable on API 26.
+        val helper = ProjectStore.Database(app, file.path)
         try {
-            ProjectStore.Database(app, file.path).use { helper ->
-                val db = helper.writableDatabase
-                verify(db)
-                println("HOST_SQLITE api=${Build.VERSION.SDK_INT} sqlite=${value(db, "SELECT sqlite_version()")} " +
-                    "mode=NATIVE journal=${value(db, "PRAGMA journal_mode")} sync=${value(db, "PRAGMA synchronous")}")
-            }
-        } finally { if (file.exists()) check(SQLiteDatabase.deleteDatabase(file)) }
+            val db = helper.writableDatabase
+            verify(db)
+            println("HOST_SQLITE api=${Build.VERSION.SDK_INT} sqlite=${value(db, "SELECT sqlite_version()")} " +
+                "mode=NATIVE journal=${value(db, "PRAGMA journal_mode")} sync=${value(db, "PRAGMA synchronous")}")
+        } finally {
+            helper.close()
+            if (file.exists()) check(SQLiteDatabase.deleteDatabase(file))
+        }
     }
 
     fun verify(db: SQLiteDatabase) {
@@ -170,7 +173,7 @@ internal class HostProjectFixture : Closeable {
                     execSQL("""INSERT INTO states(project_id,state_id,capture_id,sort_order,title,description,is_terminal,
                         input_asset_id,masks_json,origin_kind,evidence_kind,base_asset_id,base_sha256,base_revision,base_width,base_height)
                         VALUES(?,?,?,?,?,'Official text',0,?,'[]','image','authored',?,?,1,1,1)""",
-                        arrayOf(project, step, id(), position, if (step == a) "A" else "B", asset, id(), "a".repeat(64)))
+                        arrayOf<Any>(project, step, id(), position, if (step == a) "A" else "B", asset, id(), "a".repeat(64)))
                 }
                 val hotspot = id()
                 execSQL("INSERT INTO hotspots VALUES(?,?,?,'Original action',.1,.2,.6,.8)", arrayOf(project, hotspot, a))
@@ -194,11 +197,12 @@ internal class HostProjectFixture : Closeable {
         store.saveStepDraft(project, stepId, draft.edit.title, draft.edit.description, draft.edit.isTerminal,
             draft.edit.hotspots, expectedRevision = draft.baseRevision, nextAction = draft.edit.nextAction, editorDraftSession = session)
     fun database(block: SQLiteDatabase.() -> Unit) {
-        ProjectStore.Database(app, File(root, "projects.sqlite").path).use {
-            val db = it.writableDatabase
+        val helper = ProjectStore.Database(app, File(root, "projects.sqlite").path)
+        try {
+            val db = helper.writableDatabase
             HostSqlite.verify(db)
             db.block()
-        }
+        } finally { helper.close() }
     }
     fun closeStore(store: ProjectStore) {
         (ProjectStore::class.java.getDeclaredField("helper").apply { isAccessible = true }.get(store) as SQLiteOpenHelper).close()

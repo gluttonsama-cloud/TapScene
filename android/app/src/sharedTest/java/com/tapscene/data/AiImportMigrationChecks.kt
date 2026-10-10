@@ -81,7 +81,9 @@ internal object AiImportMigrationChecks {
                 }
             }
             val before = readSnapshot(file)
-            ProjectStore.Database(context, file.path).use { check(runCatching { it.writableDatabase }.isFailure) }
+            val helper = ProjectStore.Database(context, file.path)
+            try { check(runCatching { helper.writableDatabase }.isFailure) }
+            finally { helper.close() }
             check(readSnapshot(file) == before) { "Rejected $objectKind migration changed historical DB" }
         }
         status("PASS Android v8 unknown indexes/triggers/views and orphan relationships reject without altering schema, rows or version")
@@ -174,7 +176,9 @@ internal object AiImportMigrationChecks {
     }
 
     private fun verifyMigration(context: Context, file: File, before: Snapshot, verifyDatabase: (SQLiteDatabase) -> Unit) {
-        ProjectStore.Database(context, file.path).use { helper ->
+        // Close explicitly: SQLiteOpenHelper is not AutoCloseable on API 26.
+        val helper = ProjectStore.Database(context, file.path)
+        try {
             val db = helper.writableDatabase
             verifyDatabase(db)
             check(db.version == 8)
@@ -183,11 +187,13 @@ internal object AiImportMigrationChecks {
             db.rawQuery("PRAGMA foreign_key_check", null).use { check(!it.moveToFirst()) }
             db.rawQuery("PRAGMA integrity_check", null).use { check(it.moveToFirst() && it.getString(0) == "ok" && !it.moveToNext()) }
             check(scalar(db, "SELECT COUNT(*) FROM states WHERE package_import_id IS NOT NULL") == 0L)
-        }
+        } finally { helper.close() }
     }
 
     private fun checkPackageSchema(context: Context, file: File, reverse: Boolean, verifyDatabase: (SQLiteDatabase) -> Unit) {
-        ProjectStore.Database(context, file.path).use { helper ->
+        // Close explicitly: SQLiteOpenHelper is not AutoCloseable on API 26.
+        val helper = ProjectStore.Database(context, file.path)
+        try {
             val db = helper.writableDatabase
             verifyDatabase(db)
             transaction(db) {
@@ -236,7 +242,7 @@ internal object AiImportMigrationChecks {
             transaction(db) { db.execSQL("DELETE FROM states WHERE project_id='other'") }
             check(scalar(db, "SELECT COUNT(*) FROM package_step_origins") == 0L)
             db.rawQuery("PRAGMA foreign_key_check", null).use { check(!it.moveToFirst()) }
-        }
+        } finally { helper.close() }
     }
 
     private fun packageState(db: SQLiteDatabase, project: String = "p") = db.execSQL(

@@ -247,7 +247,8 @@ object EditorDraftStoreChecks {
         // Missing source bytes must not hide migrated video steps. Inspect the helper directly
         // before ProjectStore.access performs normal recovery/cleanup of the preserved journals.
         check(File(context.noBackupFilesDir, source.privateRelativePath).delete())
-        ProjectStore.Database(context,File(context.noBackupFilesDir,"projects.sqlite").path).use { helper ->
+        val helper = ProjectStore.Database(context,File(context.noBackupFilesDir,"projects.sqlite").path)
+        try {
             val db=helper.writableDatabase
             check(db.version==8)
             for ((table,expected) in expectedRows) check(migrationRows(db,table,expected.first)==expected.second) {
@@ -255,7 +256,7 @@ object EditorDraftStoreChecks {
             }
             db.rawQuery("PRAGMA foreign_keys",null).use { check(it.moveToFirst() && it.getInt(0)==1) }
             db.rawQuery("PRAGMA foreign_key_check",null).use { check(!it.moveToFirst()) }
-        }
+        } finally { helper.close() }
         val reopened = ProjectStore(context)
         val saved = checkNotNull(reopened.readProject(project))
         check(saved.project.revision == 9L && saved.project.startStepId == step && saved.steps.size==2)
