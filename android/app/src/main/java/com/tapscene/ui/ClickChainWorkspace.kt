@@ -81,12 +81,12 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
                         message = if (receipt.projectStillExists) "这段点击链已建为独立项目。" else "生成的项目已被删除；这次重试不会重新创建。")
                     return@launch
                 }
-                val loaded = withContext(Dispatchers.IO) { loadCapture(runId) }
+                val loadingJob = checkNotNull(currentCoroutineContext()[Job])
+                val loaded = withContext(Dispatchers.IO) { loadCapture(runId) { loadingJob.ensureActive() } }
                 currentCoroutineContext().ensureActive()
                 if (request != generation) return@launch
-                val loadingJob = currentCoroutineContext()[Job]
                 val saved = withContext(Dispatchers.IO) { reviews.open(runId, loaded.source.metadata.sha256, loaded.actions.size) {
-                    loadingJob?.isActive == true && request == generation
+                    loadingJob.isActive && request == generation
                 } }
                 if (request != generation) return@launch
                 capture = loaded; draft = saved; persistedSerial = saved.serial; stagingFailure = false
@@ -162,7 +162,8 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
         reload.start()
     }
 
-    private fun loadCapture(runId: String): ClickChainCapture = WorkspaceStore.withProjectCopyLock {
+    private fun loadCapture(runId: String, checkActive: () -> Unit): ClickChainCapture = WorkspaceStore.withProjectCopyLock {
+        checkActive()
         val run = ClickPlanStore(app).readRuns().singleOrNull { it.runId == runId } ?: error("这次点击链记录已不存在。")
         check(run.terminal) { "请先结束点击链和录屏，再整理画面。" }
         val source = WorkspaceStore(app, run.projectId).read().singleOrNull { it.source.sourceId == run.sourceId }?.source
@@ -172,9 +173,11 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
         val bounded = FrameSourceAccessor { project,session,id -> observed.takeIf {
             project == run.projectId && session == run.recordingSessionId && id == run.sourceId
         } }
+        checkActive()
         val boundaries = evidence.listBoundaries(run.recordingSessionId)
         val actions = run.plan.actions.mapIndexed { index, action ->
             fun candidate(boundary: FrameBoundary): Pair<FrameEvidenceCandidate?,FrameMissingReason?> {
+                checkActive()
                 val records = boundaries.filter { it.action.runId == run.runId && it.action.actionId == action.actionId &&
                     it.action.generation == run.generation && it.action.sourceId == run.sourceId &&
                     it.action.sessionId == run.recordingSessionId && it.boundary == boundary }
