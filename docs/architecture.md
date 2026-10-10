@@ -821,3 +821,11 @@ HTTP 映射：400 输入错误；401 会话失效；404 不存在或无权；409
 MediaRecorder 的 elapsed 与动作 diagnosticUptimeMs 仅为运行诊断，不换算 PTS；mapping 固定 Unknown，beforeFrameId/afterFrameId 空值。自动播放结束后至少保留一秒总采集窗口，降低极短片段无法封口的风险；实际 MP4 仍必须通过现有检查后才登记。录制 resize 和 display/rotation 改变中断整轮，不自动缩放旧坐标。编码核心、精确前后帧 PNG 和共帧实际 outputPTS 为下一阶段；本轮交付仍为真实 MP4 加私有 sidecar。
 
 官方接口：[手势结果回调](https://developer.android.com/reference/android/accessibilityservice/AccessibilityService.GestureResultCallback)、[默认显示器录制配置](https://developer.android.com/reference/android/media/projection/MediaProjectionConfig#createConfigForDefaultDisplay())、[无障碍窗口事件](https://developer.android.com/reference/android/view/accessibility/AccessibilityEvent)。
+
+### 点击链定位边界与浏览状态
+
+定位服务在默认显示器创建 TYPE_ACCESSIBILITY_OVERLAY 的 WindowContext，按 currentWindowMetrics 的实际 bounds 与 getInsetsIgnoringVisibility(systemBars | displayCutout) 计算系统排除区。仅完整显示器 bounds 与计划几何一致时使用；公开边界读取失败保持未知，执行前和每次派发前复核。确认时冻结本轮系统边界，变化时结束本轮，不缩放旧坐标。普通短按不把 systemGestures 边缘区域整体禁用。这些元数据不能判断目标 App 内的支付、授权或其他敏感业务。
+
+定位视图通过 getLocationOnScreen 校验实际 frame，绘制使用屏幕坐标减去局部原点；采点同时核对 local + origin 与 raw 坐标一致，缩放/裁切不一致不保存。没有读取目标节点或扩大权限。公开接口说明见 [WindowManager](https://developer.android.com/reference/android/view/WindowManager#getCurrentWindowMetrics())、[WindowInsets](https://developer.android.com/reference/android/view/WindowInsets#getInsetsIgnoringVisibility(int))。
+
+编辑浮层只有 Locating、Picking、Browsing、Closed 四态。浏览移除点位层和面板，保留可拖动的小控制窗；返回定位只恢复编辑界面，计划和 actionId 不变。拖动触摸由控制窗消费，不重放给目标 App。视图回调用 generation 校验，关闭后旧按钮不能重开。播放准备只接受 Locating，所有控制窗均纳入同一 detach gate；录制期间不保留隐形观察窗。

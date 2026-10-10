@@ -6,8 +6,9 @@ import android.hardware.display.DisplayManager
 import android.util.DisplayMetrics
 import android.view.Display
 import android.view.ViewConfiguration
+import android.view.WindowInsets
+import android.view.WindowManager
 
-data class ClickGeometry(val width: Int, val height: Int, val rotation: Int, val displayId: Int = Display.DEFAULT_DISPLAY)
 data class ClickTargetApp(val packageName: String, val label: String)
 
 object ClickDevice {
@@ -26,10 +27,18 @@ object ClickDevice {
         .map { ClickTargetApp(it.activityInfo.packageName, it.loadLabel(context.packageManager).toString()) }
         .distinctBy { it.packageName }.sortedBy { it.label }
 
-    /** Conservatively keep taps away from status/navigation bars, cutouts and gesture edges. */
-    fun pointsInsideSafeArea(context: Context, plan: ClickPlan): Boolean {
-        val margin = (48 * context.resources.displayMetrics.density).toInt()
-        return plan.actions.all { it.x >= margin && it.y >= margin && it.x < plan.width - margin && it.y < plan.height - margin }
+    /** Requires the service's default-display window context, not an Activity/application context. */
+    fun viewport(windowContext: Context): ClickViewport? {
+        if (android.os.Build.VERSION.SDK_INT < 33) return null
+        return runCatching {
+            check(windowContext.display?.displayId == Display.DEFAULT_DISPLAY)
+            val geometry = geometry(windowContext)
+            val metrics = requireNotNull(windowContext.getSystemService(WindowManager::class.java)).currentWindowMetrics
+            // Window-relative insets may only be used as screen coordinates for verified full-display bounds.
+            check(metrics.bounds == android.graphics.Rect(0, 0, geometry.width, geometry.height))
+            val insets = metrics.windowInsets.getInsetsIgnoringVisibility(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+            ClickViewport(geometry, insets.left, insets.top, insets.right, insets.bottom)
+        }.getOrNull()
     }
 
     fun maximumShortPressMs(): Long = minOf(500L, ViewConfiguration.getLongPressTimeout().toLong() - 50L)
