@@ -4,12 +4,22 @@ import com.tapscene.data.EditorFormKind
 import com.tapscene.data.ProjectHotspot
 import com.tapscene.data.ProjectLimits
 import com.tapscene.data.ProjectNextAction
-import com.tapscene.data.ProjectStep
+import com.tapscene.data.ProjectSnapshot
+import com.tapscene.data.TextRegionSourceBinding
 import com.tapscene.media.OpaqueMask
 
 /** Build a submission, never mutate the recoverable panel before its transaction succeeds. */
-internal fun StepEditDraft.withSubmittedForm(steps: List<ProjectStep>): StepEditDraft {
+internal fun StepEditDraft.withSubmittedForm(project: ProjectSnapshot): StepEditDraft {
     val form = requireNotNull(pendingForm) { "面板已关闭，请重新打开后保存" }
+    val steps = project.steps
+    form.textRegionSource?.let { source ->
+        val step = steps.singleOrNull { it.id == stepId }
+        require(step != null && source.matches(project.project, step)) { TextRegionSourceBinding.IMAGE_CHANGED }
+        require(hotspots.none { it.id == form.objectId || it.edgeId == form.edgeId } &&
+            step.hotspots.none { it.id == form.objectId || it.edgeId == form.edgeId }) {
+            "文字候选来源只能绑定新热点表单。"
+        }
+    }
     val submitted = when (form.kind) {
         EditorFormKind.NAME -> {
             require(form.title.isNotBlank()) { "请填写步骤名称" }

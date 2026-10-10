@@ -39,6 +39,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberUpdatedState
@@ -66,6 +67,7 @@ import com.tapscene.data.ProjectStep
 import com.tapscene.media.OpaqueMask
 import com.tapscene.ui.DraftRecoveryStatus
 import com.tapscene.ui.StepEditDraft
+import com.tapscene.ui.TextRegionSuggestions
 import java.util.UUID
 
 /** A single correction workspace. This does not own project persistence or source media. */
@@ -95,6 +97,9 @@ data class EditorCallbacks(
     val onResolveUnsavedSteps: () -> Unit = {},
     val onUndo: () -> Unit = {},
     val onTextEditEnd: () -> Unit = {},
+    val onRecognizeTextRegions: () -> Unit = {},
+    val onCancelTextRegions: () -> Unit = {},
+    val onSelectTextRegion: (Int) -> Unit = {},
 )
 
 @Composable
@@ -111,8 +116,12 @@ fun EditorWorkspaceContent(
     dirtyStepCount: Int = if (draft.dirty) 1 else 0,
     formMessage: String? = null,
     canUndoEdit: Boolean = false,
+    textRegions: TextRegionSuggestions = TextRegionSuggestions(),
+    initialMode: EditorMode = EditorMode.FRAME,
 ) {
-    var mode by rememberSaveable(draft.stepId) { mutableStateOf(EditorMode.FRAME) }
+    var mode by rememberSaveable(draft.stepId) { mutableStateOf(initialMode) }
+    val cancelTextRegions by rememberUpdatedState(callbacks.onCancelTextRegions)
+    DisposableEffect(project.project.id, draft.stepId) { onDispose { cancelTextRegions() } }
     var adding by rememberSaveable(draft.stepId) { mutableStateOf(false) }
     var selectedId by rememberSaveable(draft.stepId) { mutableStateOf<String?>(null) }
     var terminalConflict by rememberSaveable(draft.stepId) { mutableStateOf(false) }
@@ -125,12 +134,12 @@ fun EditorWorkspaceContent(
     val selected = draft.hotspots.firstOrNull { it.id == selectedId }
     val pendingForm = draft.pendingForm
     val hasBitmap = bitmap != null && !bitmap.isRecycled
-    val canAdd = !busy && hasBitmap && !draft.isTerminal && draft.hotspots.size < ProjectLimits.MAX_HOTSPOTS_PER_STEP
+    val canAdd = !busy && hasBitmap && draft.conflicts.isEmpty() && pendingForm == null && !draft.isTerminal && draft.hotspots.size < ProjectLimits.MAX_HOTSPOTS_PER_STEP
     val goBack: () -> Unit = {
         if (!busy) {
             when {
                 adding -> adding = false
-                mode != EditorMode.FRAME -> { mode = EditorMode.FRAME; selectedId = null }
+                mode != EditorMode.FRAME -> { callbacks.onCancelTextRegions(); mode = EditorMode.FRAME; selectedId = null }
                 else -> callbacks.onBack()
             }
         }
@@ -138,6 +147,7 @@ fun EditorWorkspaceContent(
     BackHandler(enabled = pendingForm == null && draft.conflicts.isEmpty() && !showDiscard) { goBack() }
     val openNew: (OpaqueMask) -> Unit = { rect ->
         if (canAdd) {
+            callbacks.onCancelTextRegions()
             callbacks.onPendingFormChange(ProjectHotspot(UUID.randomUUID().toString(), "", rect, null,
                 "演示结束", UUID.randomUUID().toString()).toPendingForm())
             adding = false
@@ -196,6 +206,12 @@ fun EditorWorkspaceContent(
                 hotspots = if (mode == EditorMode.HOTSPOTS || mode == EditorMode.BRANCHES) draft.hotspots else emptyList(),
                 modifier = canvasModifier.padding(horizontal = 16.dp, vertical = 4.dp),
                 enabled = !busy && mode == EditorMode.HOTSPOTS,
+                textRegionRects = if (mode == EditorMode.HOTSPOTS && !adding && pendingForm == null)
+                    textRegions.binding?.takeIf { binding -> step?.let { binding.matches(project.project, it) } == true }?.let { binding ->
+                        textRegions.candidates.map { candidate -> candidate.bounds.let { box -> OpaqueMask(
+                            box.left.toFloat() / binding.width, box.top.toFloat() / binding.height,
+                            box.right.toFloat() / binding.width, box.bottom.toFloat() / binding.height) } }
+                    } ?: emptyList() else emptyList(),
                 busy = busy, selectedHotspotId = selectedId, adding = adding && canAdd,
                 onSelect = { selectedId = it }, onCreate = openNew,
                 onChangeRect = { id, rect -> draft.hotspots.firstOrNull { it.id == id }?.let { callbacks.onPutHotspot(it.copy(rect = rect)) } })
@@ -232,7 +248,7 @@ fun EditorWorkspaceContent(
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Text("点击区域  ${draft.hotspots.size}/${ProjectLimits.MAX_HOTSPOTS_PER_STEP}", Modifier.weight(1f),
                                 style = MaterialTheme.typography.titleSmall)
-                            TextButton(onClick = { adding = !adding; selectedId = null }, enabled = canAdd) {
+                            TextButton(onClick = { callbacks.onCancelTextRegions(); adding = !adding; selectedId = null }, enabled = canAdd) {
                                 Text(if (adding) "取消新增" else "+ 新增热点")
                             }
                         }
@@ -242,6 +258,17 @@ fun EditorWorkspaceContent(
                             selected != null -> "拖动选中区域移动，拖右下角调整尺寸。"
                             else -> "点选画面中的区域，或从对象列表选择。"
                         }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedButton(onClick = { adding = false; selectedId = null; callbacks.onRecognizeTextRegions() },
+                                enabled = canAdd && !textRegions.working, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
+                                Text(if (textRegions.working) "正在识别文字…" else "识别文字区域")
+                            }
+                            if (textRegions.working || textRegions.candidates.isNotEmpty()) TextButton(
+                                onClick = callbacks.onCancelTextRegions, enabled = !busy,
+                                modifier = Modifier.heightIn(min = 48.dp)) { Text(if (textRegions.working) "取消" else "收起") }
+                        }
+                        TextRegionSuggestionsContent(textRegions, canAdd && !textRegions.working,
+                            callbacks.onSelectTextRegion)
                         if (draft.hotspots.isNotEmpty()) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             draft.hotspots.forEachIndexed { index, hotspot ->
@@ -345,7 +372,7 @@ fun EditorWorkspaceContent(
                 EditorMode.entries.forEach { item ->
                     val tint = if (mode == item) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                     Column(Modifier.weight(1f).heightIn(min = 56.dp).selectable(selected = mode == item, enabled = !busy, role = Role.Tab,
-                        onClick = { mode = item; adding = false; selectedId = null }).padding(vertical = 8.dp),
+                        onClick = { if (mode != item) callbacks.onCancelTextRegions(); mode = item; adding = false; selectedId = null }).padding(vertical = 8.dp),
                         horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         EditorModeIcon(item, tint)
                         Text(item.label, style = MaterialTheme.typography.labelLarge, color = tint)
@@ -366,6 +393,7 @@ fun EditorWorkspaceContent(
             EditorFormKind.HOTSPOT -> HotspotEditorSheet(form,
                 draft.hotspots.firstOrNull { it.id == form.objectId }, project.steps, !busy && !draft.isTerminal, !busy,
                 draft.recoveryStatus, formMessage, callbacks.onRetryStaging, callbacks.onPendingFormChange, dismiss,
+                sourceValid = form.textRegionSource == null || (step != null && form.textRegionSource.matches(project.project, step)),
                 canUndoEdit, callbacks.onUndo, callbacks.onTextEditEnd) {
                 callbacks.onSavePendingForm()
             }
@@ -489,8 +517,26 @@ internal fun StepNameFormContent(form: EditorPendingForm, enabled: Boolean, reco
 @Composable
 private fun HotspotEditorSheet(form: EditorPendingForm, original: ProjectHotspot?, steps: List<ProjectStep>, enabled: Boolean, dismissEnabled: Boolean,
     recoveryStatus: DraftRecoveryStatus, message: String?, onRetry: () -> Unit, onChange: (EditorPendingForm) -> Unit,
-    onDismiss: () -> Unit, canUndoEdit: Boolean, onUndo: () -> Unit, onTextEditEnd: () -> Unit,
+    onDismiss: () -> Unit, sourceValid: Boolean, canUndoEdit: Boolean, onUndo: () -> Unit, onTextEditEnd: () -> Unit,
     onConfirm: (ProjectHotspot) -> Unit) {
+    val dismissAllowed by rememberUpdatedState(dismissEnabled)
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true,
+        confirmValueChange = { it != SheetValue.Hidden || dismissAllowed })
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState,
+        sheetGesturesEnabled = dismissAllowed,
+        properties = ModalBottomSheetProperties(shouldDismissOnBackPress = dismissAllowed)) {
+        HotspotFormContent(form, original, steps, enabled, dismissEnabled, recoveryStatus, message, onRetry,
+            onChange, onDismiss, sourceValid, canUndoEdit, onUndo, onTextEditEnd) { hotspot ->
+            if (dismissAllowed && sheetState.targetValue != SheetValue.Hidden) onConfirm(hotspot)
+        }
+    }
+}
+
+@Composable
+internal fun HotspotFormContent(form: EditorPendingForm, original: ProjectHotspot?, steps: List<ProjectStep>,
+    enabled: Boolean, dismissEnabled: Boolean, recoveryStatus: DraftRecoveryStatus, message: String?,
+    onRetry: () -> Unit, onChange: (EditorPendingForm) -> Unit, onDismiss: () -> Unit, sourceValid: Boolean,
+    canUndoEdit: Boolean, onUndo: () -> Unit, onTextEditEnd: () -> Unit, onConfirm: (ProjectHotspot) -> Unit) {
     // Visibility is presentation-only; every editable value belongs to the pending form.
     var showGeometry by rememberSaveable(form.objectId) { mutableStateOf(false) }
     val rectangle = if (original != null && listOf(form.left, form.top, form.right, form.bottom) ==
@@ -498,17 +544,15 @@ private fun HotspotEditorSheet(form: EditorPendingForm, original: ProjectHotspot
         original.rect // Editing only the label or target must not round an existing rectangle.
     } else editorPercentageRect(form.left, form.top, form.right, form.bottom)
     val validTarget = if (form.endsDemo) form.endLabel.isNotBlank() else steps.any { it.id == form.targetStepId }
-    val dismissAllowed by rememberUpdatedState(dismissEnabled)
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true,
-        confirmValueChange = { it != SheetValue.Hidden || dismissAllowed })
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState,
-        sheetGesturesEnabled = dismissAllowed,
-        properties = ModalBottomSheetProperties(shouldDismissOnBackPress = dismissAllowed)) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("热点动作", style = MaterialTheme.typography.titleMedium)
+            if (form.textRegionSource != null) Text(if (sourceValid) "文字区域建议 · 请核对范围并选择目标"
+                else "画面已更新。输入仍保留，请取消此建议后重新识别或手动画区。",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (sourceValid) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
             PendingFormStatus(recoveryStatus, enabled, onRetry)
             message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
             OutlinedTextField(form.label, { onChange(form.copy(label = it)) }, label = { Text("动作名称") }, singleLine = true,
@@ -549,18 +593,16 @@ private fun HotspotEditorSheet(form: EditorPendingForm, original: ProjectHotspot
                     val rect = rectangle
                     val objectId = form.objectId
                     val edgeId = form.edgeId
-                    if (dismissAllowed && sheetState.targetValue != SheetValue.Hidden &&
-                        rect != null && objectId != null && edgeId != null) onConfirm(ProjectHotspot(
+                    if (rect != null && objectId != null && edgeId != null) onConfirm(ProjectHotspot(
                         id = objectId, label = form.label.trim(), rect = rect,
                         targetStepId = if (form.endsDemo) null else form.targetStepId,
                         endLabel = if (form.endsDemo) form.endLabel.trim() else null, edgeId = edgeId,
                         transition = original?.transition,
                     ))
-                }, enabled = enabled && form.label.isNotBlank() && rectangle != null && validTarget &&
+                }, enabled = enabled && sourceValid && form.label.isNotBlank() && rectangle != null && validTarget &&
                     form.objectId != null && form.edgeId != null) { Text("保存本步") }
             }
         }
-    }
 }
 
 /** This action has no rectangle and remains separate from the canvas hotspot editor. */
@@ -736,4 +778,22 @@ private fun editorPercentageRect(left: String, top: String, right: String, botto
     val (x1, y1, x2, y2) = values.map { it / 100f }
     if (x2 <= x1 || y2 <= y1) return null
     return OpaqueMask(x1, y1, x2, y2)
+}
+
+/** Text suggestions remain distinct from saved hotspots and never create an edge on their own. */
+@Composable
+internal fun TextRegionSuggestionsContent(state: TextRegionSuggestions, enabled: Boolean, onSelect: (Int) -> Unit) {
+    state.message?.let { Text(it, style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant) }
+    if (state.candidates.isNotEmpty()) {
+        Text("文字区域建议 · 请确认用途和目标", style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            state.candidates.forEachIndexed { index, candidate ->
+                OutlinedButton(onClick = { onSelect(index) }, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp)) {
+                    Text("${index + 1} ${candidate.text}", maxLines = 1)
+                }
+            }
+        }
+    }
 }

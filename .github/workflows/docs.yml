@@ -254,6 +254,9 @@ jobs:
             --tests com.tapscene.sharing.OfflineShareHostTest \
             --tests com.tapscene.ui.OfflineShareWorkspaceHostTest \
             --tests com.tapscene.ui.HostingWorkspaceHostTest \
+            --tests com.tapscene.ocr.TextRegionPolicyTest \
+            --tests com.tapscene.data.TextRegionDraftHostTest \
+            --tests com.tapscene.ui.TextRegionWorkspaceHostTest \
             2>&1 | tee "$RUNNER_TEMP/host-data-checks.txt"
       - name: Verify the exact host checks executed without failures or skips
         if: always() && steps.host_data.outcome != 'skipped' && steps.scope.outputs.android == 'true'
@@ -267,6 +270,23 @@ jobs:
           root = Path("android/app/build/test-results/testDebugUnitTest")
           files = sorted(root.glob("TEST-*.xml"))
           expected = {
+              ("com.tapscene.ocr.TextRegionPolicyTest", "emptyInvalidAndOversizedInputsReturnNoSuggestions"): 1,
+              ("com.tapscene.ocr.TextRegionPolicyTest", "twoCharacterLabelsKeepExactSourceBoundsWithoutPadding"): 1,
+              ("com.tapscene.ocr.TextRegionPolicyTest", "recognitionThresholdDoesNotBecomeClickProbability"): 1,
+              ("com.tapscene.ocr.TextRegionPolicyTest", "blankSymbolsControlsAndOneCharacterNoiseAreRejected"): 1,
+              ("com.tapscene.ocr.TextRegionPolicyTest", "invalidBoxesSmallFragmentsAndPageSizedRegionsAreRejected"): 1,
+              ("com.tapscene.ocr.TextRegionPolicyTest", "onlyCloseAlignedWordsInTheSameReportedLineAreJoined"): 1,
+              ("com.tapscene.ocr.TextRegionPolicyTest", "longParagraphAndShortDenseRowsAreNotOffered"): 1,
+              ("com.tapscene.ocr.TextRegionPolicyTest", "shortTailOfLongParagraphIsRejectedButSparseLabelsRemain"): 1,
+              ("com.tapscene.ocr.TextRegionPolicyTest", "overlappingDetectionsKeepBestReadingButDistinctRepeatedLabelsRemain"): 1,
+              ("com.tapscene.ocr.TextRegionPolicyTest", "existingHotspotsSuppressContainmentAndHighOverlapOnly"): 1,
+              ("com.tapscene.ocr.TextRegionPolicyTest", "resultsAreBoundedAndStableInReadingOrderWithoutChangingInput"): 1,
+              ("com.tapscene.data.TextRegionDraftHostTest", "codecV1CompatibilityAndStrictBoundFormRoundTrip"): 1,
+              ("com.tapscene.data.TextRegionDraftHostTest", "rejectsMalformedOrMisownedSuggestionWithoutReplacingDraft"): 1,
+              ("com.tapscene.data.TextRegionDraftHostTest", "sourceMismatchAndMissingBytesPreserveFormalAndRecoveryState"): 1,
+              ("com.tapscene.data.TextRegionDraftHostTest", "finalSaveCannotBypassPersistedSourceAndAllowsExplicitCancellation"): 1,
+              ("com.tapscene.data.TextRegionDraftHostTest", "textRevisionKeepsSourceValidAndSuccessClearsOnlyThisDraft"): 1,
+              ("com.tapscene.ui.TextRegionWorkspaceHostTest", "exactPixelsLateResultsAndRecoveredFormsKeepTheirSourceAndAuthorIntent"): 1,
               ("com.tapscene.ui.HostingWorkspaceHostTest", "cancellingAfterInstallCannotReopenAccountWhenRetirementIsOffline"): 1,
               ("com.tapscene.ui.HostingWorkspaceHostTest", "repeatedConfirmPreparesOnceAndBusyObservationCanCancel"): 1,
               ("com.tapscene.ui.HostingWorkspaceHostTest", "confirmedCancelIntentSurvivesImmediateLeave"): 1,
@@ -313,7 +333,7 @@ jobs:
                   stderr = "\n".join(node.text or "" for node in suite.iter("system-err"))
                   assert "Explicit termination method 'close' not called" not in stderr, "Native PNG host check leaked a CloseGuard resource"
           summary = (f"HOST_DATA_EXECUTION tests={sum(actual.values())} failures={failures} errors={errors} "
-                     f"skipped={skipped} test_seconds={seconds:.3f}; expected=6 original data executions + 1 temporary-store lifecycle + 1 static AI round trip + 1 editor undo + 5 offline share executions + 6 saved-step-copy executions + 4 project-copy executions + 1 sealed hosted-source execution + 6 hosting-workspace executions / 28 entry points / 10 classes")
+                     f"skipped={skipped} test_seconds={seconds:.3f}; expected_entry_points={len(expected)}")
           print(summary)
           (Path(os.environ["RUNNER_TEMP"]) / "host-data-execution.txt").write_text(summary + "\n", encoding="utf-8")
           assert actual == Counter(expected), f"Missing/unexpected executed tests: {actual}"
@@ -433,7 +453,9 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 63, f"Expected sixty-three Compose review images, found {len(images)}"
+          assert len(images) == 66, f"Expected sixty-six Compose review images, found {len(images)}"
+          text_region_images = [image for image in images if "TextRegionScreenshotPreviewsKt" in str(image)]
+          assert len(text_region_images) == 3, f"Expected three text-region review images, found {len(text_region_images)}"
           hosted_images = [image for image in images if "HostingScreenshotPreviewsKt" in str(image)]
           assert len(hosted_images) == 3, f"Expected three local-hosting review images, found {len(hosted_images)}"
           project_copy_images = [image for image in images if "SavedProjectCopyScreenshotPreviewsKt" in str(image)]

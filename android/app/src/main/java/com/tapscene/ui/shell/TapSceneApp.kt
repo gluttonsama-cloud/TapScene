@@ -655,9 +655,11 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                         onPendingFormChange = { form -> projects.editPendingForm(snapshot.project.id, editorDraft.stepId, form) }, onRetryStaging = projects::retryDraftStaging,
                                         onResolveConflict = projects::resolveDraftConflict,
                                         onSavePendingForm = { projects.savePendingStepForm(snapshot.project.id, editorDraft.stepId) }, onResolveUnsavedSteps = { showUnsavedSteps = true },
-                                        onUndo = projects::undoEditorEdit, onTextEditEnd = projects::endEditorTextEdit),
+                                        onUndo = projects::undoEditorEdit, onTextEditEnd = projects::endEditorTextEdit,
+                                        onRecognizeTextRegions = projects::recognizeTextRegions, onCancelTextRegions = projects::cancelTextRegions,
+                                        onSelectTextRegion = projects::selectTextRegion),
                                         previewEnabled = false, regionsEnabled = state.dirtyStepIds.isEmpty(), correctionEnabled = scopeReady && !mediaState.busy,
-                                dirtyStepCount = state.dirtyStepIds.size, formMessage = state.message, canUndoEdit = state.canUndoEdit)
+                                dirtyStepCount = state.dirtyStepIds.size, formMessage = state.message, canUndoEdit = state.canUndoEdit, textRegions = state.textRegions)
                                 } else AuthoredPathScreen(snapshot, pathStepIds, unavailable || mediaState.busy,
                                     { if (!state.busy) pop() },
                                     { ids, terminal, revision ->
@@ -766,10 +768,12 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                         onPendingFormChange = { form -> projects.editPendingForm(snapshot.project.id, draft.stepId, form) }, onRetryStaging = projects::retryDraftStaging,
                                         onResolveConflict = projects::resolveDraftConflict,
                                         onSavePendingForm = { projects.savePendingStepForm(snapshot.project.id, draft.stepId) }, onResolveUnsavedSteps = { showUnsavedSteps = true },
-                                        onUndo = projects::undoEditorEdit, onTextEditEnd = projects::endEditorTextEdit),
+                                        onUndo = projects::undoEditorEdit, onTextEditEnd = projects::endEditorTextEdit,
+                                        onRecognizeTextRegions = projects::recognizeTextRegions, onCancelTextRegions = projects::cancelTextRegions,
+                                        onSelectTextRegion = projects::selectTextRegion),
                                 previewEnabled = state.dirtyStepIds.isEmpty(), regionsEnabled = state.dirtyStepIds.isEmpty(),
                                 correctionEnabled = scopeReady && !mediaState.busy,
-                                dirtyStepCount = state.dirtyStepIds.size, formMessage = state.message, canUndoEdit = state.canUndoEdit)
+                                dirtyStepCount = state.dirtyStepIds.size, formMessage = state.message, canUndoEdit = state.canUndoEdit, textRegions = state.textRegions)
                         } }
                         state.route == ProjectRoute.PREVIEW -> state.project?.let { snapshot -> state.preview?.let { preview ->
                             DraftPreviewContent(snapshot, preview, state.bitmap, unavailable, projects::chooseHotspot,
