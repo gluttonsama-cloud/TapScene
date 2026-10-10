@@ -1,0 +1,67 @@
+name: Local hosted viewer
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "server/**"
+      - "runtime-ts/**"
+      - "web-player/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/hosted.yml"
+permissions:
+  contents: read
+concurrency:
+  group: hosted-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  hosted:
+    name: hosted/local-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: postgres:17.11
+        env:
+          POSTGRES_USER: tapscene
+          POSTGRES_PASSWORD: synthetic-local-only
+          POSTGRES_DB: tapscene_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U tapscene -d tapscene_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install media tools
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends --yes ffmpeg
+      - name: Set up pinned Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24.19.0"
+      - run: npm ci
+      - run: npm run check:hosted
+      - run: npm run build:viewer
+      - name: Test actual PostgreSQL and media boundaries
+        run: npm run test:hosted
+        env:
+          TEST_DATABASE_URL: postgres://tapscene:synthetic-local-only@127.0.0.1:5432/tapscene_test
+      - name: Install pinned test browser
+        run: npx playwright install --with-deps chromium
+      - name: Check browser interactions and responsive screens
+        run: npm run test:browser -w web-player
+      - name: Verify actual hosted browser loop
+        run: npm run test:browser -w server
+        env:
+          TEST_DATABASE_URL: postgres://tapscene:synthetic-local-only@127.0.0.1:5432/tapscene_test
+      - name: Keep synthetic browser screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: local-hosted-viewer-screens
+          path: |
+            web-player/playwright-results/*.png
+            server/playwright-results/*.png
+          retention-days: 7
+          if-no-files-found: ignore
