@@ -13,6 +13,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         RecordingCoordinator.recover(applicationContext)
+        com.tapscene.clickplan.ClickPlayback.initialize(applicationContext)
         setContent { TapSceneApp(projects = viewModel(), media = viewModel(), candidates = viewModel(), releases = viewModel()) }
     }
 }

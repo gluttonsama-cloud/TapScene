@@ -12,6 +12,8 @@ data class RecordingUiState(
     val error: String? = null,
     val canRetry: Boolean = false,
     val mapping: RecordingMapping = RecordingMapping.Unknown,
+    /** Full default-display capture validated for this click run; still no video PTS mapping. */
+    val clickCaptureReady: Boolean = false,
 ) {
     val isBusy: Boolean get() = phase in setOf(
         RecordingPhase.Starting, RecordingPhase.Recording,
@@ -72,3 +74,11 @@ internal data class RecordingContentLayout(
         }
     }
 }
+
+/** Reserved identities and fixed default-display geometry for one explicitly authorized run. */
+data class RecordingClickSession(
+    val sessionId: String,
+    val sourceId: String,
+    val width: Int,
+    val height: Int,
+)

@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">TapScene</string>
+    <string name="click_service_label">TapScene 点击链定位与播放</string>
+    <string name="click_service_description">由你亲自开启后，可在目标 App 上定位并按已确认顺序执行单指短按。仅编排或播放期间读取窗口包名、类名与全屏状态来暂停非目标或未知页面；不读取节点内容、键盘文本、通知或剪贴板。完整计划和执行结果留在本机，窗口轨迹不保存。同 App 内支付和验证页面无法全部识别，请仅用于普通演示。录屏每次另行授权，可随时从通知停止。</string>
 </resources>

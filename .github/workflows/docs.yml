@@ -257,6 +257,11 @@ jobs:
             --tests com.tapscene.ocr.TextRegionPolicyTest \
             --tests com.tapscene.data.TextRegionDraftHostTest \
             --tests com.tapscene.ui.TextRegionWorkspaceHostTest \
+            --tests com.tapscene.clickplan.ClickRunEngineTest \
+            --tests com.tapscene.clickplan.ClickPlanStoreHostTest \
+            --tests com.tapscene.clickplan.ClickWindowPolicyTest \
+            --tests com.tapscene.clickplan.ClickTargetArmTest \
+            --tests com.tapscene.recording.RecordingClickGateTest \
             2>&1 | tee "$RUNNER_TEMP/host-data-checks.txt"
       - name: Verify the exact host checks executed without failures or skips
         if: always() && steps.host_data.outcome != 'skipped' && steps.scope.outputs.android == 'true'
@@ -270,6 +275,23 @@ jobs:
           root = Path("android/app/build/test-results/testDebugUnitTest")
           files = sorted(root.glob("TEST-*.xml"))
           expected = {
+              ("com.tapscene.clickplan.ClickRunEngineTest", "queuedWindowPauseAndStopAfterIntentAreObservedBeforeAtMostOnceDispatch"): 1,
+              ("com.tapscene.recording.RecordingClickGateTest", "cancellingNewerRequestNeverRevivesQueuedOlderStart"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "pauseBeforeStartRequiresExplicitResumeAndRechecksTheGuards"): 1,
+              ("com.tapscene.clickplan.ClickTargetArmTest", "confirmationOnlySurvivesItsOwnExitAndTheImmediateTargetTransition"): 1,
+              ("com.tapscene.clickplan.ClickWindowPolicyTest", "onlyKnownFullscreenTargetActivityIsAllowedAndUnknownNeverMeansSafe"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "planSnapshotIsImmutableBoundedAndOrderSensitive"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "intentAndAcceptanceAreDurableBeforeCallbackAndOnlyOneGestureIsInFlight"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "pauseAllowsInFlightSettlementAndRequiresExplicitResumeWithoutReplayingIt"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "blockedAndUnknownWindowsDoNotDispatchAndRecordingLossIsTerminal"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "failedIntentPersistenceClosesExecutionBeforeDispatch"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "windowOrRecordingChangeDuringDurableIntentWritePreventsDispatchAndReplay"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "persistenceFailureAfterPlatformAcceptanceNeverDispatchesTheNextAction"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "rejectionCancellationTimeoutAndStopAreTerminalAndLateCallbacksAreIsolated"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "synchronousCallbacksStillPersistAcceptanceBeforeCompletion"): 1,
+              ("com.tapscene.clickplan.ClickRunEngineTest", "persistedActiveRunCannotBeConstructedAsAnExecutableEngine"): 1,
+              ("com.tapscene.clickplan.ClickPlanStoreHostTest", "optimisticPlansRetainImmutableRunSnapshotAndRecoverUncertainIntentWithoutReplay"): 1,
+              ("com.tapscene.clickplan.ClickPlanStoreHostTest", "draftDigestTamperingAndForeignFrameMappingAreRejectedAndPrivatePathIsUsed"): 1,
               ("com.tapscene.ocr.TextRegionPolicyTest", "emptyInvalidAndOversizedInputsReturnNoSuggestions"): 1,
               ("com.tapscene.ocr.TextRegionPolicyTest", "twoCharacterLabelsKeepExactSourceBoundsWithoutPadding"): 1,
               ("com.tapscene.ocr.TextRegionPolicyTest", "recognitionThresholdDoesNotBecomeClickProbability"): 1,
@@ -410,7 +432,7 @@ jobs:
               "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE",
               "android.permission.MANAGE_EXTERNAL_STORAGE", "android.permission.READ_MEDIA_VIDEO",
               "android.permission.RECORD_AUDIO", "android.permission.CAPTURE_AUDIO_OUTPUT",
-              "android.permission.BIND_ACCESSIBILITY_SERVICE",
+              "android.permission.BIND_ACCESSIBILITY_SERVICE", "android.permission.SYSTEM_ALERT_WINDOW", "android.permission.QUERY_ALL_PACKAGES",
           }
           assert not permissions & forbidden, permissions
           application = root.find("application")
@@ -424,8 +446,15 @@ jobs:
           assert len(recording) == 1
           assert recording[0].get(namespace + "exported") == "false"
           assert recording[0].get(namespace + "foregroundServiceType") == "mediaProjection"
-          assert all(item.get(namespace + "permission") != "android.permission.BIND_ACCESSIBILITY_SERVICE" for item in services)
-          print("Merged manifest: no network/audio/broad storage/accessibility access; non-exported projection service; backup disabled.")
+          clicks = [item for item in services if item.get(namespace + "permission") == "android.permission.BIND_ACCESSIBILITY_SERVICE"]
+          assert len(clicks) == 1 and clicks[0].get(namespace + "name") == "com.tapscene.clickplan.ClickAccessibilityService"
+          assert clicks[0].get(namespace + "exported") == "true"
+          accessibility = ET.parse("android/app/src/main/res/xml/click_accessibility_service.xml").getroot()
+          assert accessibility.get(namespace + "canPerformGestures") == "true"
+          assert accessibility.get(namespace + "canRetrieveWindowContent") == "false"
+          assert accessibility.get(namespace + "canRequestFilterKeyEvents") == "false"
+          assert accessibility.get(namespace + "accessibilityEventTypes") == "typeWindowStateChanged"
+          print("Merged manifest: offline/no audio/broad storage/overlay/package permissions; user-enabled gesture-only service; no node/key retrieval; backup disabled.")
           PY
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs \
             android/app/build/outputs/apk/debug/app-debug.apk | tee "$RUNNER_TEMP/apk-signature.txt"
@@ -453,7 +482,9 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 66, f"Expected sixty-six Compose review images, found {len(images)}"
+          assert len(images) == 68, f"Expected sixty-eight Compose review images, found {len(images)}"
+          click_plan_images = [image for image in images if "ClickPlanScreenshotPreviewsKt" in str(image)]
+          assert len(click_plan_images) == 2, f"Expected two click-plan review images, found {len(click_plan_images)}"
           text_region_images = [image for image in images if "TextRegionScreenshotPreviewsKt" in str(image)]
           assert len(text_region_images) == 3, f"Expected three text-region review images, found {len(text_region_images)}"
           hosted_images = [image for image in images if "HostingScreenshotPreviewsKt" in str(image)]
@@ -478,7 +509,7 @@ jobs:
               assert data[:8] == b"\x89PNG\r\n\x1a\n", image
               width, height = struct.unpack(">II", data[16:24])
               assert width > 0 and height > 0, image
-              if any(name in str(image) for name in ("EditorDraftRecovery", "SafeImage", "ScreenshotImport", "EditorNavigation", "ReviewAiNavigation", "AiDraftScreenshot", "OfflineShareScreenshot", "SavedStepCopyScreenshot", "SavedProjectCopyScreenshot", "HostingScreenshot")):
+              if any(name in str(image) for name in ("EditorDraftRecovery", "SafeImage", "ScreenshotImport", "EditorNavigation", "ReviewAiNavigation", "AiDraftScreenshot", "OfflineShareScreenshot", "SavedStepCopyScreenshot", "SavedProjectCopyScreenshot", "HostingScreenshot", "ClickPlanScreenshot")):
                   # A modal window can yield a valid but blank PNG in Layoutlib. Reject that
                   # before treating form and AI import images as usable review evidence.
                   import zlib
