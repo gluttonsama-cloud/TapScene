@@ -12,62 +12,87 @@ internal object AiImportMigrationChecks {
     private val sha = "a".repeat(64)
 
     fun run(context: Context, status: (String) -> Unit) {
+        migrationsAndRollback(context, status)
+        rejectInvalidSchemasAndRelations(context, status)
+    }
+
+    fun migrationsAndRollback(context: Context, status: (String) -> Unit,
+        verifyDatabase: (SQLiteDatabase) -> Unit = {},
+    ) = withRoot(context) { root ->
+        for (version in 1..7) {
+            for (stage in listOf("copy", "drop", "rename", "indexes", "version")) {
+                val file = File(root, "v$version-$stage.sqlite")
+                seed(file, version, verifyDatabase)
+                val before = readSnapshot(file)
+                // The wrapper delegates every production callback. Only the last injected
+                // failure happens after setting user_version, within the framework transaction.
+                var injected = false
+                val production = ProjectStore.Database(context, file.path) { point ->
+                    if (point == stage) {
+                        injected = true
+                        error("Injected migration failure after $point")
+                    }
+                }
+                val helper = object : SQLiteOpenHelper(context, file.path, null, 8) {
+                    override fun onConfigure(db: SQLiteDatabase) {
+                        verifyDatabase(db)
+                        production.onConfigure(db)
+                    }
+                    override fun onCreate(db: SQLiteDatabase) = production.onCreate(db)
+                    override fun onOpen(db: SQLiteDatabase) = production.onOpen(db)
+                    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+                        production.onUpgrade(db, oldVersion, newVersion)
+                        db.version = newVersion
+                        if (stage == "version") {
+                            injected = true
+                            error("Injected migration failure after version")
+                        }
+                    }
+                }
+                try { check(runCatching { helper.writableDatabase }.isFailure) }
+                finally { helper.close(); production.close() }
+                check(injected) { "v$version failed before the intended $stage checkpoint" }
+                check(readSnapshot(file) == before) { "v$version rollback lost schema/data/version after $stage" }
+                verifyMigration(context, file, before, verifyDatabase)
+            }
+        }
+        status("PASS Android SQLite v1–v7-to-v8 exact typed fields, graph, image sources, drafts and journals; all five migration rollback points and successful retry")
+    }
+
+    fun rejectInvalidSchemasAndRelations(context: Context, status: (String) -> Unit,
+        verifyDatabase: (SQLiteDatabase) -> Unit = {},
+    ) = withRoot(context) { root ->
+        for (objectKind in listOf("index", "changed-index", "trigger", "view", "orphan")) {
+            val file = File(root, "reject-$objectKind.sqlite")
+            seed(file, 7, verifyDatabase)
+            SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+                when (objectKind) {
+                    "index" -> db.execSQL("CREATE INDEX custom_states ON states(title)")
+                    "changed-index" -> {
+                        db.execSQL("DROP INDEX states_source")
+                        db.execSQL("CREATE INDEX states_source ON states(title)")
+                    }
+                    "trigger" -> db.execSQL("CREATE TRIGGER custom_states AFTER UPDATE ON states BEGIN SELECT 1; END")
+                    "view" -> db.execSQL("CREATE VIEW custom_states AS SELECT * FROM states")
+                    else -> {
+                        db.setForeignKeyConstraintsEnabled(false)
+                        db.execSQL("UPDATE states SET source_id='missing' WHERE state_id='a'")
+                    }
+                }
+            }
+            val before = readSnapshot(file)
+            ProjectStore.Database(context, file.path).use { check(runCatching { it.writableDatabase }.isFailure) }
+            check(readSnapshot(file) == before) { "Rejected $objectKind migration changed historical DB" }
+        }
+        status("PASS Android v8 unknown indexes/triggers/views and orphan relationships reject without altering schema, rows or version")
+        for (reverse in listOf(false, true)) checkPackageSchema(context, File(root, "cycle-$reverse.sqlite"), reverse, verifyDatabase)
+        status("PASS Android v8 circular deferred provenance, insertion order, mismatch rejection, safe-image history, durable receipts and byte-bounded draft config")
+    }
+
+    private fun withRoot(context: Context, block: (File) -> Unit) {
         val root = File(context.noBackupFilesDir, "ai-migration-checks-${UUID.randomUUID()}")
         check(root.mkdir())
-        try {
-            for (version in 1..7) {
-                for (stage in listOf("copy", "drop", "rename", "indexes", "version")) {
-                    val file = File(root, "v$version-$stage.sqlite")
-                    seed(file, version)
-                    val before = readSnapshot(file)
-                    // The wrapper delegates every production callback. Only the last injected
-                    // failure happens after setting user_version, within the framework transaction.
-                    val production = ProjectStore.Database(context, file.path) { point ->
-                        check(point != stage) { "Injected migration failure after $point" }
-                    }
-                    val helper = object : SQLiteOpenHelper(context, file.path, null, 8) {
-                        override fun onConfigure(db: SQLiteDatabase) = production.onConfigure(db)
-                        override fun onCreate(db: SQLiteDatabase) = production.onCreate(db)
-                        override fun onOpen(db: SQLiteDatabase) = production.onOpen(db)
-                        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-                            production.onUpgrade(db, oldVersion, newVersion)
-                            db.version = newVersion
-                            check(stage != "version") { "Injected migration failure after version" }
-                        }
-                    }
-                    try { check(runCatching { helper.writableDatabase }.isFailure) }
-                    finally { helper.close(); production.close() }
-                    check(readSnapshot(file) == before) { "v$version rollback lost schema/data/version after $stage" }
-                    verifyMigration(context, file, before)
-                }
-            }
-            status("PASS Android SQLite v1–v7-to-v8 exact typed fields, graph, image sources, drafts and journals; all five migration rollback points and successful retry")
-            for (objectKind in listOf("index", "changed-index", "trigger", "view", "orphan")) {
-                val file = File(root, "reject-$objectKind.sqlite")
-                seed(file, 7)
-                SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
-                    when (objectKind) {
-                        "index" -> db.execSQL("CREATE INDEX custom_states ON states(title)")
-                        "changed-index" -> {
-                            db.execSQL("DROP INDEX states_source")
-                            db.execSQL("CREATE INDEX states_source ON states(title)")
-                        }
-                        "trigger" -> db.execSQL("CREATE TRIGGER custom_states AFTER UPDATE ON states BEGIN SELECT 1; END")
-                        "view" -> db.execSQL("CREATE VIEW custom_states AS SELECT * FROM states")
-                        else -> {
-                            db.setForeignKeyConstraintsEnabled(false)
-                            db.execSQL("UPDATE states SET source_id='missing' WHERE state_id='a'")
-                        }
-                    }
-                }
-                val before = readSnapshot(file)
-                ProjectStore.Database(context, file.path).use { check(runCatching { it.writableDatabase }.isFailure) }
-                check(readSnapshot(file) == before) { "Rejected $objectKind migration changed historical DB" }
-            }
-            status("PASS Android v8 unknown indexes/triggers/views and orphan relationships reject without altering schema, rows or version")
-            for (reverse in listOf(false, true)) checkPackageSchema(context, File(root, "cycle-$reverse.sqlite"), reverse)
-            status("PASS Android v8 circular deferred provenance, insertion order, mismatch rejection, safe-image history, durable receipts and byte-bounded draft config")
-        } finally { check(root.deleteRecursively()) }
+        try { block(root) } finally { check(root.deleteRecursively()) }
     }
 
     private data class Table(val columns: List<String>, val rows: List<String>)
@@ -99,9 +124,10 @@ internal object AiImportMigrationChecks {
         })
     }.sorted()
 
-    private fun seed(file: File, version: Int) {
+    private fun seed(file: File, version: Int, verifyDatabase: (SQLiteDatabase) -> Unit) {
         check(!file.exists()) { "Historical v$version fixture must start from a new database file" }
         SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            verifyDatabase(db)
             check(db.version == 0)
             db.setForeignKeyConstraintsEnabled(true)
             transaction(db) {
@@ -147,9 +173,10 @@ internal object AiImportMigrationChecks {
         }
     }
 
-    private fun verifyMigration(context: Context, file: File, before: Snapshot) {
+    private fun verifyMigration(context: Context, file: File, before: Snapshot, verifyDatabase: (SQLiteDatabase) -> Unit) {
         ProjectStore.Database(context, file.path).use { helper ->
             val db = helper.writableDatabase
+            verifyDatabase(db)
             check(db.version == 8)
             for ((table, expected) in before.tables) check(rows(db, table, expected.columns) == expected.rows) { "Migration altered $table" }
             check(scalar(db, "PRAGMA foreign_keys") == 1L)
@@ -159,9 +186,10 @@ internal object AiImportMigrationChecks {
         }
     }
 
-    private fun checkPackageSchema(context: Context, file: File, reverse: Boolean) {
+    private fun checkPackageSchema(context: Context, file: File, reverse: Boolean, verifyDatabase: (SQLiteDatabase) -> Unit) {
         ProjectStore.Database(context, file.path).use { helper ->
             val db = helper.writableDatabase
+            verifyDatabase(db)
             transaction(db) {
                 for (p in listOf("p", "other")) {
                     db.execSQL("INSERT INTO projects VALUES(?,?,?,1,1,1,NULL)", arrayOf(p,p,"Goal"))
