@@ -32,3 +32,15 @@ data class ReleaseSummary(
     val byteLength: Long,
     val origin: String,
 )
+
+/** Sealed local provenance read from the retained review, never inferred from an open draft. */
+data class HostedReleaseBinding(
+    val summary: ReleaseSummary,
+    val projectId: String,
+    val projectRevision: Long,
+    val scene: ViewerScene,
+    val fileListDigest: String,
+) {
+    val uploadByteLength: Long get() = com.tapscene.packageformat.ViewerPackageCodec.writeScene(scene).size.toLong() +
+        scene.assets.sumOf { it.byteLength }
+}

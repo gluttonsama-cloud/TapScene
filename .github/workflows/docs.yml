@@ -229,6 +229,11 @@ jobs:
       - name: Build the arm64 phone preview and run lint
         if: steps.scope.outputs.android == 'true'
         run: gradle -p android --no-daemon --max-workers=2 -PcompatibilityPreview=true -PtapsceneAbi=arm64-v8a :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+      - name: Build the unsigned local-hosting development variant and inspect isolation
+        if: steps.scope.outputs.android == 'true'
+        run: |
+          gradle -p android --no-daemon --max-workers=2 -PcompatibilityPreview=true -PtapsceneAbi=arm64-v8a :app:assembleHostedDebug :app:lintHostedDebug
+          python3 tools/hosting-checks/check-manifests.py
       - name: Execute production Android data and static AI round-trip checks
         id: host_data
         if: steps.scope.outputs.android == 'true'
@@ -244,9 +249,11 @@ jobs:
             --tests com.tapscene.data.AiRoundTripHostTest \
             --tests com.tapscene.data.SavedStepCopyHostTest \
             --tests com.tapscene.data.SavedProjectCopyHostTest \
+            --tests com.tapscene.data.HostedReleaseHostTest \
             --tests com.tapscene.ui.CopyWorkspaceHostTest \
             --tests com.tapscene.sharing.OfflineShareHostTest \
             --tests com.tapscene.ui.OfflineShareWorkspaceHostTest \
+            --tests com.tapscene.ui.HostingWorkspaceHostTest \
             2>&1 | tee "$RUNNER_TEMP/host-data-checks.txt"
       - name: Verify the exact host checks executed without failures or skips
         if: always() && steps.host_data.outcome != 'skipped' && steps.scope.outputs.android == 'true'
@@ -260,6 +267,13 @@ jobs:
           root = Path("android/app/build/test-results/testDebugUnitTest")
           files = sorted(root.glob("TEST-*.xml"))
           expected = {
+              ("com.tapscene.ui.HostingWorkspaceHostTest", "cancellingAfterInstallCannotReopenAccountWhenRetirementIsOffline"): 1,
+              ("com.tapscene.ui.HostingWorkspaceHostTest", "repeatedConfirmPreparesOnceAndBusyObservationCanCancel"): 1,
+              ("com.tapscene.ui.HostingWorkspaceHostTest", "confirmedCancelIntentSurvivesImmediateLeave"): 1,
+              ("com.tapscene.ui.HostingWorkspaceHostTest", "cancelledLoginDrainsAndRevokesLateSessionWithoutResurrectingRoute"): 1,
+              ("com.tapscene.ui.HostingWorkspaceHostTest", "unauthorizedManagementAllowsNewLoginWithoutLogout"): 1,
+              ("com.tapscene.ui.HostingWorkspaceHostTest", "malformedSuccessfulLoginResponseIsUnknownNotAReusableChallenge"): 1,
+              ("com.tapscene.data.HostedReleaseHostTest", "sealedProvenanceAndExactSnapshotSurviveSourceDeletion"): 1,
               ("com.tapscene.data.ProjectStoreHostTest", "historicalMigrationsAndRollback"): 2,
               ("com.tapscene.data.ProjectStoreHostTest", "rejectsInvalidLegacySchemasAndRelations"): 1,
               ("com.tapscene.data.ProjectStoreHostTest", "rawPendingFormReopensAndStaleSessionIsRejected"): 1,
@@ -299,7 +313,7 @@ jobs:
                   stderr = "\n".join(node.text or "" for node in suite.iter("system-err"))
                   assert "Explicit termination method 'close' not called" not in stderr, "Native PNG host check leaked a CloseGuard resource"
           summary = (f"HOST_DATA_EXECUTION tests={sum(actual.values())} failures={failures} errors={errors} "
-                     f"skipped={skipped} test_seconds={seconds:.3f}; expected=6 original data executions + 1 temporary-store lifecycle + 1 static AI round trip + 1 editor undo + 5 offline share executions + 6 saved-step-copy executions + 4 project-copy executions / 21 entry points / 8 classes")
+                     f"skipped={skipped} test_seconds={seconds:.3f}; expected=6 original data executions + 1 temporary-store lifecycle + 1 static AI round trip + 1 editor undo + 5 offline share executions + 6 saved-step-copy executions + 4 project-copy executions + 1 sealed hosted-source execution + 6 hosting-workspace executions / 28 entry points / 10 classes")
           print(summary)
           (Path(os.environ["RUNNER_TEMP"]) / "host-data-execution.txt").write_text(summary + "\n", encoding="utf-8")
           assert actual == Counter(expected), f"Missing/unexpected executed tests: {actual}"
@@ -327,6 +341,9 @@ jobs:
           for boundary in ("graph", "recovery", "migration"):
               assert f"HOST_SAVED_PROJECT_COPY {boundary}:" in evidence, f"Missing saved-project-copy evidence: {boundary}"
           assert "HOST_PROJECT_COPY_WORKSPACE all-source-input/home-restored-panel=blocked" in evidence
+          assert "HOST_HOSTED_RELEASE native PNG/SQLite local-review-binding/canonical-whitelist/import-refusal/source-delete PASS" in evidence
+          for boundary in ("single-confirm/busy-cancel", "confirmed-cancel/immediate-leave/reopen", "late-login/revoke/no-route-resurrection", "expired-session/can-relogin", "lost-session-response/one-day-warning", "installed-cancel/offline-retire/no-account-resurrection"):
+              assert f"HOST_HOSTING_WORKSPACE {boundary} PASS" in evidence
           print("TAPSCENE_HOST_DATA_CHECKS_OK: original six checks plus temporary-store lifecycle, static native-PNG round trip, editor undo, offline sharing, saved-step and complete-project copying executed; device/video/power-loss checks remain separate")
           PY_HOST
       - name: Read the actual Android round-trip export with the independent TS reader
@@ -416,7 +433,9 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 60, f"Expected sixty Compose review images, found {len(images)}"
+          assert len(images) == 63, f"Expected sixty-three Compose review images, found {len(images)}"
+          hosted_images = [image for image in images if "HostingScreenshotPreviewsKt" in str(image)]
+          assert len(hosted_images) == 3, f"Expected three local-hosting review images, found {len(hosted_images)}"
           project_copy_images = [image for image in images if "SavedProjectCopyScreenshotPreviewsKt" in str(image)]
           assert len(project_copy_images) == 2, f"Expected two saved-project-copy review images, found {len(project_copy_images)}"
           copy_images = [image for image in images if "SavedStepCopyScreenshotPreviewsKt" in str(image)]
@@ -437,7 +456,7 @@ jobs:
               assert data[:8] == b"\x89PNG\r\n\x1a\n", image
               width, height = struct.unpack(">II", data[16:24])
               assert width > 0 and height > 0, image
-              if any(name in str(image) for name in ("EditorDraftRecovery", "SafeImage", "ScreenshotImport", "EditorNavigation", "ReviewAiNavigation", "AiDraftScreenshot", "OfflineShareScreenshot", "SavedStepCopyScreenshot", "SavedProjectCopyScreenshot")):
+              if any(name in str(image) for name in ("EditorDraftRecovery", "SafeImage", "ScreenshotImport", "EditorNavigation", "ReviewAiNavigation", "AiDraftScreenshot", "OfflineShareScreenshot", "SavedStepCopyScreenshot", "SavedProjectCopyScreenshot", "HostingScreenshot")):
                   # A modal window can yield a valid but blank PNG in Layoutlib. Reject that
                   # before treating form and AI import images as usable review evidence.
                   import zlib

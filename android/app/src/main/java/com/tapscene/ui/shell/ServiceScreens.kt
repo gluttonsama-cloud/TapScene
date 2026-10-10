@@ -23,6 +23,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -36,6 +38,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.tapscene.data.ProjectSnapshot
 import com.tapscene.data.ReleaseSummary
+import com.tapscene.ui.HostingPage
+import com.tapscene.ui.HostingUiState
+import com.tapscene.ui.HOSTED_LOCAL_ENDPOINT
+import com.tapscene.hosting.HostedModels
+import com.tapscene.packageformat.ViewerScene
+import com.tapscene.packageformat.ViewerPackageCodec
+import kotlinx.coroutines.delay
 import com.tapscene.ui.ProjectIssue
 import com.tapscene.ui.AiPackageConfiguration
 import com.tapscene.ui.ReleaseUiState
@@ -291,6 +300,7 @@ fun DeliveryOptionsScreen(
     onExport: (() -> Unit)? = null,
     onShare: (() -> Unit)? = null,
     busy: Boolean = false,
+    onHosting: (() -> Unit)? = null,
 ) {
     ServicePage("交付方式", onBack) {
         WorkflowLine(2, listOf("检查", "成品复核", "交付"))
@@ -312,12 +322,13 @@ fun DeliveryOptionsScreen(
         DetailSection("托管链接", "主动上传封存后的安全内容，由持链者观看。") {
             ShellLabelValue("有效期选项", "1 天 / 7 天 / 30 天")
             ShellActionRow("托管账号与版本", "查看账号入口与已发布版本管理。", onClick = onAccount)
-            OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = {}, enabled = false, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("确认并发布") }
+            OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = { onHosting?.invoke() }, enabled = onHosting != null && !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (onHosting == null) "确认并发布" else "选择本机封存版（开发托管）") }
         }
         DetailSection("AI 数据包", "导出完整图与有限渲染计划，在独立环境中制作动画。") {
             ShellActionRow("查看数据包配置", "路径、画布、停留时间与可见区域。", onClick = onAi)
         }
-        StatusNote(if (sealedSummary == null) "先完成成品复核与封存，再保存离线观看包。托管尚未接入；AI 数据包可配置后本机导出。" else "此文件保留当前固定版本。托管尚未接入；AI 数据包可配置后本机导出。")
+        if (onHosting != null) StatusNote("仅连接本机合成开发服务。选择固定版本、登录合成账号并再次确认后才会上传；不会自动发布。")
+        else StatusNote(if (sealedSummary == null) "先完成成品复核与封存，再保存离线观看包。托管尚未接入；AI 数据包可配置后本机导出。" else "此文件保留当前固定版本。托管尚未接入；AI 数据包可配置后本机导出。")
         Column {
             ShellActionRow("返回成品复核", onClick = onReview)
             ShellDivider()
@@ -677,3 +688,285 @@ fun formatShellBytes(bytes: Long): String = when {
     bytes < 1024L * 1024L * 1024L -> String.format(Locale.ROOT, "%.1f MiB", bytes / (1024.0 * 1024.0))
     else -> String.format(Locale.ROOT, "%.1f GiB", bytes / (1024.0 * 1024.0 * 1024.0))
 }
+
+/** Production hosting UI; callbacks are empty only in isolated screenshot fixtures. */
+data class HostingCallbacks(
+    val onBack: () -> Unit = {},
+    val onSources: () -> Unit = {},
+    val onRelease: (String) -> Unit = {},
+    val onAccount: () -> Unit = {},
+    val onEmail: (String) -> Unit = {},
+    val onCode: (String) -> Unit = {},
+    val onRequestCode: () -> Unit = {},
+    val onVerifyCode: () -> Unit = {},
+    val onExpiry: (Int) -> Unit = {},
+    val onPublish: () -> Unit = {},
+    val onTasks: () -> Unit = {},
+    val onTask: (String) -> Unit = {},
+    val onResume: () -> Unit = {},
+    val onStopObservation: () -> Unit = {},
+    val onCancel: () -> Unit = {},
+    val onProjects: () -> Unit = {},
+    val onMoreProjects: () -> Unit = {},
+    val onProject: (String) -> Unit = {},
+    val onRefreshVersions: () -> Unit = {},
+    val onMoreVersions: () -> Unit = {},
+    val onRevoke: (String) -> Unit = {},
+    val onCheckRevocation: (String) -> Unit = {},
+    val onLogout: () -> Unit = {},
+    val onRetrySessions: () -> Unit = {},
+    val onOpenLink: (String) -> Unit = {},
+    val onCopyLink: (String) -> Unit = {},
+)
+
+@Composable
+fun LocalHostingContent(state: HostingUiState, actions: HostingCallbacks) {
+    key(state.page, state.account?.accountId) {
+        val title = when (state.page) {
+            HostingPage.SOURCE -> "选择封存版"
+            HostingPage.ACCOUNT -> "本地托管账号"
+            HostingPage.CONFIRM -> "确认开发发布"
+            HostingPage.TASKS -> "发布与恢复"
+            HostingPage.PROJECTS -> "选择托管项目"
+            HostingPage.VERSIONS -> "托管版本"
+        }
+        ServicePage(title, actions.onBack) {
+            Text("本机合成开发 · 非公网服务", color = ShellColors.Accent, style = MaterialTheme.typography.labelLarge)
+            if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            state.message?.let { StatusNote(it) }
+            when (state.page) {
+                HostingPage.SOURCE -> HostingSourceBody(state, actions)
+                HostingPage.ACCOUNT -> HostingAccountBody(state, actions)
+                HostingPage.CONFIRM -> HostingConfirmationBody(state, actions)
+                HostingPage.TASKS -> HostingTasksBody(state, actions)
+                HostingPage.PROJECTS -> HostingProjectsBody(state, actions)
+                HostingPage.VERSIONS -> HostingVersionsBody(state, actions)
+            }
+        }
+    }
+}
+
+@Composable
+private fun HostingSourceBody(state: HostingUiState, actions: HostingCallbacks) {
+    DetailSection("明确选择一个本机版本", "包括此前封存的旧版。草稿修订不会改变这些内容，导入包不能作为发布来源。") {
+        if (state.releases.isEmpty() && !state.busy) Text("没有可选择的本机封存版。请先在项目中完成实际内容复核与封存。", color = ShellColors.Muted)
+        state.releases.forEach { item ->
+            ShellDivider()
+            ShellActionRow(item.title, "${formatReleaseDate(item.sealedAt)} · ${item.stepCount} 步\n版本 ${item.id}\n内容 ${item.contentDigest}",
+                "选择", onClick = { actions.onRelease(item.id) }, enabled = !state.busy)
+        }
+    }
+    OutlinedButton(onClick = actions.onSources, enabled = !state.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("刷新本机封存版") }
+    ShellActionRow("账号与已有任务", "重新登录原账号可恢复固定快照任务。", onClick = actions.onAccount, enabled = !state.busy)
+}
+
+@Composable
+private fun HostingAccountBody(state: HostingUiState, actions: HostingCallbacks) {
+    var logoutConfirm by remember { mutableStateOf(false) }
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(state.resendAt) {
+        now = System.currentTimeMillis()
+        while (now < state.resendAt) { delay(1000); now = System.currentTimeMillis() }
+    }
+    val wait = ((state.resendAt - now + 999L) / 1000L).coerceAtLeast(0L)
+    DetailSection("本地开发服务") {
+        Text(HOSTED_LOCAL_ENDPOINT, style = MaterialTheme.typography.bodyMedium)
+        Text("电脑启动本地服务后，使用 adb reverse tcp:4173 tcp:4173。仅用合成素材和 @example.test 账号。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+    }
+    if (state.pendingSessionRevocations > 0) {
+        StatusNote("${state.pendingSessionRevocations} 个已知会话的撤销尚待确认。凭据已加密保留，恢复服务后可重试。")
+        OutlinedButton(onClick = actions.onRetrySessions, enabled = !state.busy,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("重试待撤销会话") }
+    }
+    if (state.account == null) {
+        DetailSection("合成邮箱登录", "验证码仅写入电脑的本机 synthetic inbox，不会发送真实邮件。请自行查看并手动输入；Android 不读取收件箱。") {
+            OutlinedTextField(state.email, actions.onEmail, enabled = !state.busy, singleLine = true,
+                label = { Text("开发邮箱") }, placeholder = { Text("author@example.test") }, modifier = Modifier.fillMaxWidth())
+            OutlinedButton(onClick = actions.onRequestCode, enabled = !state.busy && wait == 0L && state.email.isNotBlank(),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (wait > 0) "$wait 秒后重新获取" else if (state.challengeReady) "重新生成本机验证码" else "生成本机验证码") }
+            OutlinedTextField(state.code, actions.onCode, enabled = !state.busy && state.challengeReady, singleLine = true,
+                label = { Text("手动输入 6 位验证码") }, modifier = Modifier.fillMaxWidth())
+            state.challengeExpiresAt?.let { Text("验证码到期：${hostingDate(it)}", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted) }
+            Button(onClick = actions.onVerifyCode, enabled = !state.busy && state.challengeReady && state.code.length == 6,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("验证并继续") }
+        }
+        Text("取消或返回会清空验证码。若会话创建响应完全丢失，无法撤销未知令牌；开发会话最长一天后到期。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+    } else {
+        DetailSection("当前账号") {
+            ShellLabelValue("邮箱", state.account.email)
+            state.sessionExpiresAt?.let { ShellLabelValue("会话到期", hostingDate(it)) }
+            ShellActionRow("选择封存版发布", "每次发布都要确认固定版本、上传范围与期限。", onClick = actions.onSources, enabled = !state.busy)
+            ShellDivider()
+            ShellActionRow("发布与恢复", "查看当前账号在这台设备上的固定快照任务。", onClick = actions.onTasks, enabled = !state.busy)
+            ShellDivider()
+            ShellActionRow("托管项目与版本", "独立选择服务端项目，逐版查看与撤销。", onClick = actions.onProjects, enabled = !state.busy)
+            OutlinedButton(onClick = { logoutConfirm = true }, enabled = !state.busy,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("退出开发账号") }
+        }
+        Text("登出需要服务端确认。已发布链接仍有效，须在版本管理中另行撤销。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+    }
+    if (logoutConfirm) AlertDialog(onDismissRequest = { logoutConfirm = false }, title = { Text("退出开发账号？") },
+        text = { Text("先请求服务端撤销当前会话，确认成功后才清除本机凭据。已发布链接仍按原期限有效；上传快照保留，恢复需重新登录原账号。") },
+        confirmButton = { TextButton(onClick = { logoutConfirm = false; actions.onLogout() }, enabled = !state.busy) { Text("确认登出") } },
+        dismissButton = { TextButton(onClick = { logoutConfirm = false }) { Text("保留登录") } })
+}
+
+@Composable
+private fun HostingConfirmationBody(state: HostingUiState, actions: HostingCallbacks) {
+    val binding = state.selected
+    if (binding == null) { ScreenEmpty("尚未选择固定版本", "请重新明确选择一个本机封存版。", "选择版本", actions.onSources); return }
+    val scene = binding.scene
+    DetailSection(binding.summary.title, "固定修订 ${binding.projectRevision} · ${scene.states.size} 个步骤") {
+        ShellLabelValue("开发账号", state.account?.email ?: "未登录")
+        ShellLabelValue("本地地址", HOSTED_LOCAL_ENDPOINT)
+        Text("版本 ${binding.summary.id}\n内容 SHA-256 ${binding.summary.contentDigest}\n文件清单 SHA-256 ${binding.fileListDigest}", style = MaterialTheme.typography.bodySmall)
+    }
+    DetailSection("实际上传范围", "仅 canonical scene 与声明的已复核安全资产。") {
+        fun assets(role: String) = scene.assets.filter { it.role == role }
+        listOf(ViewerScene.Asset.ROLE_IMAGE to "安全 PNG", ViewerScene.Asset.ROLE_REGION_CROP to "区域 PNG 裁片", ViewerScene.Asset.ROLE_TRANSITION to "无声 MP4").forEach { (role, label) ->
+            val files = assets(role)
+            ShellLabelValue(label, "${files.size} 个 · ${formatShellBytes(files.sumOf { it.byteLength })}")
+        }
+        ShellLabelValue("canonical scene", formatShellBytes(ViewerPackageCodec.writeScene(scene).size.toLong()))
+        ShellLabelValue("总计", "${scene.assets.size} 个资产 · ${formatShellBytes(binding.uploadByteLength)}")
+        Text("不会上传 ZIP、原录屏、原截图、OCR、复核记录或 AI 动画计划。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+    }
+    DetailSection("链接有效期", "从服务端正式发布时开始计算。持链者可观看，旧链接内容不随草稿改变。") {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(1, 7, 30).forEach { days ->
+                if (state.expiryDays == days) Button(onClick = { actions.onExpiry(days) }, enabled = !state.busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("$days 天 ✓") }
+                else OutlinedButton(onClick = { actions.onExpiry(days) }, enabled = !state.busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("$days 天") }
+            }
+        }
+    }
+    Button(onClick = actions.onPublish, enabled = !state.busy && state.account != null,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("确认范围并开始发布") }
+    Text("点击确认后才建立独立快照并上传。返回或登录成功都不会自动发布。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+    OutlinedButton(onClick = actions.onSources, enabled = !state.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("重新选择版本") }
+}
+
+@Composable
+private fun HostingTasksBody(state: HostingUiState, actions: HostingCallbacks) {
+    var cancelConfirm by remember(state.task?.taskId) { mutableStateOf(false) }
+    val task = state.task
+    ShellLabelValue("任务账号", state.account?.email ?: "请登录原账号")
+    if (task == null) {
+        if (state.tasks.isEmpty() && !state.busy) ScreenEmpty("没有此账号的本机任务", "发布确认后才会创建快照。其他账号的任务不会出现在这里。")
+        state.tasks.forEach { item ->
+            ShellDivider()
+            ShellActionRow(item.title, "修订 ${item.projectRevision} · ${hostingTaskLabel(item)}\n版本 ${item.releaseId}", "查看", onClick = { actions.onTask(item.taskId) }, enabled = !state.busy)
+        }
+        OutlinedButton(onClick = actions.onTasks, enabled = !state.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("重新读取本机任务") }
+    } else {
+        DetailSection(task.title, hostingTaskLabel(task)) {
+            ShellLabelValue("固定内容", "修订 ${task.projectRevision} · ${task.assetCount} 个资产 · ${formatShellBytes(task.byteLength)}")
+            ShellLabelValue("有效期", "${task.expiryDays} 天（正式发布起）")
+            Text("版本 ${task.releaseId}\n内容 ${task.contentDigest}", style = MaterialTheme.typography.bodySmall)
+            Text("保留原账号、幂等身份与独立快照。原项目修改或删除不改变此任务。缺失资产按整个文件重传，不是字节断点续传。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+            task.errorCode?.let { Text("最近状态：$it", style = MaterialTheme.typography.bodySmall, color = ShellColors.Accent) }
+            if (task.cancelRequested && task.publication == null && task.state != "cancelled") StatusNote("取消意图已保留，服务端结果尚待确认。查询不会改成继续发布。")
+        }
+        val publication = task.publication
+        if (publication != null) {
+            StatusNote("已收到正式发布回执：版本 ${publication.versionOrdinal}。${when (publication.status) {
+                "revoked" -> "此回执记录已撤销。"
+                "expired" -> "此回执记录已到期。"
+                else -> if (task.cancelRequested) "取消时已发布，若需收回访问，请在版本管理中另行确认撤销。" else "当前访问状态请在版本管理中刷新确认。"
+            }}")
+            HostingLinkActions(publication, actions)
+            ShellActionRow("管理已发布版本", "选择对应的服务端项目后逐版撤销。", onClick = actions.onProjects, enabled = !state.busy)
+        } else {
+            if (task.state == "validating") StatusNote("校验中（202），还没有正式发布回执。请继续查询；暂不提供观看链接。")
+            if (state.observing) OutlinedButton(onClick = actions.onStopObservation, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("停止本页观察") }
+            else if (task.state !in setOf("cancelled", "expired", "failed")) Button(onClick = actions.onResume, enabled = !state.busy,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (task.cancelRequested) "重新确认取消结果" else "查询并继续原任务") }
+            if (task.state !in setOf("cancelled", "expired", "failed")) OutlinedButton(onClick = { cancelConfirm = true }, enabled = !state.busy || state.observing,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("取消上传与发布") }
+        }
+        ShellActionRow("返回任务列表", "离开观察不会向服务端取消。", onClick = actions.onTasks)
+    }
+    ShellActionRow("选择其他封存版", onClick = actions.onSources, enabled = !state.busy)
+    if (cancelConfirm) AlertDialog(onDismissRequest = { cancelConfirm = false }, title = { Text("确认取消此发布任务？") },
+        text = { Text("将记录取消意图并请求服务端取消。若提交已经完成，会显示正式发布回执；已发布链接须另外确认撤销。仅离开本页不会取消。") },
+        confirmButton = { TextButton(onClick = { cancelConfirm = false; actions.onCancel() }) { Text("确认取消任务") } },
+        dismissButton = { TextButton(onClick = { cancelConfirm = false }) { Text("继续保留") } })
+}
+
+@Composable
+private fun HostingProjectsBody(state: HostingUiState, actions: HostingCallbacks) {
+    ShellLabelValue("开发账号", state.account?.email ?: "未登录")
+    Text("请选择一个服务端托管项目。不会根据当前本机项目猜测归属；原项目删除后，已发布版本仍可独立管理。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+    if (state.projects.isEmpty() && !state.busy) ScreenEmpty("没有已读取的托管项目", "可以刷新重试，或先选择本机封存版发布。")
+    state.projects.forEach { project ->
+        ShellDivider()
+        ShellActionRow(project.title, "${project.activePublicationCount} 个有效版本 · 最新编号 ${project.latestVersionOrdinal}\n服务端 ${project.serverProjectId}",
+            "查看版本", onClick = { actions.onProject(project.serverProjectId) }, enabled = !state.busy)
+    }
+    if (state.projectsCursor != null) OutlinedButton(onClick = actions.onMoreProjects, enabled = !state.busy,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("加载更多项目") }
+    OutlinedButton(onClick = actions.onProjects, enabled = !state.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("刷新项目") }
+    ShellActionRow("选择封存版发布", onClick = actions.onSources, enabled = !state.busy)
+}
+
+@Composable
+private fun HostingVersionsBody(state: HostingUiState, actions: HostingCallbacks) {
+    var revoke by remember { mutableStateOf<HostedModels.Publication?>(null) }
+    DetailSection(state.project?.title ?: "未选择项目") {
+        ShellLabelValue("账号", state.account?.email ?: "未登录")
+        Text(if (state.versionsFresh) "已收到服务端版本列表" else "列表尚未刷新确认；缓存状态不能证明链接已失效。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+        Text("服务端项目 ${state.project?.serverProjectId.orEmpty()}", style = MaterialTheme.typography.bodySmall)
+    }
+    if (state.publications.isEmpty() && !state.busy) Text("此页没有已读取的发布版本。", color = ShellColors.Muted)
+    state.publications.forEach { publication ->
+        ShellDivider()
+        DetailSection("版本 ${publication.versionOrdinal} · ${publication.title}") {
+            ShellLabelValue("服务端状态", if (publication.publicationId in state.pendingRevocations) "撤销待确认" else when (publication.status) { "active" -> "有效"; "revoked" -> "已撤销"; "expired" -> "已到期"; else -> "未知，需刷新" })
+            ShellLabelValue("创建", hostingDate(publication.createdAt))
+            ShellLabelValue("到期", hostingDate(publication.expiresAt))
+            Text("封存版本 ${publication.releaseId}\n内容 ${publication.contentDigest}", style = MaterialTheme.typography.bodySmall)
+            if (publication.publicationId in state.pendingRevocations) {
+                Text("尚未取得撤销确认，链接可能仍有效。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Accent)
+                OutlinedButton(onClick = { actions.onCheckRevocation(publication.publicationId) }, enabled = !state.busy,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("重新查询此版本") }
+            }
+            HostingLinkActions(publication, actions)
+            if (publication.status == "active") OutlinedButton(onClick = { revoke = publication }, enabled = !state.busy,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("撤销此版本…") }
+        }
+    }
+    if (state.publicationsCursor != null) OutlinedButton(onClick = actions.onMoreVersions, enabled = !state.busy,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("加载更多版本") }
+    OutlinedButton(onClick = actions.onRefreshVersions, enabled = !state.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("刷新版本") }
+    ShellActionRow("重新选择托管项目", onClick = actions.onProjects, enabled = !state.busy)
+    Text("撤销须服务端确认。已授权传输与已获取的离线副本无法远程收回。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+    revoke?.let { publication -> AlertDialog(onDismissRequest = { revoke = null }, title = { Text("撤销版本 ${publication.versionOrdinal}？") },
+        text = { Text("${publication.title}\n${publication.releaseId}\n确认后请求服务端停止此版本的后续访问，不会影响其他版本。已获取的副本无法收回。") },
+        confirmButton = { TextButton(onClick = { revoke = null; actions.onRevoke(publication.publicationId) }, enabled = !state.busy) { Text("确认撤销此版本") } },
+        dismissButton = { TextButton(onClick = { revoke = null }) { Text("保持有效") } }) }
+}
+
+@Composable
+private fun HostingLinkActions(publication: HostedModels.Publication, actions: HostingCallbacks) {
+    if (publication.status != "active") return
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        OutlinedButton(onClick = { actions.onOpenLink(publication.shareUrl) }, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("打开本机链接") }
+        OutlinedButton(onClick = { actions.onCopyLink(publication.shareUrl) }, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("复制链接") }
+    }
+    Text("这是 loopback 开发链接，不能作为公网分享地址。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+}
+
+internal fun hostingTaskLabel(task: HostedModels.Task): String = when {
+    task.publication != null -> when (task.publication.status) { "revoked" -> "已发布，现已撤销"; "expired" -> "已发布，现已到期"; else -> "已正式发布（回执）" }
+    task.cancelRequested && task.state != "cancelled" -> "取消待确认"
+    task.state == "prepared" -> "快照已固定，待上传"
+    task.state == "receiving" -> "逐资产上传中 / 可恢复"
+    task.state == "validating" -> "服务端校验中，尚未发布"
+    task.state == "cancelled" -> "已确认取消"
+    task.state == "expired" -> "上传预留已到期"
+    task.state == "failed" -> "服务端校验失败"
+    else -> "结果未知，需查询确认"
+}
+
+private fun hostingDate(value: String): String = runCatching {
+    java.time.Instant.parse(value).atZone(java.time.ZoneId.systemDefault()).format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+}.getOrElse { value }
