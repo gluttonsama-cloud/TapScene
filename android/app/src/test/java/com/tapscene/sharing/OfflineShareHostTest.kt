@@ -11,6 +11,7 @@ import java.io.File
 import java.io.RandomAccessFile
 import java.util.UUID
 import org.json.JSONObject
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -21,6 +22,17 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [26, 35])
 class OfflineShareHostTest {
+    private lateinit var provider: OfflineShareProvider
+
+    @Before fun attachProviderForThisSandbox() {
+        val app = RuntimeEnvironment.getApplication()
+        val info = requireNotNull(app.packageManager.resolveContentProvider(OfflineShareStore.authority(app), PackageManager.GET_META_DATA))
+        check(!info.exported && info.grantUriPermissions)
+        // Each Robolectric method has a different cache directory. Match Android provider startup
+        // before getUriForFile so FileProvider invalidates the previous sandbox's cached root.
+        provider = OfflineShareProvider().apply { attachInfo(app, info) }
+    }
+
     @Test fun exactReadOnlyUrisRejectTraversalTamperingAndExpiry() {
         val app = RuntimeEnvironment.getApplication()
         val root = File(app.cacheDir, OfflineShareStore.DIRECTORY)
@@ -28,9 +40,6 @@ class OfflineShareHostTest {
         val original = source.readBytes()
         val store = OfflineShareStore(app)
         val share = store.create(source, id(), "1".repeat(64), {})
-        val info = requireNotNull(app.packageManager.resolveContentProvider(OfflineShareStore.authority(app), PackageManager.GET_META_DATA))
-        check(!info.exported && info.grantUriPermissions)
-        val provider = OfflineShareProvider().apply { attachInfo(app, info) }
         val file = File(File(root, share.token), OfflineShareStore.FILE_NAME)
         source.writeText("Mutable SAF-like source was replaced")
         provider.openFile(share.uri, "r").use { descriptor ->
