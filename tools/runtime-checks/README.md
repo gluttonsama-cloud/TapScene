@@ -38,7 +38,9 @@
 
 [第四次精确 CI](https://github.com/gluttonsama-cloud/TapScene/actions/runs/38064296590) 的广播同步成功，启动 ANR 仍发生；新增 DropBox 栈准确落在 `libz.inflate` → `DexFileLoader.OpenFromZipEntry` → `LoadedApk` 类加载 → `ActivityThread.handleBindApplication`，仍未进入 EGL 探针。该栈没有给出正在解压的具体 APK 路径。针对该采样，只有 `tapsceneRuntimeSmoke=true` 的构建启用 [AGP 官方 DEX 非压缩封装](https://developer.android.com/reference/tools/gradle-api/8.13/com/android/build/api/dsl/DexPackaging)，构建后检查主 APK 的所有 DEX 为 ZIP STORED，并保留三 APK 的 DEX 压缩方式、大小及摘要。它不改变 DEX 源码、minSDK、manifest、ART 策略或超时；默认手机构建不受影响。该测试包因此不能代表默认手机 APK 的压缩 DEX 冷启动性能，且这一采样不足以证明解压是唯一瓶颈。
 
-[第五次精确 CI](https://github.com/gluttonsama-cloud/TapScene/actions/runs/38066025600) 已通过真实生产 EGL/AVC 探针：一个源 buffer 产生 32 个实际 MP4 样本、时长约 3.092 秒，约 1.614 秒静态观察段保留，生产校验与全部样本解码通过。随后正常 Accessibility 设置被首启已出现的 `System UI isn't responding` 对话框遮挡，未进入点击/投影场景。测试仅在此精确系统框保存 UI 树后按一次现成的 `Wait`，在结果中记录尝试和成功标志；不按 Close app，不循环清除 ANR，不处理其他应用的 ANR，不延长原 30 秒 UI 界限。旧框尚未消失时只观察，已看见设置页后再出现同一 ANR 即失败。即使后续业务断言通过，也应连同这项环境异常一起解读。
+[第五次精确 CI](https://github.com/gluttonsama-cloud/TapScene/actions/runs/38066025600) 已通过真实生产 EGL/AVC 探针：一个源 buffer 产生 32 个实际 MP4 样本、时长约 3.092 秒，约 1.614 秒静态观察段保留，生产校验与全部样本解码通过。随后正常 Accessibility 设置被首启已出现的 `System UI isn't responding` 对话框遮挡，未进入点击/投影场景。测试仅在此精确系统框保存 UI 树后按一次现成的 `Wait`，在结果中记录尝试和成功标志；不按 Close app，不循环清除 ANR，不处理其他应用的 ANR。旧框尚未消失时只观察，已看见设置页后再出现同一 ANR 即失败。即使后续业务断言通过，也应连同这项环境异常一起解读。
+
+[第六次精确 CI](https://github.com/gluttonsama-cloud/TapScene/actions/runs/38067672180) 再次通过探针，正常 Wait 已成功，设置页也已恢复；日志显示仅绘制 Settings 就耗时 17.939 秒，服务子页又需 6.873 秒；从启动设置到子页显示已约 36 秒，超出原来合并冷启动/恢复/授权的 30 秒准备预算。该测试环境准备改为单次最多 120 秒，记录打开设置、实际窗口包、选服务、开关及确认动作的时间；实际服务连接仍是唯一通过依据。此阶段尚未臂定生产点击，不改产品 15 秒/停止时限，仍共用原总预算；动作拒绝、再次同类 ANR 或准备超时都不会当成连接成功。
 
 [首次精确 CI](https://github.com/gluttonsama-cloud/TapScene/actions/runs/38060445119) 已完成三个 APK 构建，但在模拟器加载阶段发现 `libpulse.so.0` 缺失，未启动 AVD。独立 lane 因此只从 [Ubuntu 官方仓库](https://packages.ubuntu.com/noble/libpulse0)安装 `libpulse0` 及其必要依赖，保存 `ldd` 诊断并用官方启动器的 `-version` 实际加载结果把关；裸 `ldd` 不代表启动器设置的内置库路径。`-no-audio` 不能免除 ELF 加载依赖。没有安装音频服务、全套桌面或新的模拟器版本。
 

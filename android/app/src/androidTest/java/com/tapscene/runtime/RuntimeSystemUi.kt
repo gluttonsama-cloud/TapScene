@@ -20,30 +20,43 @@ internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
 
     fun enableService() {
         if (ClickPlayback.state.value.connected) return
+        val setupLog = File(instrumentation.targetContext.filesDir, "runtime-smoke/accessibility-setup.txt")
+        fun log(message: String) { setupLog.appendText("${SystemClock.uptimeMillis()} $message\n") }
+        // Run 38067672180 needed 17.9 seconds just to draw Settings, then 6.9 for its subpage.
+        // This is environment preparation before any production click run is armed.
+        val deadline = SystemClock.uptimeMillis() + 120_000
+        log("open_settings_requested; overall_setup_budget_ms=120000")
         instrumentation.targetContext.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        val deadline = SystemClock.uptimeMillis() + 30_000
         var selectedService = false
         var toggled = false
+        var previousPackage: String? = null
+        var loggedAnrWait = false
         while (SystemClock.uptimeMillis() < deadline && !ClickPlayback.state.value.connected) {
             val root = automation.rootInActiveWindow
             if (root != null) try {
+                val currentPackage = root.packageName?.toString()
+                if (currentPackage != previousPackage) { log("active_window_package=$currentPackage"); previousPackage = currentPackage }
                 if (!waitForSystemUiOnce(root) && root.packageName?.toString() == "com.android.settings") when {
-                    !selectedService && clickText(root, "TapScene 点击链定位与播放") -> selectedService = true
+                    !selectedService && clickText(root, "TapScene 点击链定位与播放") -> {
+                        selectedService = true; log("service_entry_click_accepted")
+                    }
                     !selectedService -> clickText(root, "Downloaded apps", "Installed apps", "已下载的应用", "已安装的应用")
                     !toggled -> {
                         val switch = find(root) { it.isEnabled && it.isVisibleToUser && it.isCheckable && it.className?.toString()?.contains("Switch") == true }
                         if (switch != null) {
                             try {
                                 if (!switch.isChecked) check(click(switch)) { "Accessibility switch did not accept normal UI action" }
-                                toggled = true
+                                toggled = true; log("service_switch_checked_or_click_accepted")
                             } finally { switch.recycle() }
                         }
                     }
-                    else -> clickText(root, "Allow", "允许", "OK", "确定")
+                    else -> if (clickText(root, "Allow", "允许", "OK", "确定")) log("normal_service_confirmation_click_accepted")
                 }
+                if (systemUiAnrWaitedOnce && !loggedAnrWait) { loggedAnrWait = true; log("single_system_ui_anr_wait_accepted") }
             } finally { root.recycle() }
             SystemClock.sleep(200)
         }
+        log("setup_finished; service_connected=${ClickPlayback.state.value.connected}; selected=$selectedService; toggled=$toggled")
         check(ClickPlayback.state.value.connected) { "Accessibility UI did not enable the service; no bypass attempted" }
     }
 
