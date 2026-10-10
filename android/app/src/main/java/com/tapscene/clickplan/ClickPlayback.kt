@@ -262,7 +262,8 @@ object ClickPlayback {
                     uptimeMs = SystemClock::uptimeMillis,
                     guard = { guardFor(it) },
                     recordingReady = { recordingReady(it) },
-                    onState = ::onRun)
+                    onState = ::onRun,
+                    frames = RecordingCoordinator.frameAnchorPort(run.recordingSessionId))
                 mutable.value = mutable.value.copy(run = run)
                 RecordingCoordinator.start(context, run.projectId, requireNotNull(resultCode), requireNotNull(grant),
                     RecordingClickSession(run.recordingSessionId, run.sourceId, run.plan.width, run.plan.height))
@@ -363,8 +364,8 @@ object ClickPlayback {
                 if (engine?.state?.runId == run.runId) app?.let { RecordingCoordinator.stopClickSession(it, run.recordingSessionId) }
                 Unit
             }
-            // MediaRecorder may have no sealable sample after an extremely short chain. Keep a
-            // minimum one-second collection window; this is NOT a frame/PTS synchronization claim.
+            // Keep the existing minimum one-second collection window for very short chains.
+            // This tail is diagnostic duration only, never an inferred frame/PTS mapping.
             val recording = RecordingCoordinator.state.value
             val tail = if (run.phase == ClickRunPhase.Completed && recording.sessionId == run.recordingSessionId)
                 (1_000L - recording.elapsedMs).coerceAtLeast(0) else 0

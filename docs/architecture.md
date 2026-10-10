@@ -6,11 +6,11 @@
 
 当前 Android 壳层复用既有本地项目与媒体用例：顶层项目/演示库，项目工作区步骤/素材/检查，单步编辑器独立五模式；录制与候选、本地封存与离线观看已接入本机实现；托管交付与账号仍提供真实空态及禁用执行，不伪造后端状态。现有项目/素材持久化与安全输出边界不因换壳改变。
 
-录制采用 MediaProjection + MediaRecorder 无声 H.264 Surface，前台服务在获取投影前启动；每会话只消费一次授权和一次 virtual display，不持久化授权令牌。停止先断开采集，原始文件封口、同步后写 journal，再按稳定 sourceId 校验和登记私有素材；登记持久化未确认时保留 sealed 副本，重试幂等，中断不自动重新采集。仅当前会话的独占临时文件可显式删除。Workspace 局部更新在共享锁内读改写，原子替换后同步目录；“可能已提交”失败不删除原片。
+手动录制采用 MediaProjection + MediaRecorder 无声 H.264 Surface，点击链改用同一投影的 OES/FBO → MediaCodec/MediaMuxer 共帧管线，前台服务在获取投影前启动；每会话只消费一次授权和一次 virtual display，不持久化授权令牌。停止先断开采集，原始文件封口、同步后写 journal，再按稳定 sourceId 校验和登记私有素材；登记持久化未确认时保留 sealed 副本，重试幂等，中断不自动重新采集。仅当前会话的独占临时文件可显式删除。Workspace 局部更新在共享锁内读改写，原子替换后同步目录；“可能已提交”失败不删除原片。
 
 API 32+ 利用系统等比 fit/居中输出固定编码画布，旋转和窗口变化可产生留边；API 34 记录内容尺寸回调及粗略 fit 区域，但时间不是媒体 PTS，不能用于触点映射。API 26–31 检测显示变化即结束本段。画面候选使用一个 Media3 Surface 会话，最多 361 次时间请求、30 个候选；32×32 特征比较并按实际帧 PTS 去重，毫秒精度。独立私有 SQLite 保存 source SHA、算法版本、检查点和人工选择；确认 PNG 保存为步骤后以稳定 captureId 对账，不把候选选择当复核。
 
-授权只在点击开始时请求；前台通知可停止，通知权限拒绝仍可回 App 停止。基础手动录制使用 mediaProjection 前台服务及通知权限，没有音频、网络或广泛存储权限；预编排点击链另有下文的用户开启手势服务。画面可能含可见密码/键盘输入，不能承诺自动排除；尊重 FLAG_SECURE。预编排点击链增量使用用户主动开启的手势服务，窗口元数据仅作运行期守卫；精确画面锚定仍未实现。官方约束参见 [MediaProjection 会话与尺寸变化](https://developer.android.com/media/grow/media-projection)、[前台服务类型](https://developer.android.com/develop/background-work/services/fgs/service-types#media-projection)、[受保护窗口](https://developer.android.com/reference/android/view/WindowManager.LayoutParams#FLAG_SECURE)。
+授权只在点击开始时请求；前台通知可停止，通知权限拒绝仍可回 App 停止。基础手动录制使用 mediaProjection 前台服务及通知权限，没有音频、网络或广泛存储权限；预编排点击链另有下文的用户开启手势服务。画面可能含可见密码/键盘输入，不能承诺自动排除；尊重 FLAG_SECURE。预编排点击链增量使用用户主动开启的手势服务，窗口元数据仅作运行期守卫；点击链共帧证据使用独立私有侧车，消费 UI 待后续接入。官方约束参见 [MediaProjection 会话与尺寸变化](https://developer.android.com/media/grow/media-projection)、[前台服务类型](https://developer.android.com/develop/background-work/services/fgs/service-types#media-projection)、[受保护窗口](https://developer.android.com/reference/android/view/WindowManager.LayoutParams#FLAG_SECURE)。
 
 
 离线 OCR 使用官方 PP-OCRv6_tiny ONNX 模型、官方 Maven ONNX Runtime 1.31.0 及 OpenCV 4.14.0 core/imgproc 源码；模型与字典随包、摘要固定，无运行时下载。受限 Bitmap RGB → 检测/裁切/识别/CTC 管线在单一后台任务运行，关闭 runtime 遥测并丢弃引擎日志。原始行/像素框按项目、源 SHA、实际帧时间/精度和模型版本保存在排除备份的私有 SQLite，不进入离线包。取消或切换保留已完成帧；删除项目/来源撤销在途写入并清除结果。标题只由用户显式采用且不覆盖已有文字，框仅供人工遮挡，遮挡后仍须重生成并复核实际输出。依赖与限额见 [原生实现](../tools/ocr-native/README.md)；主机合成图不代替 Android 性能或隐私覆盖验收。
@@ -816,9 +816,9 @@ HTTP 映射：400 输入错误；401 会话失效；404 不存在或无权；409
 
 点击链首版使用 API33+ 窗口 displayId，低版本显示器未知时不播放，原手动录屏仍从 API26 可用。确认只覆盖即时返回目标（最长 15 秒）；任何非预期/未知窗口使确认失效。每次派发都让主队列先处理持久写入期间到达的窗口/停止事件；事件守卫仍不能保证掌握所有即时前台变化。
 
-`ClickAccessibilityService` 仅声明 canPerformGestures，canRetrieveWindowContent=false、canRequestFilterKeyEvents=false。不访问 source/root/windows 或事件 text；运行期只用 package/class/fullscreen/default-display 元数据，结束即丢弃，未知就暂停。应用选择只查询 launcher intent。定位窗口经 WindowManager 移除及 detach 检查后另行显示用户确认，随后每会话全屏 MediaProjection 授权；Android 14+ 使用 createConfigForDefaultDisplay，一个授权仅一个 VirtualDisplay。目标重新全屏和 MediaRecorder 就绪后才能执行。窗口类名只能阻断部分敏感界面，不能代替用户审阅；FLAG_SECURE 与目标 App 防护保持系统行为。
+`ClickAccessibilityService` 仅声明 canPerformGestures，canRetrieveWindowContent=false、canRequestFilterKeyEvents=false。不访问 source/root/windows 或事件 text；运行期只用 package/class/fullscreen/default-display 元数据，结束即丢弃，未知就暂停。应用选择只查询 launcher intent。定位窗口经 WindowManager 移除及 detach 检查后另行显示用户确认，随后每会话全屏 MediaProjection 授权；Android 14+ 使用 createConfigForDefaultDisplay，一个授权仅一个 VirtualDisplay。目标重新全屏、几何确认且至少一个真实编码样本就绪后才能执行。窗口类名只能阻断部分敏感界面，不能代替用户审阅；FLAG_SECURE 与目标 App 防护保持系统行为。
 
-MediaRecorder 的 elapsed 与动作 diagnosticUptimeMs 仅为运行诊断，不换算 PTS；mapping 固定 Unknown，beforeFrameId/afterFrameId 空值。自动播放结束后至少保留一秒总采集窗口，降低极短片段无法封口的风险；实际 MP4 仍必须通过现有检查后才登记。录制 resize 和 display/rotation 改变中断整轮，不自动缩放旧坐标。编码核心、精确前后帧 PNG 和共帧实际 outputPTS 为下一阶段；本轮交付仍为真实 MP4 加私有 sidecar。
+录制 elapsed 与动作 diagnosticUptimeMs 仅为运行诊断，不换算 PTS；原点击日志 mapping/空帧字段保留兼容，共帧 ticket 独立存放，不能迟到改写手势事实。自动播放结束后至少保留一秒总采集窗口，降低极短片段无法封口的风险；实际 MP4 仍必须通过现有检查后才登记。录制 resize 和 display/rotation 改变中断整轮，不自动缩放旧坐标。共帧编码、动作窗口、真实编码/容器 PTS 与私有 PNG 已有独立入口；消费步骤/热点须另行通过实际输出复核，见 [共帧证据合同](frame-anchors.md)。
 
 官方接口：[手势结果回调](https://developer.android.com/reference/android/accessibilityservice/AccessibilityService.GestureResultCallback)、[默认显示器录制配置](https://developer.android.com/reference/android/media/projection/MediaProjectionConfig#createConfigForDefaultDisplay())、[无障碍窗口事件](https://developer.android.com/reference/android/view/accessibility/AccessibilityEvent)。
 

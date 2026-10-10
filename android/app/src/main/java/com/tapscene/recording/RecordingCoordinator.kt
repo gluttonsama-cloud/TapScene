@@ -14,10 +14,15 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.StatFs
 import android.os.SystemClock
-import android.view.Surface
 import com.tapscene.data.SourceRepository
+import com.tapscene.data.WorkspaceStore
+import com.tapscene.data.ProjectStore
 import com.tapscene.media.MediaLimits
 import java.util.UUID
+import java.util.concurrent.Executors
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.android.asCoroutineDispatcher
@@ -46,6 +51,7 @@ object RecordingCoordinator {
     @Volatile private var owner: RecordingService? = null
     @Volatile private var stopRequest: Pair<String, RecordingStopReason>? = null
     private val clickGate = RecordingClickGate()
+    private val projectionCleanup = Executors.newSingleThreadExecutor { task -> Thread(task, "TapSceneProjectionCleanup").apply { isDaemon = true } }
     @Volatile private var active: ActiveRecording? = null
     private val sealedPending = mutableSetOf<String>()
 
@@ -81,6 +87,7 @@ object RecordingCoordinator {
                 // from a stale Idle screen cannot hide it behind a second recording session.
                 if (sealedPending.isNotEmpty() || mutableState.value.canRetry) return@serial
                 clickSession?.let {
+                    require(Build.VERSION.SDK_INT >= 33) { "点击链需要 Android 13 及以上" }
                     RecordingJournalStore.requireUuid(it.sessionId)
                     RecordingJournalStore.requireUuid(it.sourceId)
                     require(it.width > 0 && it.height > 0)
@@ -111,6 +118,7 @@ object RecordingCoordinator {
     fun stop(context: Context) {
         // Mark synchronously so a stop arriving during prepare() prevents the queued start.
         mutableState.value.sessionId?.let { stopRequest = it to RecordingStopReason.User }
+        active?.backend?.stopAcceptingFrames()
         serial {
             val recording = active
             if (recording != null) stopLocked(recording, RecordingStopReason.User)
@@ -131,6 +139,17 @@ object RecordingCoordinator {
         val value = mutableState.value
         return value.sessionId == sessionId && value.projectId == projectId && value.sourceId == sourceId && value.phase == RecordingPhase.Recording &&
             value.clickCaptureReady && stopRequest?.first != sessionId && clickGate.permits(sessionId)
+    }
+
+    /** Stable session delegate; it never retains a backend from an earlier capture. */
+    fun frameAnchorPort(sessionId: String): FrameAnchorPort = object : FrameAnchorPort {
+        private fun current(): FrameAnchorPort = active?.takeIf {
+            it.journal.sessionId == sessionId && !it.stopping && stopRequest?.first != sessionId
+        }?.backend?.anchors ?: FrameAnchorPort.None
+        override fun before(action: FrameAnchorAction): AnchorResult = current().before(action)
+        override fun markGestureCompleted(action: FrameAnchorAction) = current().markGestureCompleted(action)
+        override fun afterWait(action: FrameAnchorAction): AnchorResult = current().afterWait(action)
+        override fun cancelEpoch(reason: FrameMissingReason) = current().cancelEpoch(reason)
     }
 
     /** Covers cancellation before the asynchronous start command has published its session ID. */
@@ -176,6 +195,7 @@ object RecordingCoordinator {
                 val discarded = journal.copy(phase = JournalPhase.DiscardPending)
                 store.save(discarded)
                 if (!store.deleteRaw(journal.sessionId)) throw IllegalStateException("Cleanup incomplete")
+                cleanupUnregisteredEvidence(app, journal)
                 store.save(discarded.copy(phase = JournalPhase.Discarded))
                 sealedPending -= journal.sessionId
                 mutableState.value = discarded.ui(RecordingPhase.Interrupted).copy(
@@ -245,7 +265,14 @@ object RecordingCoordinator {
                 recording = ActiveRecording(service, store, journal, canvas, maxDurationMs, maxBytes, grant.clickSession)
                 active = recording
                 val current = recording
-                val prepared = RecordingEncoder.prepare(service, current.canvas, store.part(grant.sessionId), maxDurationMs, maxBytes,
+                val backend = if (grant.clickSession != null) {
+                    FrameRecordingBackend.prepare(service, grant.projectId, grant.clickSession, current.canvas,
+                        store.part(grant.sessionId), maxDurationMs, maxBytes,
+                        onReady = { encodedSampleReady(grant.sessionId) },
+                        onError = { requestStop(grant.sessionId, RecordingStopReason.RecorderError) },
+                        onOwned = { current.backend = it })
+                } else RecorderRecordingBackend(RecordingEncoder.prepare(service, current.canvas,
+                    store.part(grant.sessionId), maxDurationMs, maxBytes,
                     onInfo = { what ->
                         when (what) {
                             MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED -> requestStop(grant.sessionId, RecordingStopReason.DurationLimit)
@@ -253,12 +280,11 @@ object RecordingCoordinator {
                             MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_REACHED -> requestStop(grant.sessionId, RecordingStopReason.SizeLimit)
                         }
                     },
-                    onError = { requestStop(grant.sessionId, RecordingStopReason.RecorderError) },
-                )
-                current.recorder = prepared.recorder
+                    onError = { requestStop(grant.sessionId, RecordingStopReason.RecorderError) }))
+                current.backend = backend
                 current.journal = journal.copy(
-                    width = prepared.encoding.width, height = prepared.encoding.height,
-                    fps = prepared.encoding.fps, bitrate = prepared.encoding.bitrate,
+                    width = backend.encoding.width, height = backend.encoding.height,
+                    fps = backend.encoding.fps, bitrate = backend.encoding.bitrate,
                 )
                 store.save(current.journal)
                 checkStartNotCancelled(grant.sessionId)
@@ -279,29 +305,33 @@ object RecordingCoordinator {
                 }
                 current.callback = callback
                 projection.registerCallback(callback, handler)
-                val surface = prepared.recorder.surface
-                current.surface = surface
+                val surface = backend.captureSurface
                 checkStartNotCancelled(grant.sessionId)
                 // One grant, one display. No secure/own-content bypass flags, audio or OCR.
                 current.display = projection.createVirtualDisplay(
-                    "TapScene local recording", prepared.encoding.width, prepared.encoding.height,
+                    "TapScene local recording", backend.captureWidth, backend.captureHeight,
                     current.canvas.densityDpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                     surface, null, handler,
                 ) ?: throw RecordingStartException("系统未建立录制画布，请重新授权。")
                 checkStartNotCancelled(grant.sessionId)
-                prepared.recorder.start()
+                backend.start()
                 current.started = true
                 current.startedAtElapsedMs = SystemClock.elapsedRealtime()
                 current.journal = current.journal.copy(phase = JournalPhase.Recording)
                 store.save(current.journal)
-                mutableState.value = current.journal.ui(RecordingPhase.Recording).copy(clickCaptureReady = current.clickSession != null && (Build.VERSION.SDK_INT < 34 || current.captureGeometryConfirmed))
+                mutableState.value = current.journal.ui(RecordingPhase.Recording).copy(clickCaptureReady = clickReady(current))
                 scheduleTick(current.journal.sessionId)
             } catch (error: Exception) {
                 val failedRecording = recording
                 if (failedRecording != null) {
                     // Even an error after start must immediately stop collection. Failed starts
                     // are never promoted to sealed or silently registered.
-                    release(failedRecording, stopRecorder = true)
+                    val released = release(failedRecording, stopRecorder = true)
+                    if (released?.released != true) {
+                        quarantine(failedRecording)
+                        return@serial
+                    }
+                    (failedRecording.backend as? FrameRecordingBackend)?.discardEvidence()
                     val failed = failedRecording.journal.copy(phase = JournalPhase.Failed,
                         stopReason = stopRequest?.takeIf { it.first == sessionId }?.second ?: RecordingStopReason.RecorderError)
                     runCatching { failedRecording.store.save(failed) }
@@ -335,6 +365,7 @@ object RecordingCoordinator {
     internal fun stopFromService(service: RecordingService, reason: RecordingStopReason) {
         if (owner === service || (pending != null && pending?.sessionId == service.sessionId)) {
             mutableState.value.sessionId?.let { stopRequest = it to reason }
+            active?.backend?.stopAcceptingFrames()
         }
         serial {
             val current = active
@@ -367,7 +398,10 @@ object RecordingCoordinator {
     private fun captureResized(sessionId: String, width: Int, height: Int) {
         // Fence the main-thread dispatcher before this observation waits for the recording gate.
         active?.takeIf { it.journal.sessionId == sessionId }?.clickSession?.let {
-            if (width != it.width || height != it.height) stopRequest = sessionId to RecordingStopReason.DisplayChanged
+            if (width != it.width || height != it.height) {
+                stopRequest = sessionId to RecordingStopReason.DisplayChanged
+                active?.backend?.stopAcceptingFrames()
+            }
         }
         serial {
             val current = active?.takeIf { it.journal.sessionId == sessionId && !it.stopping } ?: return@serial
@@ -382,7 +416,7 @@ object RecordingCoordinator {
                 }
                 current.captureGeometryConfirmed = true
                 if (mutableState.value.phase == RecordingPhase.Recording) {
-                    mutableState.value = mutableState.value.copy(clickCaptureReady = true)
+                    mutableState.value = mutableState.value.copy(clickCaptureReady = clickReady(current))
                 }
             }
             // Both the encoder Surface and VirtualDisplay retain the SAME dimensions. Changing
@@ -398,8 +432,22 @@ object RecordingCoordinator {
         }
     }
 
+    private fun clickReady(current: ActiveRecording): Boolean = current.clickSession != null &&
+        current.backend?.hasEncodedSample == true && (Build.VERSION.SDK_INT < 34 || current.captureGeometryConfirmed)
+
+    private fun encodedSampleReady(sessionId: String) {
+        serial {
+            val current = active?.takeIf { it.journal.sessionId == sessionId && !it.stopping } ?: return@serial
+            if (mutableState.value.phase == RecordingPhase.Recording) {
+                mutableState.value = mutableState.value.copy(clickCaptureReady = clickReady(current))
+            }
+        }
+    }
+
     private fun requestStop(sessionId: String, reason: RecordingStopReason) {
+        if (active?.journal?.sessionId != sessionId && pending?.sessionId != sessionId) return
         stopRequest = sessionId to reason
+        active?.takeIf { it.journal.sessionId == sessionId }?.backend?.stopAcceptingFrames()
         serial { active?.takeIf { it.journal.sessionId == sessionId }?.let { stopLocked(it, reason) } }
     }
 
@@ -407,23 +455,27 @@ object RecordingCoordinator {
         if (active !== current || current.stopping) return
         stopRequest = current.journal.sessionId to reason
         current.stopping = true
+        current.backend?.stopAcceptingFrames()
         current.journal = current.journal.copy(
             phase = JournalPhase.Stopping, elapsedMs = current.elapsedMs(), stopReason = reason,
         )
         mutableState.value = current.journal.ui(RecordingPhase.Stopping)
-        // Disk-full must never prevent stopping collection. A failed journal write is recovered
-        // from the previous Starting/Recording state and cannot grant sealed status.
+        // Detach/finish is launched before any fsync. If the process dies meanwhile, the older
+        // Starting/Recording journal remains unsealed and cannot grant recovery registration.
+        val result = release(current, stopRecorder = true)
+        if (result?.released != true) { quarantine(current); return }
         runCatching { current.store.save(current.journal) }
-        val recorderStopped = release(current, stopRecorder = true)
         active = null
         owner = null
         current.service.finishSession()
-        if (!recorderStopped) {
+        if (!result.sealable) {
             failUnsealed(current, "录制未能完整封口，可能停止过快；本段不会加入素材。")
             return
         }
         try {
-            current.store.seal(current.journal.sessionId)
+            val sealed = current.store.seal(current.journal.sessionId)
+            // Optional evidence never turns a healthy MP4 into a screenshot-only capture.
+            runCatching { (current.backend as? FrameRecordingBackend)?.validateEvidence(sealed) }
             current.journal = current.journal.copy(phase = JournalPhase.Sealed)
             current.store.save(current.journal)
         } catch (_: Exception) {
@@ -431,35 +483,55 @@ object RecordingCoordinator {
             return
         }
         sealedPending += current.journal.sessionId
-        registerLocked(current.service.applicationContext, current.store, current.journal)
+        registerLocked(current.service.applicationContext, current.store, current.journal, current.backend as? FrameRecordingBackend)
     }
 
-    /** Returns true only when this call completed MediaRecorder.stop successfully. */
-    private fun release(current: ActiveRecording, stopRecorder: Boolean): Boolean {
-        // Detach capture first: a slow encoder drain or repository validation cannot keep filming.
-        runCatching { current.display?.surface = null }
-        runCatching { current.display?.release() }
-        current.display = null
-        val projection = current.projection
-        current.callback?.let { callback -> runCatching { projection?.unregisterCallback(callback) } }
-        runCatching { projection?.stop() }
-        current.projection = null
-        current.callback = null
-        var stopped = false
-        if (stopRecorder && current.started) stopped = runCatching {
-            checkNotNull(current.recorder).stop()
-            true
-        }.getOrDefault(false)
-        current.started = false
-        runCatching { current.recorder?.reset() }
-        runCatching { current.recorder?.release() }
-        current.recorder = null
-        runCatching { current.surface?.release() }
-        current.surface = null
-        return stopped
+    /** Detach first; a driver timeout retains ownership and cannot license file deletion/restart. */
+    private suspend fun release(current: ActiveRecording, stopRecorder: Boolean): RecordingBackendResult? {
+        current.backend?.stopAcceptingFrames()
+        val released = current.releaseResult ?: CompletableDeferred<RecordingBackendResult>().also { result ->
+            current.releaseResult = result
+            projectionCleanup.execute {
+                var detached = true
+                runCatching { current.display?.surface = null }.onFailure { detached = false }
+                runCatching { current.display?.release() }.onFailure { detached = false }
+                val projection = current.projection
+                current.callback?.let { callback -> runCatching { projection?.unregisterCallback(callback) }.onFailure { detached = false } }
+                runCatching { projection?.stop() }.onFailure { detached = false }
+                if (detached) { current.display = null; current.projection = null; current.callback = null }
+                val backend = current.backend
+                if (backend == null) result.complete(RecordingBackendResult(false, detached))
+                else {
+                    val backendDone = backend.finish(stopRecorder && current.started)
+                    val detachConfirmed = detached
+                    scope.launch {
+                        val outcome = runCatching { backendDone.await() }.getOrNull()
+                        result.complete(RecordingBackendResult(outcome?.sealable == true && detachConfirmed,
+                            outcome?.released == true && detachConfirmed))
+                    }
+                }
+            }
+        }
+        return withTimeoutOrNull(7_000) { released.await() }
+    }
+
+    private fun quarantine(current: ActiveRecording) {
+        current.stopping = true
+        mutableState.value = current.journal.ui(RecordingPhase.Failed).copy(clickCaptureReady = false,
+            error = "停止请求已发送，但录制驱动尚未确认释放。暂不能开始新录制；请检查系统录屏指示。")
+        // Exactly one outstanding cleanup owns these handles. Never create replacement workers.
+        scope.launch {
+            val released = current.releaseResult?.await() ?: return@launch
+            gate.withLock {
+                if (active !== current || !released.released) return@withLock
+                active = null; owner = null; current.service.finishSession()
+                failUnsealed(current, "录制停止超过等待期限，本段未登记；需要重新授权录制。")
+            }
+        }
     }
 
     private fun failUnsealed(current: ActiveRecording, error: String) {
+        (current.backend as? FrameRecordingBackend)?.discardEvidence()
         val failed = current.journal.copy(phase = JournalPhase.Failed)
         runCatching { current.store.save(failed) }
         val cleaned = runCatching { current.store.deleteRaw(failed.sessionId) }.getOrDefault(false)
@@ -469,12 +541,18 @@ object RecordingCoordinator {
         )
     }
 
-    private suspend fun registerLocked(context: Context, store: RecordingJournalStore, journal: RecordingJournal) {
+    private suspend fun registerLocked(context: Context, store: RecordingJournalStore, journal: RecordingJournal, frameBackend: FrameRecordingBackend? = null) {
         check(journal.phase == JournalPhase.Sealed)
         mutableState.value = journal.ui(RecordingPhase.Registering)
         try {
-            SourceRepository(context).registerRecording(journal.projectId, journal.sourceId, store.sealed(journal.sessionId), "本机无声录制.mp4")
+            val source = SourceRepository(context).registerRecording(journal.projectId, journal.sourceId, store.sealed(journal.sessionId), "本机无声录制.mp4")
+            // This sidecar cannot roll back a durably registered source. Recovery can finish its marker.
+            if (frameBackend != null) frameBackend.markRegistered(source.metadata.sha256)
+            else withContext(Dispatchers.IO) { runCatching {
+                FrameEvidenceStore(context).registered(journal.sessionId, journal.sourceId, source.metadata.sha256)
+            } }
         } catch (_: Exception) {
+            frameBackend?.closeEvidenceWriter()
             sealedPending += journal.sessionId
             mutableState.value = journal.ui(RecordingPhase.Failed).copy(
                 error = "片段已封口，但校验或登记尚未成功。可重试登记，录制不会自动继续。", canRetry = true,
@@ -501,11 +579,17 @@ object RecordingCoordinator {
 
     private fun recoverLocked(context: Context) {
         val store = RecordingJournalStore(context)
+        runCatching { FrameEvidenceStore(context).recoverInterrupted() }
         val journals = store.readAll()
         sealedPending.clear()
         var latest: RecordingUiState? = null
         var pendingState: RecordingUiState? = null
         for (journal in journals) {
+            runCatching {
+                if (ProjectStore(context).readProject(journal.projectId) == null) {
+                    FrameEvidenceStore(context).deleteAfterProjectCommit(journal.projectId)
+                }
+            }
             when (journal.phase) {
                 JournalPhase.Sealed -> {
                     sealedPending += journal.sessionId
@@ -515,6 +599,7 @@ object RecordingCoordinator {
                 }
                 JournalPhase.DiscardPending, JournalPhase.Discarded -> {
                     val cleaned = store.deleteRaw(journal.sessionId)
+                    cleanupUnregisteredEvidence(context, journal)
                     if (cleaned && journal.phase != JournalPhase.Discarded) {
                         runCatching { store.save(journal.copy(phase = JournalPhase.Discarded)) }
                     }
@@ -526,6 +611,20 @@ object RecordingCoordinator {
                 }
                 JournalPhase.Registered -> {
                     val cleaned = store.deleteRaw(journal.sessionId)
+                    runCatching {
+                        val evidence = FrameEvidenceStore(context)
+                        if (WorkspaceStore(context, journal.projectId).confirmSourceAbsent(journal.sourceId)) {
+                            // A valid Registered journal plus an authoritative absent record means
+                            // the previously committed source was deleted, not merely unreadable.
+                            evidence.deleteAfterSourceCommit(journal.sourceId)
+                        } else if (ProjectStore(context).readProject(journal.projectId) == null) {
+                            evidence.deleteAfterProjectCommit(journal.projectId)
+                        } else {
+                            val source = SourceRepository(context).frameEvidenceSourceAccessor()
+                                .registeredSource(journal.projectId, journal.sessionId, journal.sourceId)
+                            if (source != null) evidence.registered(journal.sessionId, journal.sourceId, source.sourceSha256)
+                        }
+                    }
                     // Registered is historical. The author may since have deleted that source;
                     // recovery must not advertise it as currently available or recreate it.
                     latest = RecordingUiState(
@@ -538,6 +637,7 @@ object RecordingCoordinator {
                     } else journal
                     runCatching { store.save(interrupted) }
                     val cleaned = store.deleteRaw(journal.sessionId)
+                    cleanupUnregisteredEvidence(context, journal)
                     latest = interrupted.ui(RecordingPhase.Interrupted).copy(
                         error = if (cleaned) "上次录制未完整封口，未加入素材；重新录制需要新的系统授权。"
                         else "上次录制未完整封口，临时文件清理未完成，请检查本机空间。",
@@ -553,6 +653,22 @@ object RecordingCoordinator {
             }
         }
         mutableState.value = pendingState ?: latest ?: RecordingUiState()
+    }
+
+    /** A null/unreadable source accessor is insufficient proof of deletion. Read metadata explicitly. */
+    private fun cleanupUnregisteredEvidence(context: Context, journal: RecordingJournal) {
+        runCatching {
+            val evidence = FrameEvidenceStore(context)
+            if (WorkspaceStore(context, journal.projectId).confirmSourceAbsent(journal.sourceId)) {
+                evidence.deleteUnregisteredSession(journal.sessionId, journal.sourceId)
+            } else {
+                // Registration may have committed before its journal/sidecar marker did. Discard
+                // removes only the temporary MP4; complete the marker for that verified source.
+                val source = SourceRepository(context).frameEvidenceSourceAccessor()
+                    .registeredSource(journal.projectId, journal.sessionId, journal.sourceId)
+                if (source != null) evidence.registered(journal.sessionId, journal.sourceId, source.sourceSha256)
+            }
+        }
     }
 
     private fun scheduleTick(sessionId: String) {
@@ -615,11 +731,11 @@ object RecordingCoordinator {
         val clickSession: RecordingClickSession? = null,
     ) {
         var captureGeometryConfirmed = false
-        var recorder: MediaRecorder? = null
+        var backend: RecordingBackend? = null
+        var releaseResult: CompletableDeferred<RecordingBackendResult>? = null
         var projection: MediaProjection? = null
         var callback: MediaProjection.Callback? = null
         var display: VirtualDisplay? = null
-        var surface: Surface? = null
         var started = false
         var stopping = false
         var startedAtElapsedMs = 0L

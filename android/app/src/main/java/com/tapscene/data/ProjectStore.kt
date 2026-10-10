@@ -755,6 +755,7 @@ class ProjectStore(context: Context) {
         // Cleanup cannot turn a committed deletion into a reported failure. A journal row stays
         // until its exact, no-longer-referenced asset is gone, including across process restart.
         cleanupPending(db)
+        runCatching { com.tapscene.recording.FrameEvidenceStore(app).deleteAfterProjectCommit(projectId) }
         result.copy(pendingAssetCleanupCount = pendingCleanupCount(db, projectId, result.pendingAssetCleanupCount))
     }
 

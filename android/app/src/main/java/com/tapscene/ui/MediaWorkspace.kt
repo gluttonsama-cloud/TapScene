@@ -613,9 +613,11 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
             invalidateCandidate()
             mutableState.update { it.copy(frame = null, frameReviewId = null) }
             val drafts = withContext(Dispatchers.IO) {
-                store.update { current ->
+                val committed = store.update { current ->
                     val latest = current.firstOrNull { it.source.sourceId == selected.source.sourceId }
                     if (latest != null) {
+                        // Workspace → Project lock order also fences a new reviewed-step reference.
+                        check(!projectStore.isSourceReferenced(latest.source.sourceId)) { "项目步骤仍引用这段录屏，请先删除相关步骤或项目" }
                         // Delete only this source's derived text and revoke its active OCR
                         // lease before source removal. A late result must never restore it.
                         CandidateOcrStore.withTemporary(app) { it.deleteSource(latest.source.sourceId) }
@@ -627,6 +629,9 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
                     // metadata write fails, its now-missing source record is also safe to retry.
                     current.filterNot { it.source.sourceId == selected.source.sourceId }
                 }
+                // Only a known durable metadata deletion authorizes removing its private anchors.
+                runCatching { com.tapscene.recording.FrameEvidenceStore(app).deleteAfterSourceCommit(selected.source.sourceId) }
+                committed
             }
             mutableState.update { it.copy(drafts = drafts, selectedId = drafts.lastOrNull()?.source?.sourceId,
                 frame = null, frameReviewId = null, candidate = null, candidateImage = null, reviewedDigest = null, watchedDigest = null) }
