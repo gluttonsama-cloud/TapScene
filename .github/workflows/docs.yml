@@ -226,6 +226,74 @@ jobs:
       - name: Build the arm64 phone preview and run lint
         if: steps.scope.outputs.android == 'true'
         run: gradle -p android --no-daemon --max-workers=2 -PcompatibilityPreview=true -PtapsceneAbi=arm64-v8a :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+      - name: Execute production Android data checks on host native SQLite
+        id: host_data
+        if: steps.scope.outputs.android == 'true'
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          gradle -p android --no-daemon --max-workers=2 -PcompatibilityPreview=true -PtapsceneAbi=arm64-v8a \
+            :app:testDebugUnitTest \
+            --tests com.tapscene.data.ProjectStoreHostTest \
+            --tests com.tapscene.ui.ProjectWorkspaceHostTest \
+            2>&1 | tee "$RUNNER_TEMP/host-data-checks.txt"
+      - name: Verify the exact host checks executed without failures or skips
+        if: always() && steps.host_data.outcome != 'skipped' && steps.scope.outputs.android == 'true'
+        run: |
+          python3 - <<'PY_HOST'
+          from collections import Counter
+          from pathlib import Path
+          import os
+          import xml.etree.ElementTree as ET
+
+          root = Path("android/app/build/test-results/testDebugUnitTest")
+          files = sorted(root.glob("TEST-*.xml"))
+          expected = {
+              ("com.tapscene.data.ProjectStoreHostTest", "historicalMigrationsAndRollback"): 2,
+              ("com.tapscene.data.ProjectStoreHostTest", "rejectsInvalidLegacySchemasAndRelations"): 1,
+              ("com.tapscene.data.ProjectStoreHostTest", "rawPendingFormReopensAndStaleSessionIsRejected"): 1,
+              ("com.tapscene.data.ProjectStoreHostTest", "saveIsAtomicAndPreservesTheOtherStep"): 1,
+              ("com.tapscene.ui.ProjectWorkspaceHostTest", "cancellationAndDiscardDoNotReviveCommittedForms"): 1,
+          }
+          actual = Counter()
+          failures = errors = skipped = 0
+          seconds = 0.0
+          output = []
+          for file in files:
+              suite = ET.parse(file).getroot()
+              for case in suite.iter("testcase"):
+                  actual[(case.get("classname"), case.get("name", "").split("[")[0])] += 1
+                  failures += len(case.findall("failure"))
+                  errors += len(case.findall("error"))
+                  skipped += len(case.findall("skipped"))
+                  seconds += float(case.get("time", "0"))
+              output.extend(node.text or "" for node in suite.iter("system-out"))
+          summary = (f"HOST_DATA_EXECUTION tests={sum(actual.values())} failures={failures} errors={errors} "
+                     f"skipped={skipped} test_seconds={seconds:.3f}; expected=6 executions / 5 entry points / 2 classes")
+          print(summary)
+          (Path(os.environ["RUNNER_TEMP"]) / "host-data-execution.txt").write_text(summary + "\n", encoding="utf-8")
+          assert actual == Counter(expected), f"Missing/unexpected executed tests: {actual}"
+          assert failures == errors == skipped == 0, summary
+          evidence = "\n".join(output)
+          for api in (26, 35):
+              assert f"HOST_SQLITE api={api} " in evidence, f"Missing API {api} native SQLite evidence"
+          assert "mode=NATIVE journal=truncate sync=2" in evidence
+          for boundary in ("save-before-commit", "save-after-commit", "discard-before/after-commit", "owner/store recreation"):
+              assert f"HOST_CANCEL {boundary}" in evidence, f"Missing cancellation boundary: {boundary}"
+          print("TAPSCENE_HOST_DATA_CHECKS_OK: production Android data code executed; device/media/power-loss checks remain separate")
+          PY_HOST
+      - name: Keep host Android data execution reports
+        if: always() && steps.host_data.outcome != 'skipped' && steps.scope.outputs.android == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tapscene-host-android-data-checks
+          path: |
+            android/app/build/test-results/testDebugUnitTest/
+            android/app/build/reports/tests/testDebugUnitTest/
+            ${{ runner.temp }}/host-data-checks.txt
+            ${{ runner.temp }}/host-data-execution.txt
+          retention-days: 7
+          if-no-files-found: error
       - name: Inspect packaged OCR models, native dependencies, alignment and size
         if: steps.scope.outputs.android == 'true'
         run: |

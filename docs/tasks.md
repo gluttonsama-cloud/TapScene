@@ -57,4 +57,5 @@
 - 项目首页“导入 AI 包”经隔离校验、完整内容及可选本机固定版本对比、明确确认后建立独立新项目。视频包、裸 JSON、不可无损编辑的标签/来源/文字逐项拒绝；全 scene 分支保留，重复访问不变成新步骤。
 - SQLite v8 独立 PackageSafeImage 来源、prepare/previewDigest/commit/cancel/readResult 会话、图片复制恢复日志及独立 DraftAiConfig。旧 v1–v7 真正 DDL、复合关系/文字草稿/日志保全及失败回滚有主机与 Android 专项；不伪造视频 PTS、原截图或现存安全底图。
 - 完整 visits/effects 随新草稿保留，手机逐项表单修改/明确删除。画面、区域和图变化标记计划待修复，引用不自动删除；固定新候选时捕获计划并重新绑定新 release 摘要。外部复核/试走不继承，所有内容重新本机审阅。
+- 主机 Android 数据执行增量：两类五入口运行生产 Store/Workspace、SQLiteOpenHelper 与 NATIVE SQLite（迁移 API 26/35，其余 API 26），核对 TRUNCATE/FULL、事务回滚、草稿重开和提交边界取消；实际通过以该 PR 的 JUnit XML 为准，尚未执行不计通过。实跑发现 Android 延迟外键提交失败后仍可能复用未提交连接；生产事务现关闭失败连接池并保留异常，关闭不成功时阻止后续读取与清理，开发版本递增 19。其 SQLite 不代表 API 26 真机版本，设备媒体/进程终止/断电恢复仍为 NOT_RUN。
 - 已执行：包安全/AI/回流兼容性主机检查、SQLite 迁移/约束检查与 diff 检查。Android 新增源码及生产 Compose 已准备；精确 CI 编译、Lint、布局和平台会话测试分别待核验。无 Android SDK/KVM 的本机平台运行 NOT_RUN，不能用主机检查或截图代替。
