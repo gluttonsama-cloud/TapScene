@@ -7,10 +7,16 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.view.accessibility.AccessibilityNodeInfo
 import com.tapscene.clickplan.ClickPlayback
+import java.io.File
 
 /** Normal on-screen setup only. No shell grants, app-ops, secure-settings writes or fake grants. */
 internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
     val automation: UiAutomation = instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
+    var systemUiAnrWaitAttempted = false
+        private set
+    var systemUiAnrWaitedOnce = false
+        private set
+    private var observedSettingsAfterWait = false
 
     fun enableService() {
         if (ClickPlayback.state.value.connected) return
@@ -21,7 +27,7 @@ internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
         while (SystemClock.uptimeMillis() < deadline && !ClickPlayback.state.value.connected) {
             val root = automation.rootInActiveWindow
             if (root != null) try {
-                if (root.packageName?.toString() == "com.android.settings") when {
+                if (!waitForSystemUiOnce(root) && root.packageName?.toString() == "com.android.settings") when {
                     !selectedService && clickText(root, "TapScene 点击链定位与播放") -> selectedService = true
                     !selectedService -> clickText(root, "Downloaded apps", "Installed apps", "已下载的应用", "已安装的应用")
                     !toggled -> {
@@ -39,6 +45,30 @@ internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
             SystemClock.sleep(200)
         }
         check(ClickPlayback.state.value.connected) { "Accessibility UI did not enable the service; no bypass attempted" }
+    }
+
+    /** One normal Wait action for the exact system startup dialog observed in run 38066025600. */
+    private fun waitForSystemUiOnce(root: AccessibilityNodeInfo): Boolean {
+        if (root.packageName?.toString() == "com.android.settings") {
+            if (systemUiAnrWaitedOnce) observedSettingsAfterWait = true
+            return false
+        }
+        if (root.packageName?.toString() != "android") return false
+        val title = find(root) { it.isVisibleToUser && it.viewIdResourceName == "android:id/alertTitle" && it.text?.toString() == "System UI isn't responding" }
+            ?: return false
+        title.recycle()
+        if (systemUiAnrWaitAttempted) {
+            check(!observedSettingsAfterWait) { "System UI ANR recurred after the only allowed Wait action" }
+            return true // The old dialog may remain briefly while the normal Wait action is handled.
+        }
+        File(instrumentation.targetContext.filesDir, "runtime-smoke/system-ui-anr-before-wait.txt").writeText(snapshotTree(root))
+        val button = find(root) { it.viewIdResourceName == "android:id/aerr_wait" && it.text?.toString() == "Wait" && it.isVisibleToUser && it.isEnabled && it.isClickable }
+            ?: error("System UI ANR has no normal Wait control")
+        systemUiAnrWaitAttempted = true
+        try { check(click(button)) { "System UI ANR Wait action was rejected" } }
+        finally { button.recycle() }
+        systemUiAnrWaitedOnce = true
+        return true
     }
 
     /** Bound to the app's confirmation screen and the OS permission UI, never the target app. */
@@ -78,18 +108,20 @@ internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
 
     fun snapshotTree(): String {
         val root = automation.rootInActiveWindow ?: return "No active accessibility root"
-        return try {
-            val lines = mutableListOf<String>()
-            fun visit(node: AccessibilityNodeInfo, depth: Int) {
-                if (depth > 30 || lines.size >= 500) return
-                lines += "${node.packageName} ${node.className} text=${node.text} id=${node.viewIdResourceName} checked=${node.isChecked} enabled=${node.isEnabled}"
-                for (i in 0 until node.childCount) node.getChild(i)?.let { child ->
-                    try { visit(child, depth + 1) } finally { child.recycle() }
-                }
+        return try { snapshotTree(root) } finally { root.recycle() }
+    }
+
+    private fun snapshotTree(root: AccessibilityNodeInfo): String {
+        val lines = mutableListOf<String>()
+        fun visit(node: AccessibilityNodeInfo, depth: Int) {
+            if (depth > 30 || lines.size >= 500) return
+            lines += "${node.packageName} ${node.className} text=${node.text} id=${node.viewIdResourceName} checked=${node.isChecked} enabled=${node.isEnabled}"
+            for (i in 0 until node.childCount) node.getChild(i)?.let { child ->
+                try { visit(child, depth + 1) } finally { child.recycle() }
             }
-            visit(root, 0)
-            lines.joinToString("\n")
-        } finally { root.recycle() }
+        }
+        visit(root, 0)
+        return lines.joinToString("\n")
     }
 
     private fun clickText(root: AccessibilityNodeInfo, vararg texts: String): Boolean {

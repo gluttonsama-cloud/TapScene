@@ -38,10 +38,12 @@
 
 [第四次精确 CI](https://github.com/gluttonsama-cloud/TapScene/actions/runs/38064296590) 的广播同步成功，启动 ANR 仍发生；新增 DropBox 栈准确落在 `libz.inflate` → `DexFileLoader.OpenFromZipEntry` → `LoadedApk` 类加载 → `ActivityThread.handleBindApplication`，仍未进入 EGL 探针。该栈没有给出正在解压的具体 APK 路径。针对该采样，只有 `tapsceneRuntimeSmoke=true` 的构建启用 [AGP 官方 DEX 非压缩封装](https://developer.android.com/reference/tools/gradle-api/8.13/com/android/build/api/dsl/DexPackaging)，构建后检查主 APK 的所有 DEX 为 ZIP STORED，并保留三 APK 的 DEX 压缩方式、大小及摘要。它不改变 DEX 源码、minSDK、manifest、ART 策略或超时；默认手机构建不受影响。该测试包因此不能代表默认手机 APK 的压缩 DEX 冷启动性能，且这一采样不足以证明解压是唯一瓶颈。
 
+[第五次精确 CI](https://github.com/gluttonsama-cloud/TapScene/actions/runs/38066025600) 已通过真实生产 EGL/AVC 探针：一个源 buffer 产生 32 个实际 MP4 样本、时长约 3.092 秒，约 1.614 秒静态观察段保留，生产校验与全部样本解码通过。随后正常 Accessibility 设置被首启已出现的 `System UI isn't responding` 对话框遮挡，未进入点击/投影场景。测试仅在此精确系统框保存 UI 树后按一次现成的 `Wait`，在结果中记录尝试和成功标志；不按 Close app，不循环清除 ANR，不处理其他应用的 ANR，不延长原 30 秒 UI 界限。旧框尚未消失时只观察，已看见设置页后再出现同一 ANR 即失败。即使后续业务断言通过，也应连同这项环境异常一起解读。
+
 [首次精确 CI](https://github.com/gluttonsama-cloud/TapScene/actions/runs/38060445119) 已完成三个 APK 构建，但在模拟器加载阶段发现 `libpulse.so.0` 缺失，未启动 AVD。独立 lane 因此只从 [Ubuntu 官方仓库](https://packages.ubuntu.com/noble/libpulse0)安装 `libpulse0` 及其必要依赖，保存 `ldd` 诊断并用官方启动器的 `-version` 实际加载结果把关；裸 `ldd` 不代表启动器设置的内置库路径。`-no-audio` 不能免除 ELF 加载依赖。没有安装音频服务、全套桌面或新的模拟器版本。
 
 无论通过、断言失败还是进程崩溃，保留 7 天的 `android-runtime-smoke` artifact：准确提交/tree、SDK/构建日志、emulator 全日志、运行期全 buffer logcat、crash buffer、app exit-info、服务状态，以及由 `run-as` 只读取本次合成测试目录的 `app-evidence.tar`。它包含真实视频和测试断言，未包含 SDK/AVD 用户盘或 ADB 私钥。
 
 退出处理先取诊断，再停止测试 app、关闭模拟器/ADB，最后只删除本轮固定临时目录。超时不报告成功；只有专用 runner 完成全部断言的 `TAPSCENE_RUNTIME_SMOKE_OK` 才通过。GitHub 强制终止整机时无法保证退出钩子运行，runner 销毁仍会清除一次性设备；不能把缺失清理日志称作已核验清理。
 
-当前状态：三个 APK 编译、安装和隔离 Android 启动已通过；专用 runner 启动 ANR 已留存证据，EGL 探针与生产场景仍待验证。源码/构建/启动通过不等于 runtime 通过，也不替代实体手机 120 秒静态录制、生命周期和 OEM 兼容检查。
+当前状态：三个 APK 编译/安装、隔离 Android 启动及真实生产 EGL/AVC 单源帧静态探针已通过；正常系统授权后的生产点击/投影场景仍待验证。局部通过不等于整条 runtime 通过，也不替代实体手机 120 秒静态录制、生命周期和 OEM 兼容检查。

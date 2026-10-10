@@ -73,6 +73,8 @@ class ClickRuntimeInstrumentation : Instrumentation() {
                 .put("stack", failure.stackTraceToString())
             runCatching { write("failure-ui.txt", ui?.snapshotTree().orEmpty()) }
         } finally {
+            report.put("systemUiAnrWaitAttempted", ui?.systemUiAnrWaitAttempted == true)
+                .put("systemUiAnrWaitedOnce", ui?.systemUiAnrWaitedOnce == true)
             // Only this invocation's capability is stopped. Driver timeout is NOT release proof.
             runCatching {
                 if (projectId != null && (ClickPlayback.state.value.run?.projectId == projectId || ClickPlayback.state.value.overlayVisible)) {
