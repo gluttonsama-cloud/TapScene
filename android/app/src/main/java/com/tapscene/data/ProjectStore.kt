@@ -730,7 +730,7 @@ class ProjectStore(context: Context) {
         // OCR is derived private source data, not a saved step or a sealed release. Revoke
         // live writers first so a cancelled analysis cannot recreate it after deletion.
         requireSnapshot(db, projectId)
-        CandidateOcrStore(app).deleteProject(projectId)
+        CandidateOcrStore.withTemporary(app) { it.deleteProject(projectId) }
         val result = transaction(db) {
             val current = requireSnapshot(db, projectId)
             val hotspots = current.steps.sumOf { it.hotspots.size }

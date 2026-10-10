@@ -417,16 +417,31 @@ class CandidateOcrStore(context: Context) {
         }
     }
 
-    private companion object {
-        val lock = Any()
-        val activeRuns = mutableMapOf<String, CandidateOcrRun>()
-        val invalidationsByRoot = mutableMapOf<String, InvalidationRegistry>()
-        const val IDENTITY_WHERE = "project_id=? AND source_id=? AND source_sha=? AND engine_version=? AND model_version=?"
-        const val MAX_WORDS = 256
-        const val MAX_WORD_CHARS = 512
-        const val MAX_TEXT_CHARS = 8_192L
-        const val MAX_JSON_CHARS = 524_288
-        fun validId(id: String) { require(runCatching { UUID.fromString(id).toString() == id }.getOrDefault(false)) { "文字识别对象标识无效。" } }
+    companion object {
+        /** Deletion hooks own this connection only; keep other OCR workers and fences alive. */
+        internal fun <T> withTemporary(context: Context, action: (CandidateOcrStore) -> T): T {
+            val store = CandidateOcrStore(context)
+            var failure: Throwable? = null
+            try { return action(store) }
+            catch (error: Throwable) { failure = error; throw error }
+            finally {
+                try { synchronized(lock) { store.helper.close() } }
+                catch (closeFailure: Throwable) {
+                    if (failure == null) throw closeFailure
+                    if (failure !== closeFailure) failure.addSuppressed(closeFailure)
+                }
+            }
+        }
+
+        private val lock = Any()
+        private val activeRuns = mutableMapOf<String, CandidateOcrRun>()
+        private val invalidationsByRoot = mutableMapOf<String, InvalidationRegistry>()
+        private const val IDENTITY_WHERE = "project_id=? AND source_id=? AND source_sha=? AND engine_version=? AND model_version=?"
+        private const val MAX_WORDS = 256
+        private const val MAX_WORD_CHARS = 512
+        private const val MAX_TEXT_CHARS = 8_192L
+        private const val MAX_JSON_CHARS = 524_288
+        private fun validId(id: String) { require(runCatching { UUID.fromString(id).toString() == id }.getOrDefault(false)) { "文字识别对象标识无效。" } }
     }
 }
 

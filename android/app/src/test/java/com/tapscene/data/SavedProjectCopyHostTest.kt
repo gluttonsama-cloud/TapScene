@@ -229,8 +229,11 @@ class SavedProjectCopyHostTest {
             file.writeBytes(bytes)
             for (commitFailure in listOf(false, true)) {
                 f.database {
-                    execSQL(if (commitFailure) """CREATE TRIGGER reject_project_copy AFTER INSERT ON projects
-                        WHEN NEW.project_id='${operation.projectId}' BEGIN
+                    // Corrupt the deferred FK only after graph validation and receipt update.
+                    // An INSERT-project trigger fires before installProjectCopy's explicit
+                    // start-state assertion and therefore does not exercise COMMIT failure.
+                    execSQL(if (commitFailure) """CREATE TRIGGER reject_project_copy AFTER UPDATE OF status ON project_copy_operations
+                        WHEN NEW.operation_id='${operation.operationId}' AND OLD.status='preparing' AND NEW.status='committed' BEGIN
                         UPDATE projects SET start_state_id='${id()}' WHERE project_id=NEW.project_id; END"""
                         else """CREATE TRIGGER reject_project_copy BEFORE INSERT ON projects
                         WHEN NEW.project_id='${operation.projectId}' BEGIN SELECT RAISE(ABORT,'injected project copy failure'); END""")
@@ -238,10 +241,18 @@ class SavedProjectCopyHostTest {
                 val media = f.mediaFiles()
                 val failure = runCatching { f.store.copySavedProject(f.project, before.project.revision, operation.operationId) }.exceptionOrNull()
                 check(failure != null)
-                if (commitFailure) check(failure is SQLiteConstraintException && failure.message.orEmpty().contains("FOREIGN KEY", true))
+                if (commitFailure) {
+                    check(failure is SQLiteConstraintException && failure.message.orEmpty().contains("FOREIGN KEY", true)) {
+                        "Expected deferred-FK COMMIT failure after receipt update, got ${failure.javaClass.name}: ${failure.message}"
+                    }
+                    check(failure.stackTrace.any { it.methodName == "endTransaction" }) {
+                        "Foreign-key rejection did not reach the production COMMIT boundary"
+                    }
+                }
                 check(f.snapshot() == before && f.store.listProjects().size == 1 && f.mediaFiles() == media)
                 f.database { execSQL("DROP TRIGGER reject_project_copy") }
                 f.assertNoCopyResidue()
+                if (commitFailure) println("HOST_SAVED_PROJECT_COPY deferred_commit: receipt-update injection reached endTransaction; source, project count and bytes unchanged; exact journal cleaned")
             }
             val cancelledOp = f.store.beginProjectCopy(f.project, before.project.revision)
             val cancelled = async(start = CoroutineStart.UNDISPATCHED) {

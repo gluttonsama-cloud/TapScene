@@ -12,6 +12,7 @@ import com.tapscene.data.HostFileSyncShadow
 import com.tapscene.data.HostProjectFixture
 import com.tapscene.data.HostSqlite
 import com.tapscene.data.ProjectStore
+import com.tapscene.data.WorkspaceStore
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.security.MessageDigest
@@ -234,7 +235,7 @@ class CopyWorkspaceHostTest {
                         sortColumnHidden = true
                         val failure = runCatching { fixture.store.listProjects() }.exceptionOrNull()
                         check(failure is SQLiteException && failure.message.orEmpty().contains("updated_at"))
-                    }) { fixture.store.listProjects().size == existingIds.size + 1 }
+                    }, waitForProjectCopy = true) { fixture.store.listProjects().size == existingIds.size + 1 }
                     check(workspace.state.value.loadFailed)
                     check(workspace.state.value.projectCopyNotice == null) { "Unreadable result became acknowledged UI state" }
                     fixture.database { execSQL("ALTER TABLE projects RENAME COLUMN project_copy_test_updated_at TO updated_at") }
@@ -324,21 +325,53 @@ class CopyWorkspaceHostTest {
     }
 
     private suspend fun cancelAfterCommit(workspace: ProjectWorkspace, action: ProjectWorkspace.() -> Unit,
-        afterCommit: () -> Unit = {}, committed: () -> Boolean,
+        afterCommit: () -> Unit = {}, waitForProjectCopy: Boolean = false, committed: () -> Boolean,
     ) = coroutineScope {
         check(!committed())
         val latch = CountDownLatch(1)
+        val ready = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        // Whole-project copying has several IO -> Main preflight returns. Let those run, then
+        // hold the existing production monitor at the actual copier entry. This changes only
+        // scheduling: no store result, SQL, bitmap validation or filesystem call is substituted.
+        val barrier = if (waitForProjectCopy) async(Dispatchers.IO) {
+            val monitor = WorkspaceStore::class.java.getDeclaredField("lock").apply { isAccessible = true }.get(null)
+            synchronized(monitor) {
+                ready.countDown()
+                check(release.await(30, TimeUnit.SECONDS)) { "Project-copy scheduling barrier was not released" }
+            }
+        } else null
         val observer = async(Dispatchers.IO) {
             withTimeout(10_000) { while (!committed()) delay(1) }
             afterCommit()
             latch.countDown()
         }
-        main {
-            workspace.action()
-            check(latch.await(10, TimeUnit.SECONDS)) { "Copy did not reach its SQL commit boundary" }
-            cancelRunning(workspace)
+        try {
+            if (barrier != null) {
+                withContext(Dispatchers.IO) { check(ready.await(10, TimeUnit.SECONDS)) }
+                main { workspace.action() }
+                withTimeout(10_000) {
+                    while (Thread.getAllStackTraces().none { (thread, stack) ->
+                        thread.state == Thread.State.BLOCKED &&
+                            stack.any { it.className == "com.tapscene.data.ProjectStore" && it.methodName == "copySavedProject" } &&
+                            stack.any { it.className == "com.tapscene.data.WorkspaceStore\$Companion" &&
+                                it.methodName.startsWith("withProjectCopyLock") }
+                    }) delay(1)
+                }
+            }
+            main {
+                if (barrier == null) workspace.action()
+                // Main is now blocked before the final IO task can return, not before its
+                // preflight callbacks. Only a separate real SQL commit observation releases it.
+                release.countDown()
+                check(latch.await(10, TimeUnit.SECONDS)) { "Copy did not reach its SQL commit boundary" }
+                cancelRunning(workspace)
+            }
+            observer.await()
+        } finally {
+            release.countDown()
+            barrier?.await()
         }
-        observer.await()
         settled(workspace)
     }
 
