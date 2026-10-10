@@ -717,7 +717,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                             when (tab) {
                                 ProjectTab.STEPS -> StoryboardContent(state, projects::openStep, { tab = ProjectTab.SOURCES },
                                     projects::setStart, projects::moveStep, { deletingStep = it },
-                                    stepThumbnail = { asset -> ReviewedThumbnail(projects, state.project, asset) }, onBuildPath = openPath, onAiPlan = openDraftAi)
+                                    stepThumbnail = { asset -> ReviewedThumbnail(projects, state.project, asset) }, onBuildPath = openPath, onAiPlan = openDraftAi,
+                                    onCopyStep = projects::copySavedStep)
                                 ProjectTab.SOURCES -> Column(Modifier.fillMaxSize()) {
                                     if (scopeReady && mediaState.loadFailed) Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                                         Text("素材暂时无法读取。", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)

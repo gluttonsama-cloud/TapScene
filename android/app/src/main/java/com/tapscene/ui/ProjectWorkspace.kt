@@ -129,6 +129,9 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     private val pendingStages = linkedMapOf<Pair<String, String>, Long>()
     private var stagingTask: Job? = null
     private val savingDrafts = mutableMapOf<Pair<String, String>, StepEditDraft>()
+    // Retain an ambiguous attempt across cancel/reload/retry; its ID is also the new step ID.
+    private val pendingStepCopies = mutableMapOf<Pair<String, String>, SavedStepCopyAttempt>()
+    private data class SavedStepCopyAttempt(val revision: Long, val operationId: String)
     // One session-local author edit only. Never retain pixels, source paths or media bindings.
     private var editorUndo: EditorUndo? = null
 
@@ -561,6 +564,57 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         ids.add(to, ids.removeAt(from))
         execute("保存步骤顺序", editing = true) {
             applyProject(withContext(Dispatchers.IO) { store.reorderSteps(project.project.id, ids) })
+        }
+    }
+
+    /** Copy only the formal step, after the source's own editor input has been handled. */
+    fun copySavedStep(stepId: String) {
+        val current = state.value
+        if (current.busy || current.loadFailed) return
+        val project = current.project ?: return
+        if (project.steps.none { it.id == stepId }) return
+        val key = project.project.id to stepId
+        val previous = pendingStepCopies[key]
+        if (previous != null && project.steps.any { it.id == previous.operationId &&
+                it.captureId == "copy:$stepId:${previous.revision}:${previous.operationId}" }) {
+            pendingStepCopies.remove(key)
+            message("步骤已复制，请接入路线；过渡需重新设置")
+            return
+        }
+        fun hasSourceInput(): Boolean = drafts[key]?.draft?.let {
+            it.dirty || it.pendingForm != null || it.conflicts.isNotEmpty()
+        } == true
+        if (hasSourceInput()) {
+            message("请先打开这一步，保存或放弃本步修改（含面板输入），再复制")
+            return
+        }
+        val attempt = pendingStepCopies.getOrPut(key) { SavedStepCopyAttempt(project.project.revision, UUID.randomUUID().toString()) }
+        val operationId = attempt.operationId
+        var committed = false
+        execute("复制已保存步骤", editing = true, afterRefresh = {
+            val found = state.value.project?.takeIf { it.project.id == project.project.id }
+                ?.steps?.any { it.id == operationId && it.captureId == "copy:$stepId:${attempt.revision}:$operationId" } == true
+            if (committed || found) {
+                pendingStepCopies.remove(key)
+                message(if (state.value.loadFailed) "步骤已复制；请先重读项目，再接入路线并重设过渡"
+                    else "步骤已复制，请接入路线；过渡需重新设置")
+            } else if (state.value.loadFailed) {
+                message("无法确认复制结果，请先重读项目，再点“复制步骤”重试")
+            } else {
+                // A completed authoritative reread establishes that this attempt did not commit.
+                pendingStepCopies.remove(key)
+            }
+        }) {
+            draftWriteLock.withLock {
+                require(state.value.project?.project?.id == project.project.id) { "项目已变化，请重新选择要复制的步骤" }
+                require(!hasSourceInput()) { "请先保存或放弃本步修改（含面板输入），再复制" }
+                val saved = withContext(Dispatchers.IO) {
+                    store.copySavedStep(project.project.id, stepId, attempt.revision, operationId)
+                }
+                committed = true
+                // Rebase other steps' drafts while holding their writer barrier. Never submit them.
+                applyProject(saved)
+            }
         }
     }
 

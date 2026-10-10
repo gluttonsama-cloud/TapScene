@@ -113,6 +113,8 @@ SQLite v6 将步骤的私有媒体依据明确分成 `videoFrame` 与 `image`，
 
 静态 AI 回流使用 SQLite v8：`states` 新增独立 `packageImage` 来源分支与 nullable `package_import_id`，其 video/PTS/image_source/base 列全部为空、`evidence_kind=imported`。`package_step_origins` 保存包来源状态/资产/摘要与外部声明，通过项目/步骤/导入 ID 的延迟复合外键与步骤一一绑定；后续安全底图追加遮挡仍保留 imported 和私有来源沿革。仅受控重建 states，真实 v1–v7 数据、全部关系、文字草稿与恢复日志逐字段保全；失败原样回滚。
 
+同项目单步复制复用 v8 表与资产恢复日志，无新迁移。`copySavedStep(projectId, stepId, expectedRevision, operationId)` 以稳定操作 ID 作为副本步骤 ID，复制并重新解码核对当前正式安全 PNG 后，将新步骤、出口与区域定义原子提交。源引用可共用，安全图片资产独立；安全底图绑定副本自身。包来源的本机 owner 与外部 source ID 明确分开，保留外包原始身份、摘要以及追加遮挡后的来源行。副本不继承视频过渡、裁片复核或编辑暂存，不改入边、起点和动画访问计划；修订更新使动画计划待核。
+
 `ai_import_sessions` 保存 preparing/ready/committed/cancelled/failed、预分配的新项目、精确输入 SHA、previewDigest 和完整预览记录。会话回执不随项目删除；同会话重复提交返回原结果，不重新建项目。原包复制到私有隔离区，严格完整校验后生成预览；提交重新解包比对同一 scene/plan，独立图片复制提前登记恢复日志，完整图/来源/区域/动画计划/提交回执在同一 SQLite 事务落盘。提交前失败只清本次副本；提交边界取消重读持久结果；恢复清理只针对精确会话与未登记资产，已建项目不回滚。
 
 `draft_ai_configs` 独立保存 canvas、有限 visits、逐项稳定 ID 的 effects、绑定草稿修订与待修复状态。完整 scene.states 决定步骤，重复 visits 不增步。图/画面/区域变化标记待核对，坏引用和超时效果保留，不能静默删掉后导出；手机逐项表单核对修复；明确保存计划递增草稿修订，避免复用携带旧计划的候选。固定候选与草稿图片在同一项目锁内捕获计划，候选私有 draft-plan.json 绑定新 scene，正式封存后作为不可变计划读取，不写入 scene 或继承外部复核。

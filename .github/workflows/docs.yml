@@ -242,6 +242,8 @@ jobs:
             --tests com.tapscene.data.ProjectStoreHostTest \
             --tests com.tapscene.ui.ProjectWorkspaceHostTest \
             --tests com.tapscene.data.AiRoundTripHostTest \
+            --tests com.tapscene.data.SavedStepCopyHostTest \
+            --tests com.tapscene.ui.CopyWorkspaceHostTest \
             --tests com.tapscene.sharing.OfflineShareHostTest \
             --tests com.tapscene.ui.OfflineShareWorkspaceHostTest \
             2>&1 | tee "$RUNNER_TEMP/host-data-checks.txt"
@@ -265,6 +267,12 @@ jobs:
               ("com.tapscene.ui.ProjectWorkspaceHostTest", "cancellationAndDiscardDoNotReviveCommittedForms"): 1,
               ("com.tapscene.ui.ProjectWorkspaceHostTest", "singleEditorUndoCoalescesAndHonorsSaveNavigationAndRevisionBoundaries"): 1,
               ("com.tapscene.data.AiRoundTripHostTest", "completeStaticPackageReturnsAsReviewedRelease"): 1,
+              ("com.tapscene.data.SavedStepCopyHostTest", "savedGraphCopiesIndependentlyWithoutRetargetingOrInheritingReview"): 1,
+              ("com.tapscene.data.SavedStepCopyHostTest", "originsRemainLocalAndMissingRawSourcesAreNeverRequired"): 1,
+              ("com.tapscene.data.SavedStepCopyHostTest", "rejectsUnsafePixelsAndFailuresLeaveNoPartialCopy"): 1,
+              ("com.tapscene.data.SavedStepCopyHostTest", "retriesRacesAndCancellationResolveFromDurableState"): 1,
+              ("com.tapscene.data.SavedStepCopyHostTest", "allGraphLimitsAreCheckedBeforeAddingTheCompleteCopy"): 1,
+              ("com.tapscene.ui.CopyWorkspaceHostTest", "copyHandlesSourceInputCancellationAndOtherStepRecovery"): 1,
               ("com.tapscene.sharing.OfflineShareHostTest", "exactReadOnlyUrisRejectTraversalTamperingAndExpiry"): 2,
               ("com.tapscene.sharing.OfflineShareHostTest", "cacheLimitsAndCancelledPreparationPreserveExistingSnapshots"): 2,
               ("com.tapscene.ui.OfflineShareWorkspaceHostTest", "chooserRequestIsConsumedOnceAndNeverRestoredAfterExit"): 1,
@@ -282,11 +290,11 @@ jobs:
                   skipped += len(case.findall("skipped"))
                   seconds += float(case.get("time", "0"))
               output.extend(node.text or "" for node in suite.iter("system-out"))
-              if suite.get("name") == "com.tapscene.data.AiRoundTripHostTest":
+              if suite.get("name") in ("com.tapscene.data.AiRoundTripHostTest", "com.tapscene.data.SavedStepCopyHostTest", "com.tapscene.ui.CopyWorkspaceHostTest"):
                   stderr = "\n".join(node.text or "" for node in suite.iter("system-err"))
-                  assert "Explicit termination method 'close' not called" not in stderr, "Static AI round trip leaked a CloseGuard resource"
+                  assert "Explicit termination method 'close' not called" not in stderr, "Native PNG host check leaked a CloseGuard resource"
           summary = (f"HOST_DATA_EXECUTION tests={sum(actual.values())} failures={failures} errors={errors} "
-                     f"skipped={skipped} test_seconds={seconds:.3f}; expected=6 original data executions + 1 temporary-store lifecycle + 1 static AI round trip + 1 editor undo + 5 offline share executions / 11 entry points / 5 classes")
+                     f"skipped={skipped} test_seconds={seconds:.3f}; expected=6 original data executions + 1 temporary-store lifecycle + 1 static AI round trip + 1 editor undo + 5 offline share executions + 6 saved-step-copy executions / 17 entry points / 7 classes")
           print(summary)
           (Path(os.environ["RUNNER_TEMP"]) / "host-data-execution.txt").write_text(summary + "\n", encoding="utf-8")
           assert actual == Counter(expected), f"Missing/unexpected executed tests: {actual}"
@@ -307,7 +315,11 @@ jobs:
           assert "HOST_OFFLINE_SHARE_UI one-shot/route/version/expiry/failure-return PASS" in evidence
           assert "HOST_TEMP_STORE api=26 repeated-success=closed exceptional-exit=closed primary-error=preserved other-owner=read/write/open" in evidence
           assert "PASS AI candidate lifecycle: three real candidate copies" in evidence
-          print("TAPSCENE_HOST_DATA_CHECKS_OK: original six checks plus temporary-store lifecycle, static native-PNG round trip, editor undo and offline sharing executed; device/video/power-loss checks remain separate")
+          for boundary in ("graph", "origins", "atomicity", "concurrency", "limits"):
+              assert f"HOST_SAVED_STEP_COPY {boundary}:" in evidence, f"Missing saved-step-copy evidence: {boundary}"
+          assert "HOST_STEP_COPY_WORKSPACE source-text/restored-panel=blocked" in evidence
+          assert "HOST_STEP_COPY_WORKSPACE committed-refresh-failure=uncertain" in evidence
+          print("TAPSCENE_HOST_DATA_CHECKS_OK: original six checks plus temporary-store lifecycle, static native-PNG round trip, editor undo, offline sharing and saved-step copying executed; device/video/power-loss checks remain separate")
           PY_HOST
       - name: Read the actual Android round-trip export with the independent TS reader
         if: steps.scope.outputs.android == 'true'
@@ -396,7 +408,9 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 56, f"Expected fifty-six Compose review images, found {len(images)}"
+          assert len(images) == 58, f"Expected fifty-eight Compose review images, found {len(images)}"
+          copy_images = [image for image in images if "SavedStepCopyScreenshotPreviewsKt" in str(image)]
+          assert len(copy_images) == 2, f"Expected two saved-step-copy review images, found {len(copy_images)}"
           share_images = [image for image in images if "OfflineShareScreenshotPreviewsKt" in str(image)]
           assert len(share_images) == 2, f"Expected two delivery share review images, found {len(share_images)}"
           ai_draft_images = [image for image in images if "AiDraftScreenshotPreviewsKt" in str(image)]
@@ -413,7 +427,7 @@ jobs:
               assert data[:8] == b"\x89PNG\r\n\x1a\n", image
               width, height = struct.unpack(">II", data[16:24])
               assert width > 0 and height > 0, image
-              if any(name in str(image) for name in ("EditorDraftRecovery", "SafeImage", "ScreenshotImport", "EditorNavigation", "ReviewAiNavigation", "AiDraftScreenshot", "OfflineShareScreenshot")):
+              if any(name in str(image) for name in ("EditorDraftRecovery", "SafeImage", "ScreenshotImport", "EditorNavigation", "ReviewAiNavigation", "AiDraftScreenshot", "OfflineShareScreenshot", "SavedStepCopyScreenshot")):
                   # A modal window can yield a valid but blank PNG in Layoutlib. Reject that
                   # before treating form and AI import images as usable review evidence.
                   import zlib

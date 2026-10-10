@@ -41,9 +41,11 @@ sealed interface StepOrigin {
     data class Image(val base: SafeImageBinding) : StepOrigin
     /** Verified package pixels only; no raw image path, video source or invented timestamp. */
     data class PackageSafeImage(val importId: String, val sourceStateId: String,
-        val sourceAssetId: String, val sha256: String, val declaredKind: String) : StepOrigin {
+        val sourceAssetId: String, val sha256: String, val declaredKind: String,
+        /** Explicit local owner; external source IDs remain unchanged when a step is copied. */
+        val localStepId: String = sourceStateId) : StepOrigin {
         init {
-            require(listOf(importId, sourceStateId, sourceAssetId).all { id ->
+            require(listOf(importId, sourceStateId, sourceAssetId, localStepId).all { id ->
                 runCatching { java.util.UUID.fromString(id).toString() == id }.getOrDefault(false)
             } && sha256.matches(Regex("[0-9a-f]{64}")) && declaredKind in setOf("recorded", "authored", "imported")) {
                 "包画面来源记录无效。"
@@ -86,7 +88,7 @@ data class ProjectStep(
 ) {
     init {
         require(evidenceKind in setOf("recorded", "authored", "imported")) { "步骤证据种类无效。" }
-        if (origin is StepOrigin.PackageSafeImage) require(evidenceKind == "imported" && origin.sourceStateId == id && origin.sha256 == asset.sha256) { "包画面必须保留导入依据。" }
+        if (origin is StepOrigin.PackageSafeImage) require(evidenceKind == "imported" && origin.localStepId == id && origin.sha256 == asset.sha256) { "包画面必须保留导入依据。" }
         if (origin is StepOrigin.ImportedImage) require(evidenceKind == "authored" &&
             asset.width == origin.source.metadata.outputWidth && asset.height == origin.source.metadata.outputHeight)
         if (origin is StepOrigin.Image) require(origin.base.stepId == id &&
