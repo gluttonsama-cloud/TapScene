@@ -61,6 +61,20 @@ jobs:
             'ndk;28.2.13676358' 'cmake;3.22.1' 'emulator' 'system-images;android-35;default;x86_64' \
             </dev/null 2>&1 | tee "$RUNNER_TEMP/runtime-results/sdk-install.txt"
           python3 tools/runtime-checks/sdk-lock.py installed | tee "$RUNNER_TEMP/runtime-results/sdk-installed.txt"
+      - name: Install the emulator's shared-library dependency from Ubuntu
+        timeout-minutes: 3
+        run: |
+          # The minimal lane does not install ffmpeg or a desktop audio stack. Even -no-audio
+          # needs the official emulator's dynamically linked libpulse.so.0 to load.
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes libpulse0 \
+            2>&1 | tee "$RUNNER_TEMP/runtime-results/ubuntu-library-install.txt"
+          ldd "$ANDROID_HOME/emulator/qemu/linux-x86_64/qemu-system-x86_64" \
+            | tee "$RUNNER_TEMP/runtime-results/emulator-libraries.txt" || true
+          # The official launcher establishes its bundled-library search paths. Its real load
+          # result is authoritative; bare ldd is retained only as diagnostic context.
+          "$ANDROID_HOME/emulator/emulator" -version \
+            2>&1 | tee "$RUNNER_TEMP/runtime-results/emulator-version.txt"
       - name: Build only the x86_64 app, dedicated harness and synthetic target
         timeout-minutes: 15
         run: |
