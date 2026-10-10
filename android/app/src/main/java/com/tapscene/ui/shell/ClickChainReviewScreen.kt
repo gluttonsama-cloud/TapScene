@@ -260,6 +260,7 @@ private fun ClickChainFramePanel(editor: ClickChainFrameEditor, state: ClickChai
             FilterChip(reviewMode, { reviewMode = true }, label = { Text("查看输出") }, enabled = idle && hasOutput)
         }
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+            val availableHeight = maxHeight
             val landscape = maxWidth > maxHeight
             val canvas: @Composable (Modifier) -> Unit = { modifier ->
                 Box(modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
@@ -297,7 +298,7 @@ private fun ClickChainFramePanel(editor: ClickChainFrameEditor, state: ClickChai
                 controls(Modifier.weight(1f).fillMaxSize())
             } else Column(Modifier.fillMaxSize()) {
                 canvas(Modifier.weight(1f).fillMaxWidth())
-                controls(Modifier.fillMaxWidth().heightIn(max = (maxHeight * .43f).coerceAtLeast(130.dp)))
+                controls(Modifier.fillMaxWidth().heightIn(max = (availableHeight * .43f).coerceAtLeast(130.dp)))
             }
         }
         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -381,6 +382,7 @@ private fun ClickChainActionPanel(editor: ClickChainActionEditor, state: ClickCh
         Text("按编排位置预填，可调整范围", Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+            val availableHeight = maxHeight
             val canvas: @Composable (Modifier) -> Unit = { modifier ->
                 key(editor.actionId, bitmap) {
                     EditorCanvas(bitmap, listOf(hotspot), modifier.padding(horizontal = 16.dp, vertical = 8.dp)
@@ -418,7 +420,7 @@ private fun ClickChainActionPanel(editor: ClickChainActionEditor, state: ClickCh
                 details(Modifier.weight(1f).fillMaxSize())
             } else Column(Modifier.fillMaxSize()) {
                 canvas(Modifier.weight(1f).fillMaxWidth())
-                details(Modifier.fillMaxWidth().heightIn(max = (maxHeight * .48f).coerceAtLeast(140.dp)))
+                details(Modifier.fillMaxWidth().heightIn(max = (availableHeight * .48f).coerceAtLeast(140.dp)))
             }
         }
         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
