@@ -6,6 +6,8 @@ import android.system.OsConstants
 import com.tapscene.packageformat.AiPackageCodec
 import com.tapscene.packageformat.RenderPlan
 import com.tapscene.packageformat.ViewerPackageCodec
+import com.tapscene.sharing.OfflineShare
+import com.tapscene.sharing.OfflineShareStore
 import com.tapscene.packageformat.ViewerScene
 import java.io.File
 import java.io.FileOutputStream
@@ -263,12 +265,33 @@ class ReleaseStore(context: Context) {
 
     /** A verified ZIP is prepared privately; the UI still owns the explicit SAF save operation. */
     suspend fun exportRelease(releaseId: String): File = locked {
+        withViewerPackage(releaseId) { output ->
+            currentCoroutineContext().ensureActive()
+            val final = File(exports, "$releaseId.tapscene")
+            check(final.canonicalFile == final.absoluteFile) { "导出路径无效。" }
+            Files.move(output.toPath(), final.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            runCatching { syncDirectory(exports) }
+            final
+        }
+    }
+
+    /** Share only the explicitly selected local sealed release; never expose mutable SAF exports. */
+    suspend fun prepareOfflineShare(releaseId: String, contentDigest: String): OfflineShare = locked {
+        val stored = readReleaseDirectory(child(releases, releaseId))
+        check(stored.origin == "local" && stored.contentDigest == contentDigest) { "请选择当前已复核封存的本机版本。" }
+        withViewerPackage(releaseId) { output ->
+            OfflineShareStore(app).create(output, releaseId, contentDigest, cancelCheck())
+        }
+    }
+
+    /** The store lock spans fixed bytes, package round trip and the destination's atomic install. */
+    private suspend fun <T> withViewerPackage(releaseId: String, finish: suspend (File) -> T): T {
         val location = child(releases, releaseId)
         val stored = readReleaseDirectory(location)
         val payload = File(location, "package")
         val scene = readScene(payload)
         verifyPackage(scene, payload, decode = true)
-        stage { operation ->
+        return stage { operation ->
             val output = File(operation, "viewer.tapscene")
             ViewerPackageCodec.writePackage(scene, payload, output, cancelCheck(), videoValidator())
             val verify = directory(File(operation, "verified"), operation)
@@ -277,11 +300,7 @@ class ReleaseStore(context: Context) {
             verifyPackage(loaded.scene, verify, decode = true)
             syncFile(output)
             currentCoroutineContext().ensureActive()
-            val final = File(exports, "$releaseId.tapscene")
-            check(final.canonicalFile == final.absoluteFile) { "导出路径无效。" }
-            Files.move(output.toPath(), final.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-            runCatching { syncDirectory(exports) }
-            final
+            finish(output)
         }
     }
 

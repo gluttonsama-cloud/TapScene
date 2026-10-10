@@ -1,6 +1,7 @@
 package com.tapscene.ui.shell
 
 import android.graphics.Bitmap
+import com.tapscene.sharing.offlineShareChooser
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -187,6 +188,25 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
             catch (_: android.content.ActivityNotFoundException) {
                 exportPickerPending = false; releases.cancelExportPicker()
                 releases.message("系统没有可用的文件保存工具。")
+            }
+        }
+    }
+    LaunchedEffect(page) { if (page != "delivery") releases.leaveSharePage() }
+    val packageSharer = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        releases.finishShareChooser()
+    }
+    LaunchedEffect(releaseState.pendingShare, releaseState.busy, page, releaseState.lastSealedId) {
+        if (releaseState.pendingShare != null && !releaseState.busy) {
+            val share = releases.beginShareChooser(releaseState.lastSealedId.takeIf { page == "delivery" })
+            if (share != null) {
+                try {
+                    packageSharer.launch(offlineShareChooser(share))
+                    releases.shareChooserLaunched()
+                } catch (_: android.content.ActivityNotFoundException) {
+                    releases.finishShareChooser(failed = true)
+                } catch (_: SecurityException) {
+                    releases.finishShareChooser(failed = true)
+                }
             }
         }
     }
@@ -602,7 +622,9 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                             "delivery" -> {
                                 val sealed = releaseState.releases.firstOrNull { it.id == releaseState.lastSealedId }
                                 DeliveryOptionsScreen(pop, openReleaseReview, { if (sealed != null) releases.openAiPackage(sealed.id) else releases.clearAiConfiguration(); push("ai") }, { push("account") }, { push("versions") },
-                                    sealedSummary = sealed, onExport = sealed?.let { item -> { releases.prepareExport(item.id) } }, busy = releaseState.busy)
+                                    sealedSummary = sealed, onExport = sealed?.let { item -> { releases.prepareExport(item.id) } },
+                                    onShare = sealed?.takeIf { it.origin == "local" }?.let { item -> { releases.prepareOfflineShare(item.id) } },
+                                    busy = releaseState.busy || releaseState.shareChooserOpen || releaseState.pendingShare != null || releaseState.exportFile != null || exportPickerPending)
                             }
                             "ai-import" -> AiDraftImportContent(aiImportState,
                                 onBack = { if (!aiImportState.busy) { aiPickerRequested = false; pop(); projects.reload() } },

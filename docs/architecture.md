@@ -621,6 +621,14 @@ Android 静态包固定 `schemaVersion=1`、`policyVersion=static-viewer-1`、`c
 | AI 回流 → 草稿 | 兼容白名单字段生成新项目、新 revision；展示文字、连线、路径、区域差异；所有外部复核结论重新由本机复核 |
 | UI / 日志 | 文案按纯文本显示；日志仅记排障所需代码和 traceId，排除画面、OCR、路径、凭据和含 token 的链接 |
 
+### 离线观看包系统分享
+
+当前明确选中的本机封存版本，在成品锁内重新检查来源与摘要、生成并回读验证完整包，再复制至独立随机目录并核对长度与 SHA-256，原子安装为不再改写的缓存快照。SAF 保存仍使用原导出流程；AI 包不接入分享。
+
+[AndroidX FileProvider](https://developer.android.com/reference/androidx/core/content/FileProvider) 仅映射该专用缓存目录，provider 不导出，所有读取只接受精确 token 文件 URI；拒绝路径变体、元数据、写入及删除。通过 [系统选择器](https://developer.android.com/training/sharing/send) 的 ACTION_SEND / ClipData 授予临时只读权限，无永久或前缀授权；匿名类型查询不透露文件是否存在。
+
+每次打开重新校验长度、摘要与 24 小时有效期，打开和清理共用锁。最多保留 8 份、200 MiB；仅在准备下一次分享时清理过期项及可识别的未发布残片，满额不挤掉未过期副本。损坏元数据失败关闭。chooser 返回不清文件、不确认发送；已打开的 Linux 文件描述符在清理后仍可读，接收者复制的数据不能撤回。缓存被系统回收或进程重启后不自动重新分享。
+
 ### 上传与发布事务
 
 1. 创建 upload 时锁 hosted_projects，计算“未撤销且未到期的 shares + 未到期未完成预留”，同项目最多 5 个。每次上传占一个有截止时间的槽位；服务器时间到期立即失效。

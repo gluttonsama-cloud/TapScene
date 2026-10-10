@@ -289,6 +289,7 @@ fun DeliveryOptionsScreen(
     onVersions: () -> Unit,
     sealedSummary: ReleaseSummary? = null,
     onExport: (() -> Unit)? = null,
+    onShare: (() -> Unit)? = null,
     busy: Boolean = false,
 ) {
     ServicePage("交付方式", onBack) {
@@ -301,12 +302,12 @@ fun DeliveryOptionsScreen(
                 ShellLabelValue("包内文件", "${sealedSummary.stepCount} 个步骤 · ${formatShellBytes(sealedSummary.byteLength)}")
             } else ShellLabelValue("封存时间 / 体积", "等待完成复核")
         }
-        DetailSection("离线观看包", "保存为文件，交给另一台设备离线观看。") {
+        DetailSection("离线观看包", "接收方用 TapScene 导入。") {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(shape = RoundedCornerShape(8.dp), onClick = { onExport?.invoke() }, enabled = sealedSummary != null && onExport != null && !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text(if (busy) "正在准备" else "保存到文件") }
-                OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = {}, enabled = false, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("系统分享") }
+                OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = { onShare?.invoke() }, enabled = sealedSummary?.origin == "local" && onShare != null && !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("系统分享") }
             }
-            Text("接收设备安装 TapScene 后导入。已保存或发出的副本无法远程收回。系统分享尚未接入。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+            Text("临时分享入口 24 小时有效，已发送副本无法收回。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
         }
         DetailSection("托管链接", "主动上传封存后的安全内容，由持链者观看。") {
             ShellLabelValue("有效期选项", "1 天 / 7 天 / 30 天")
