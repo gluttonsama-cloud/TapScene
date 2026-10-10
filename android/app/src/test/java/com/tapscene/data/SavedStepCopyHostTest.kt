@@ -88,7 +88,11 @@ class SavedStepCopyHostTest {
             check(f.store.clearEditorDraft(f.project, sourceId, session))
             val draftRows = f.rows("editor_drafts")
             val originalFiles = f.assets()
+            // Exclude import/seal/setup calls. The copier uses real FileDescriptor.sync()
+            // for PNG bytes, while this shadow observes its Os directory fsync calls.
+            HostFileSyncShadow.beginProductionEvidence()
             val after = f.store.copySavedStep(f.project, sourceId, before.project.revision, operation)
+            HostFileSyncShadow.assertDirectorySyncEvidence()
             val copy = after.steps.single { it.id == operation }
             check(after.project.revision == before.project.revision + 1)
             check(after.project.startStepId == before.project.startStepId)
@@ -134,7 +138,6 @@ class SavedStepCopyHostTest {
             check(f.store.copySavedStep(f.project, sourceId, before.project.revision, operation) == after)
             check(AiDraftImportFixtures.projectStore(f.context).readProject(f.project) == after)
             f.clean()
-            HostFileSyncShadow.assertProductionEvidence()
             println("HOST_SAVED_STEP_COPY graph: independent PNG/IDs, adjacent ordering, unchanged incoming/start/actions/releases/drafts/AI, self-loop rebound, regions unreviewed")
         } }
     }
@@ -222,7 +225,7 @@ class SavedStepCopyHostTest {
             file.writeBytes(bytes)
             f.database { execSQL("UPDATE local_assets SET width=width+1 WHERE asset_id=?", arrayOf(asset.id)) }
             rejectUnchanged() // Metadata cannot override the actual decoded dimensions.
-            f.database { execSQL("UPDATE local_assets SET width=? WHERE asset_id=?", arrayOf(asset.width, asset.id)) }
+            f.database { execSQL("UPDATE local_assets SET width=? WHERE asset_id=?", arrayOf<Any>(asset.width, asset.id)) }
             val transparent = Bitmap.createBitmap(asset.width, asset.height, Bitmap.Config.ARGB_8888)
             try { file.outputStream().use { check(transparent.compress(Bitmap.CompressFormat.PNG, 100, it)) } }
             finally { transparent.recycle() }
@@ -444,11 +447,11 @@ class SavedStepCopyHostTest {
             database {
                 beginTransaction()
                 try {
-                    execSQL("INSERT INTO local_assets VALUES(?,?,?,?,?,?,?)", arrayOf(asset, project, path, template.sha256, template.byteLength, template.width, template.height))
+                    execSQL("INSERT INTO local_assets VALUES(?,?,?,?,?,?,?)", arrayOf<Any>(asset, project, path, template.sha256, template.byteLength, template.width, template.height))
                     execSQL("""INSERT INTO states(project_id,state_id,capture_id,sort_order,title,description,is_terminal,input_asset_id,
                         masks_json,origin_kind,evidence_kind,base_asset_id,base_sha256,base_revision,base_width,base_height)
                         VALUES(?,?,?,?,?,'Capacity fixture',0,?,'[]','image','authored',?,?,?,?,?)""",
-                        arrayOf(project, step, id(), current.steps.size, title, asset, asset, template.sha256,
+                        arrayOf<Any>(project, step, id(), current.steps.size, title, asset, asset, template.sha256,
                             current.project.revision, template.width, template.height))
                     setTransactionSuccessful()
                 } finally { endTransaction() }
@@ -457,7 +460,7 @@ class SavedStepCopyHostTest {
         }
         fun insertRegion(db: SQLiteDatabase, step: ProjectStep) {
             db.execSQL("""INSERT INTO regions VALUES(?,?,?,?,?,'Capacity region',NULL,1,2,3,4,?,?,0,.5,.5,NULL,NULL)""",
-                arrayOf(project, id(), step.id, step.asset.id, step.asset.sha256, step.asset.width, step.asset.height))
+                arrayOf<Any>(project, id(), step.id, step.asset.id, step.asset.sha256, step.asset.width, step.asset.height))
         }
         fun insertHotspot(db: SQLiteDatabase, step: String) {
             val hotspot = id()

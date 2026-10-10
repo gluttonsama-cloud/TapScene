@@ -1,5 +1,6 @@
 package com.tapscene.ui
 
+import android.database.sqlite.SQLiteException
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Looper
@@ -135,17 +136,26 @@ class CopyWorkspaceHostTest {
                     // An isolated, reversible schema fault makes the production refresh really
                     // fail after commit. No production test hook or fake returned snapshot.
                     command(workspace) { leaveEditor() }
-                    var titleHidden = false
+                    var sortColumnHidden = false
                     try {
                         cancelAfterCommit(workspace, { copySavedStep(a) }, afterCommit = {
-                            fixture.database { execSQL("ALTER TABLE projects RENAME COLUMN title TO copy_test_title") }
-                            titleHidden = true
+                            // Rename a column referenced explicitly by the production ORDER BY.
+                            // SELECT p.* alone can retain cached column metadata after a rename.
+                            fixture.database { execSQL("ALTER TABLE projects RENAME COLUMN updated_at TO copy_test_updated_at") }
+                            sortColumnHidden = true
+                            val failure = runCatching { fixture.store.listProjects() }.exceptionOrNull()
+                            check(failure is SQLiteException && failure.message.orEmpty().contains("updated_at")) {
+                                "Read-failure injection did not reach production SQL: $failure"
+                            }
                         }) { fixture.store.readProject(p)?.steps?.size == copied.steps.size + 1 }
-                        check(workspace.state.value.loadFailed)
-                        check(workspace.state.value.message.orEmpty().contains("无法确认复制结果"))
+                        val unreadable = workspace.state.value
+                        check(unreadable.loadFailed) { "Commit reread unexpectedly succeeded: ${unreadable.message}" }
+                        check(unreadable.message.orEmpty().contains("无法确认复制结果")) {
+                            "Unknown commit did not retain its recovery guidance: ${unreadable.message}"
+                        }
                         check((field(workspace, "pendingStepCopies") as Map<*, *>).size == 1)
                     } finally {
-                        if (titleHidden) fixture.database { execSQL("ALTER TABLE projects RENAME COLUMN copy_test_title TO title") }
+                        if (sortColumnHidden) fixture.database { execSQL("ALTER TABLE projects RENAME COLUMN copy_test_updated_at TO updated_at") }
                     }
                     val uncertain = fixture.snapshot()
                     check(uncertain.steps.size == copied.steps.size + 1)
@@ -172,7 +182,7 @@ class CopyWorkspaceHostTest {
             check(file.parentFile!!.isDirectory || file.parentFile!!.mkdirs())
             file.writeBytes(bytes)
             fixture.database { execSQL("UPDATE local_assets SET sha256=?,byte_length=? WHERE project_id=? AND asset_id=?",
-                arrayOf(sha, bytes.size, fixture.project, step.asset.id)) }
+                arrayOf<Any>(sha, bytes.size, fixture.project, step.asset.id)) }
         }
     }
 
