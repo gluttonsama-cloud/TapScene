@@ -28,7 +28,8 @@ private fun EditorNavigationSurface() {
     val image = remember { ShellPreviewFixture.bitmap(1) }
     TapSceneTheme {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            EditorWorkspaceContent(ShellPreviewFixture.project, ShellPreviewFixture.draft, image, false,
+            EditorWorkspaceContent(ShellPreviewFixture.project, ShellPreviewFixture.draft.copy(
+                title = "核对填写信息", dirty = true, recoveryStatus = DraftRecoveryStatus.STAGED), image, false,
                 EditorCallbacks({}, {}, {}, {}, {}, {}, {}, {}, {}, {}),
                 previewEnabled = false, regionsEnabled = false, dirtyStepCount = 2, canUndoEdit = true)
         }
