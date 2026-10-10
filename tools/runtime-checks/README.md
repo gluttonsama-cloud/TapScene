@@ -42,6 +42,8 @@
 
 [第六次精确 CI](https://github.com/gluttonsama-cloud/TapScene/actions/runs/38067672180) 再次通过探针，正常 Wait 已成功，设置页也已恢复；日志显示仅绘制 Settings 就耗时 17.939 秒，服务子页又需 6.873 秒；从启动设置到子页显示已约 36 秒，超出原来合并冷启动/恢复/授权的 30 秒准备预算。该测试环境准备改为单次最多 120 秒，记录打开设置、实际窗口包、选服务、开关及确认动作的时间；实际服务连接仍是唯一通过依据。此阶段尚未臂定生产点击，不改产品 15 秒/停止时限，仍共用原总预算；动作拒绝、再次同类 ANR 或准备超时都不会当成连接成功。
 
+[第七次精确 CI](https://github.com/gluttonsama-cloud/TapScene/actions/runs/38069578962) 再次遇到启动 ANR，尚未执行新的设置窗口。采样现在位于 `DexFileVerifier`，CPU pressure 约 86%，不能把非压缩 DEX 当作已解决环境瓶颈。日志也记录旧 `android.test.runner/mock/base` 三库的重复类加载上下文失配：[AGP 8.13.2 官方源码包](https://dl.google.com/dl/android/maven2/com/android/tools/build/builder/8.13.2/builder-8.13.2-sources.jar)的测试 manifest 模板会自动注入 runner，而[这组库只服务已弃用 JUnit3 类](https://developer.android.com/training/testing/instrumented-tests/androidx-test-libraries/test-setup)。专用入口继承 `android.app.Instrumentation`，不引用这些类，因此仅 opt-in test manifest 移除未用声明，并用 `aapt2` 检查已打包 test APK，默认测试/手机 manifest 保持原样。不会关闭 ART 验证、重写业务或放宽系统阈值；若仍被环境启动 ANR/授权界面阻挡且没有新代码故障，则保留失败证据，不靠反复重跑凑通过。
+
 [首次精确 CI](https://github.com/gluttonsama-cloud/TapScene/actions/runs/38060445119) 已完成三个 APK 构建，但在模拟器加载阶段发现 `libpulse.so.0` 缺失，未启动 AVD。独立 lane 因此只从 [Ubuntu 官方仓库](https://packages.ubuntu.com/noble/libpulse0)安装 `libpulse0` 及其必要依赖，保存 `ldd` 诊断并用官方启动器的 `-version` 实际加载结果把关；裸 `ldd` 不代表启动器设置的内置库路径。`-no-audio` 不能免除 ELF 加载依赖。没有安装音频服务、全套桌面或新的模拟器版本。
 
 无论通过、断言失败还是进程崩溃，保留 7 天的 `android-runtime-smoke` artifact：准确提交/tree、SDK/构建日志、emulator 全日志、运行期全 buffer logcat、crash buffer、app exit-info、服务状态，以及由 `run-as` 只读取本次合成测试目录的 `app-evidence.tar`。它包含真实视频和测试断言，未包含 SDK/AVD 用户盘或 ADB 私钥。

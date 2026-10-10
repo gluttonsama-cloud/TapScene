@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application>
+        <!-- The platform Instrumentation harness uses no deprecated android.test/JUnit3 classes.
+             AGP's generated test manifest otherwise injects this legacy shared-library chain. -->
+        <uses-library android:name="android.test.runner" tools:node="remove" />
+    </application>
+</manifest>

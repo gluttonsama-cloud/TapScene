@@ -75,6 +75,7 @@ android {
     if (runtimeSmoke) {
         // A deliberately separate device lane: never run or package the broad media fixture suite.
         sourceSets.getByName("androidTest").java.setSrcDirs(listOf("src/androidTest/java/com/tapscene/runtime"))
+        sourceSets.getByName("androidTest").manifest.srcFile("src/runtimeSmoke/AndroidManifest.xml")
         // TCG startup ANR sampled ART inflating DEX before the runner could start (run 38064296590).
         // Change ZIP storage only for this opt-in lane; keep phone packaging and all code unchanged.
         packaging.dex.useLegacyPackaging = false
