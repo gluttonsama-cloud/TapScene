@@ -102,4 +102,4 @@ gradle -p android --no-daemon --max-workers=2 -PcompatibilityPreview=true \
 
 输出为同一次 Android 运行的 `incoming.tapscene-ai`、`round-trip.tapscene-ai` 和预期 scene/plan。TS 步骤只消费真实输出，不另造可替代包。Robolectric 的 stock Linux shadow 不支持本流程的目录 open/fstat；仅此测试的四个 Os 调用通过限域 test-only 桥接使用真实 Linux/JDK FileChannel、文件描述符、`/proc/self/fd` 类型信息和 `FileDescriptor.sync()`，失败传播并核对关闭释放。目录与普通文件的实际同步有执行记录，但不称 Android 原生 fsync 或设备断电验证；新增模块开口只作用测试 JVM，无新增依赖。
 
-主机真实 PNG/SQLite 执行与合成自动复核不代表真人隐私判断、真机触控/界面、MediaProjection、Surface、视频硬解码或断电恢复通过；不需要 KVM，也不启动软件模拟器。纯测试增量不改变 APK 版本19。
+主机真实 PNG/SQLite 执行与合成自动复核不代表真人隐私判断、真机触控/界面、MediaProjection、Surface、视频硬解码或断电恢复通过；不需要 KVM，也不启动软件模拟器。该成功闭环检查首次交付为纯测试增量，未改变 APK 版本19。后续临时数据库生命周期修复递增版本20：增加 API26 实际数据库句柄关闭断言，并在同一 PNG 闭环中执行真实候选替换及过期修订拒绝；原检查继续保留。

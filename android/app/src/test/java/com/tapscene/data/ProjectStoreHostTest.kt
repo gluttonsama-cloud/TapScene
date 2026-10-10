@@ -81,6 +81,41 @@ class ProjectStoreHostTest {
         }
     }
 
+    @Test fun temporaryStoreClosesOnlyItsOwnConnection() {
+        HostProjectFixture().use { fixture ->
+            fun opened(store: ProjectStore): SQLiteDatabase =
+                (ProjectStore::class.java.getDeclaredField("helper").apply { isAccessible = true }.get(store) as SQLiteOpenHelper).writableDatabase
+            val owner = fixture.store
+            val ownerDatabase = opened(owner)
+            val before = fixture.snapshot()
+            repeat(3) {
+                lateinit var temporaryDatabase: SQLiteDatabase
+                val result = ProjectStore.withTemporary(fixture.app) { temporary ->
+                    check(temporary.readProject(fixture.project) == before)
+                    temporaryDatabase = opened(temporary)
+                    check(temporaryDatabase.isOpen && temporaryDatabase !== ownerDatabase)
+                    before.project.id
+                }
+                check(result == fixture.project && !temporaryDatabase.isOpen)
+                check(ownerDatabase.isOpen && opened(owner) === ownerDatabase)
+            }
+            lateinit var failedDatabase: SQLiteDatabase
+            val original = IllegalStateException("Synthetic temporary operation failure")
+            val failure = runCatching {
+                ProjectStore.withTemporary(fixture.app) { temporary ->
+                    check(temporary.readProject(fixture.project) == before)
+                    failedDatabase = opened(temporary)
+                    throw original
+                }
+            }.exceptionOrNull()
+            check(failure === original && original.suppressed.isEmpty())
+            check(!failedDatabase.isOpen && ownerDatabase.isOpen && opened(owner) === ownerDatabase)
+            val saved = owner.renameProject(fixture.project, "Long-lived owner still writes")
+            check(owner.readProject(fixture.project) == saved && ownerDatabase.isOpen)
+            println("HOST_TEMP_STORE api=${Build.VERSION.SDK_INT} repeated-success=closed exceptional-exit=closed primary-error=preserved other-owner=read/write/open")
+        }
+    }
+
     @Test fun saveIsAtomicAndPreservesTheOtherStep() {
         HostProjectFixture().use { fixture ->
             val store = fixture.store

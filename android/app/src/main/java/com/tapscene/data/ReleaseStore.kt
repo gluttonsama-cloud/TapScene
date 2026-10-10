@@ -51,7 +51,9 @@ class ReleaseStore(context: Context) {
             val assets = directory(File(payload, "assets"), payload)
             // ProjectStore holds its deletion/edit lock through snapshot AND copy.
             var draftPlan: DraftAiConfig? = null
-            val snapshot = ProjectStore(app).copyReleaseInputs(projectId, expectedRevision, assets) { draftPlan = it }
+            val snapshot = ProjectStore.withTemporary(app) { projects ->
+                projects.copyReleaseInputs(projectId, expectedRevision, assets) { draftPlan = it }
+            }
             currentCoroutineContext().ensureActive()
             val id = newId()
             val scene = ReleaseCompiler.scene(snapshot, id,
