@@ -24,8 +24,8 @@ android {
         applicationId = "com.tapscene"
         minSdk = 26
         targetSdk = 36
-        versionCode = 25
-        versionName = "0.20.0-local-hosting-dev"
+        versionCode = 26
+        versionName = "0.21.0-text-regions-dev"
         testInstrumentationRunner = "com.tapscene.media.MediaCompatibilityInstrumentation"
         manifestPlaceholders["appLabel"] = "TapScene"
         buildConfigField("boolean", "HOSTED_ENABLED", "false")

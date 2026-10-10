@@ -6,6 +6,16 @@ import android.graphics.BitmapFactory
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.tapscene.data.EditorDraftFields
+import com.tapscene.data.EditorFormKind
+import com.tapscene.data.SafeImageBinding
+import com.tapscene.data.TextRegionSourceBinding
+import com.tapscene.ocr.OfflineOcrEngine
+import com.tapscene.ocr.OcrCancellation
+import com.tapscene.ocr.OcrException
+import com.tapscene.ocr.OcrError
+import com.tapscene.ocr.OcrResult
+import com.tapscene.ocr.TextRegionBounds
+import com.tapscene.ocr.TextRegionPolicy
 import com.tapscene.data.EditorPendingForm
 import com.tapscene.data.StoredEditorDraft
 import com.tapscene.data.editorFields
@@ -103,6 +113,7 @@ data class ProjectUiState(
     val editorExitIssue: String? = null,
     val canUndoEdit: Boolean = false,
     val projectCopyNotice: ProjectCopyNotice? = null,
+    val textRegions: TextRegionSuggestions = TextRegionSuggestions(),
     /** Also changes for unsaved text/geometry, invalidating an older preview immediately. */
     val editRevision: Long = 0,
 ) {
@@ -114,12 +125,18 @@ data class ProjectUiState(
  * dirty draft. A failed or cancelled save rereads the commit point while retaining unsaved edits.
  * Published Bitmaps are not recycled here: Compose may still be drawing the previous state.
  */
-class ProjectWorkspace(application: Application) : AndroidViewModel(application) {
+class ProjectWorkspace internal constructor(application: Application,
+    private val recognizeTextRegionPixels: suspend (Bitmap, OcrCancellation) -> OcrResult,
+) : AndroidViewModel(application) {
+    constructor(application: Application) : this(application, OfflineOcrEngine(application)::recognize)
     private val store = ProjectStore(application)
     private val mutableState = MutableStateFlow(ProjectUiState())
     val state = mutableState.asStateFlow()
     private val operationLock = Mutex()
     private var task: Job? = null
+    private var textRegionTask: Job? = null
+    private var textRegionCancellation: OcrCancellation? = null
+    private var textRegionGeneration = 0L
     private var previewSnapshot: ProjectSnapshot? = null
     private var previewEditRevision = -1L
     private var previewTask: Job? = null
@@ -331,6 +348,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     /** The hosting screen must first successfully activate the same project's media workbench. */
     fun openMedia() {
         if (state.value.busy || state.value.project == null || state.value.loadFailed) return
+        cancelTextRegions()
         clearEditorUndo()
         invalidatePreview()
         mutableState.update { it.copy(route = ProjectRoute.MEDIA, bitmap = null) }
@@ -338,6 +356,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
 
     fun back() {
         if (state.value.busy) return
+        cancelTextRegions()
         clearEditorUndo()
         when (state.value.route) {
             ProjectRoute.PREVIEW -> exitPreview()
@@ -352,6 +371,113 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
             }
             ProjectRoute.PROJECTS -> Unit
         }
+    }
+
+    /** Explicit author request: read only this exact current PNG, never the thumbnail or raw source. */
+    fun recognizeTextRegions() {
+        val current = state.value
+        if (!canUseTextRegions(current)) return
+        val project = requireNotNull(current.project)
+        val step = requireNotNull(current.selectedStep)
+        cancelTextRegions()
+        val binding = step.safeImageBinding(project.project)
+        if (binding.width > OfflineOcrEngine.MAX_EDGE || binding.height > OfflineOcrEngine.MAX_EDGE ||
+            binding.width.toLong() * binding.height > OfflineOcrEngine.MAX_PIXELS) {
+            mutableState.update { it.copy(textRegions = TextRegionSuggestions(message = textRegionError(OcrError.INPUT_TOO_LARGE))) }
+            return
+        }
+        val generation = textRegionGeneration
+        val cancellation = OcrCancellation()
+        textRegionCancellation = cancellation
+        mutableState.update { it.copy(textRegions = TextRegionSuggestions(binding = binding, working = true)) }
+        textRegionTask = viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    val bitmap = store.readSafeImageBase(binding)
+                    try { recognizeTextRegionPixels(bitmap, cancellation) }
+                    finally { bitmap.recycle() }
+                }
+                val fresh = withContext(Dispatchers.IO) { store.readProject(binding.projectId) }
+                if (!textRegionRequestCurrent(generation, binding)) return@launch
+                if (fresh == null || fresh.steps.none { binding.matches(fresh.project, it) }) {
+                    cancelTextRegions()
+                    mutableState.update { it.copy(textRegions = TextRegionSuggestions(message = "画面已更新，请重新识别。")) }
+                    return@launch
+                }
+                val currentDraft = requireNotNull(state.value.stepDraft)
+                val occupied = currentDraft.hotspots.map { spot -> TextRegionBounds(
+                    (spot.rect.left * binding.width).toInt(), (spot.rect.top * binding.height).toInt(),
+                    kotlin.math.ceil(spot.rect.right * binding.width.toDouble()).toInt(),
+                    kotlin.math.ceil(spot.rect.bottom * binding.height.toDouble()).toInt()) }
+                val candidates = TextRegionPolicy.suggestions(result, occupied)
+                mutableState.update { it.copy(textRegions = TextRegionSuggestions(binding, candidates,
+                    message = if (candidates.isEmpty()) "没有合适的文字区域，请手动画热点。" else null)) }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) {
+                if (textRegionRequestCurrent(generation, binding)) mutableState.update { it.copy(
+                    textRegions = TextRegionSuggestions(message = if (failure is OcrException) textRegionError(failure.code)
+                    else "当前安全画面无法识别，请重新打开此步或手动画热点。")) }
+            } finally {
+                if (generation == textRegionGeneration) {
+                    textRegionTask = null; textRegionCancellation = null
+                }
+            }
+        }
+    }
+
+    /** Cancelling invalidates both late native results and a pending selection's read. */
+    fun cancelTextRegions() {
+        textRegionGeneration++
+        textRegionCancellation?.cancel(); textRegionCancellation = null
+        textRegionTask?.cancel(); textRegionTask = null
+        mutableState.update { it.copy(textRegions = TextRegionSuggestions()) }
+    }
+
+    fun selectTextRegion(index: Int) {
+        val current = state.value
+        if (!canUseTextRegions(current) || current.textRegions.working) return
+        val binding = current.textRegions.binding ?: return
+        val suggestion = current.textRegions.candidates.getOrNull(index) ?: return
+        val generation = textRegionGeneration
+        if (!textRegionRequestCurrent(generation, binding)) return
+        mutableState.update { it.copy(textRegions = it.textRegions.copy(working = true)) }
+        textRegionTask = viewModelScope.launch {
+            try {
+                // The re-read validates actual bytes and ownership again at the selection boundary.
+                withContext(Dispatchers.IO) { store.readSafeImageBase(binding).recycle() }
+                if (!textRegionRequestCurrent(generation, binding)) return@launch
+                val bounds = suggestion.bounds
+                fun percent(value: Int, size: Int) = (value.toFloat() / size * 100f).toString().removeSuffix(".0")
+                val form = EditorPendingForm(EditorFormKind.HOTSPOT,
+                    objectId = UUID.randomUUID().toString(), edgeId = UUID.randomUUID().toString(),
+                    label = suggestion.text, left = percent(bounds.left, binding.width), top = percent(bounds.top, binding.height),
+                    right = percent(bounds.right, binding.width), bottom = percent(bounds.bottom, binding.height),
+                    targetStepId = null, endsDemo = false,
+                    textRegionSource = TextRegionSourceBinding(binding.projectId, binding.stepId, binding.assetId,
+                        binding.sha256, binding.width, binding.height))
+                // Clear the OCR payload before persisting only the chosen author form.
+                textRegionTask = null
+                cancelTextRegions()
+                editPendingForm(binding.projectId, binding.stepId, form)
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) {
+                if (generation == textRegionGeneration) {
+                    textRegionTask = null; cancelTextRegions()
+                    mutableState.update { it.copy(textRegions = TextRegionSuggestions(message = "画面已更新或无法读取，请重新识别。")) }
+                }
+            }
+        }
+    }
+
+    private fun canUseTextRegions(current: ProjectUiState): Boolean = !current.busy && !current.loadFailed &&
+        current.route == ProjectRoute.EDIT && current.selectedStep != null && current.stepDraft?.let {
+            it.stepId == current.selectedStepId && it.pendingForm == null && it.conflicts.isEmpty() && !it.isTerminal && it.hotspots.size < ProjectLimits.MAX_HOTSPOTS_PER_STEP
+        } == true
+
+    private fun textRegionRequestCurrent(generation: Long, binding: SafeImageBinding): Boolean {
+        val current = state.value
+        return generation == textRegionGeneration && canUseTextRegions(current) &&
+            current.project?.let { project -> current.selectedStep?.let { binding.matches(project.project, it) } } == true
     }
 
     fun editTitle(value: String) = editDraft(textGroup = "title") { it.copy(title = value) }
@@ -411,6 +537,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         val record = drafts[key] ?: return
         val changed = change(old)
         if (changed == old) return
+        if (changed.hotspots != old.hotspots || changed.isTerminal != old.isTerminal || changed.pendingForm != old.pendingForm) cancelTextRegions()
         if (recordUndo) {
             val previous = editorUndo
             if (previous == null || textGroup == null || previous.textGroup != textGroup || previous.projectId != project.project.id ||
@@ -483,7 +610,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
             message("此步骤有新的已保存内容，请先处理冲突。你的修改仍保留")
             return
         }
-        val submitted = try { if (includePending) draft.withSubmittedForm(project.steps) else draft }
+        val submitted = try { if (includePending) draft.withSubmittedForm(project) else draft }
         catch (failure: IllegalArgumentException) { message(failure.message ?: "请检查面板输入"); return }
         invalidateStaging(key)
         savingDrafts[key] = submitted
@@ -497,9 +624,13 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
                 withContext(NonCancellable) {
                     val session = sessionFor(project.project.id)
                     val saved = withContext(Dispatchers.IO) {
+                        check(store.writeEditorDraft(project.project.id, draft.stepId, session, record.toStoredDraft())) {
+                            "编辑会话已改变，当前输入仍保留，请重新载入。"
+                        }
                         store.saveStepDraft(project.project.id, draft.stepId, submitted.title, submitted.description,
                             submitted.isTerminal, submitted.hotspots, expectedRevision = record.baseRevision,
-                            nextAction = submitted.nextAction, editorDraftSession = session)
+                            nextAction = submitted.nextAction, editorDraftSession = session,
+                            textRegionSource = draft.pendingForm?.textRegionSource)
                     }
                     clearEditorUndo()
                     saved.steps.firstOrNull { it.id == draft.stepId }?.let { step ->
@@ -592,6 +723,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     fun dismissEditorExitIssue() { mutableState.update { it.copy(editorExitIssue = null) } }
 
     private fun leaveEditorRoute() {
+        cancelTextRegions()
         clearEditorUndo()
         invalidatePreview()
         mutableState.update { it.copy(route = ProjectRoute.STEPS, bitmap = null, editorExitIssue = null) }
@@ -604,6 +736,7 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         if (old == form) return
         val samePanel = old != null && form != null && old.kind == form.kind &&
             old.objectId == form.objectId && old.edgeId == form.edgeId
+        if (!samePanel) cancelTextRegions()
         if (!samePanel) clearEditorUndo() // Opening is not an edit; cancellation never reopens old input.
         editDraft(textGroup = if (samePanel) pendingTextGroup(old!!, form!!) else null, recordUndo = samePanel) {
             it.copy(pendingForm = form)
@@ -1179,12 +1312,18 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
             editRevision = it.editRevision + if (edited) 1 else 0) }
     }
 
+    override fun onCleared() {
+        cancelTextRegions()
+        super.onCleared()
+    }
+
     fun clearMessage() { mutableState.update { it.copy(message = null) } }
     fun message(value: String) { mutableState.update { it.copy(message = value) } }
     fun cancel() { task?.cancel() }
 
     private fun execute(label: String, editing: Boolean = false, afterRefresh: (suspend () -> Unit)? = null, block: suspend () -> Unit) {
         if (state.value.busy || (editing && state.value.loadFailed)) return
+        cancelTextRegions()
         mutableState.update { it.copy(busy = true, stage = label, message = null) }
         task = viewModelScope.launch {
             var locked = false
@@ -1199,6 +1338,8 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
             } catch (failure: Exception) {
                 message(when (failure) {
                     is IllegalArgumentException -> failure.message ?: "$label 未完成，请检查输入后重试"
+                    is IllegalStateException -> if (failure.message == TextRegionSourceBinding.IMAGE_CHANGED) TextRegionSourceBinding.IMAGE_CHANGED
+                        else "$label 未完成，请检查本机存储后重试。未保存的修改仍保留"
                     else -> "$label 未完成，请检查本机存储后重试。未保存的修改仍保留"
                 })
             } finally {
@@ -1242,6 +1383,9 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     private fun applyProject(project: ProjectSnapshot) {
+        state.value.textRegions.binding?.let { binding ->
+            if (project.steps.none { binding.matches(project.project, it) }) cancelTextRegions()
+        }
         editorUndo?.let { if (it.projectId != project.project.id || it.revision != project.project.revision ||
             project.steps.none { step -> step.id == it.stepId }) clearEditorUndo() }
         val current = state.value
@@ -1256,7 +1400,8 @@ class ProjectWorkspace(application: Application) : AndroidViewModel(application)
         mutableState.update { old -> old.copy(project = project, selectedStepId = selectedId,
             route = if (old.route == ProjectRoute.EDIT && selectedId == null) ProjectRoute.STEPS else old.route,
             stepDraft = selectedDraft, issues = graphIssues(project), dirtyStepIds = dirtyIds(project.project.id),
-            bitmap = if (current.project?.project?.id != project.project.id || current.selectedStepId != selectedId) null else old.bitmap) }
+            bitmap = if (current.project?.project?.id != project.project.id || current.selectedStepId != selectedId ||
+                current.selectedStep?.asset != selectedId?.let { stepsById[it]?.asset }) null else old.bitmap) }
     }
 
     private fun dirtyIds(projectId: String): Set<String> =

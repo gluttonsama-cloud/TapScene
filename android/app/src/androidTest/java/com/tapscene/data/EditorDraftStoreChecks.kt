@@ -169,7 +169,7 @@ object EditorDraftStoreChecks {
             val raw = stripped.copy(pendingForm = EditorPendingForm(kind, title = "", label = "  ", left = "NaN", top = "-", right = "1e", bottom = ""))
             check(EditorDraftCodec.decode(EditorDraftCodec.encode(raw)) == raw)
         }
-        rejected { EditorDraftCodec.decode(JSONObject(encoded).put("version", 2).toString()) }
+        rejected { EditorDraftCodec.decode(JSONObject(encoded).put("version", 3).toString()) }
         rejected { EditorDraftCodec.decode(JSONObject(encoded).put("baseRevision", "1").toString()) }
         rejected { EditorDraftCodec.decode(JSONObject(encoded).put("source", source.privateRelativePath).toString()) }
         rejected { EditorDraftCodec.decode(JSONObject(encoded).apply { getJSONObject("edit").put("transition", JSONObject()) }.toString()) }

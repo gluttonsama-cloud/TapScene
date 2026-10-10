@@ -664,7 +664,9 @@ class ProjectStore(context: Context) {
             buildMap {
                 while (cursor.moveToNext()) {
                     val stepId = cursor.getString(0)
-                    val draft = try { EditorDraftCodec.decode(cursor.getString(1)) }
+                    val draft = try { EditorDraftCodec.decode(cursor.getString(1)).also {
+                        requireEditorDraftOwner(projectId, stepId, it)
+                    } }
                     catch (failure: Exception) { throw IllegalStateException("无法读取步骤编辑暂存；原记录已保留，请重试。", failure) }
                     put(stepId, draft)
                 }
@@ -682,6 +684,7 @@ class ProjectStore(context: Context) {
                 count(db, "states", "project_id=? AND state_id=?", projectId, stepId) != 1) return@transaction false
             if (draft == null) db.delete("editor_drafts", "project_id=? AND state_id=?", arrayOf(projectId, stepId))
             else {
+                requireEditorDraftOwner(projectId, stepId, draft)
                 val encoded = EditorDraftCodec.encode(draft)
                 check(db.insertWithOnConflict("editor_drafts", null, ContentValues().apply {
                     put("project_id", projectId); put("state_id", stepId); put("draft_json", encoded)
@@ -693,6 +696,13 @@ class ProjectStore(context: Context) {
 
     fun clearEditorDraft(projectId: String, stepId: String, session: Long): Boolean =
         writeEditorDraft(projectId, stepId, session, null)
+
+    /** Changed pixels remain recoverable; only a different row owner is structurally invalid. */
+    private fun requireEditorDraftOwner(projectId: String, stepId: String, draft: StoredEditorDraft) {
+        draft.pendingForm?.textRegionSource?.let { source ->
+            require(source.projectId == projectId && source.stepId == stepId) { "文字候选不属于当前项目或步骤。" }
+        }
+    }
 
     private fun currentEditorDraftSession(db: SQLiteDatabase, projectId: String): Long? =
         db.rawQuery("SELECT generation FROM editor_draft_sessions WHERE project_id=?", arrayOf(projectId)).use {
@@ -1353,6 +1363,7 @@ class ProjectStore(context: Context) {
         expectedRevision: Long? = null,
         nextAction: ProjectNextAction? = null,
         editorDraftSession: Long? = null,
+        textRegionSource: TextRegionSourceBinding? = null,
     ): ProjectSnapshot {
         val cleanTitle = text(title, "步骤标题", 120)
         val cleanDescription = text(description, "步骤说明", 4_000, allowEmpty = true)
@@ -1382,10 +1393,37 @@ class ProjectStore(context: Context) {
                 "编辑会话已改变，当前修改尚未保存；请重新载入后编辑。"
             }
             val current = requireSnapshot(db, projectId)
+            val step = current.steps.firstOrNull { it.id == stepId } ?: error("步骤已不存在，请刷新。")
+            val stagedForm = db.rawQuery("SELECT draft_json FROM editor_drafts WHERE project_id=? AND state_id=?",
+                arrayOf(projectId, stepId)).use { rows ->
+                if (!rows.moveToFirst()) null else EditorDraftCodec.decode(rows.getString(0)).also {
+                    requireEditorDraftOwner(projectId, stepId, it)
+                }.pendingForm
+            }
+            val stagedSource = stagedForm?.textRegionSource
+            check(textRegionSource == null || stagedSource == null || textRegionSource == stagedSource) {
+                TextRegionSourceBinding.IMAGE_CHANGED
+            }
+            // An omitted optional argument cannot bypass a persisted suggestion's guard.
+            (textRegionSource ?: stagedSource)?.let { source ->
+                check(source.matches(current.project, step)) { TextRegionSourceBinding.IMAGE_CHANGED }
+                val added = frozen.filter { candidate -> step.hotspots.none { it.id == candidate.id || it.edgeId == candidate.edgeId } }
+                require(added.isNotEmpty()) {
+                    "文字候选来源只能绑定新热点表单。"
+                }
+                check(stagedSource == null || added.any { it.id == stagedForm?.objectId && it.edgeId == stagedForm?.edgeId }) {
+                    "请先保存或取消文字候选表单；输入仍保留。"
+                }
+                // Use the current revision: unrelated text edits never invalidate these pixels.
+                // The final transaction also hashes the actual private file before any writes.
+                try { requireCurrentImageBase(db, step.safeImageBinding(current.project)) }
+                catch (failure: Exception) {
+                    throw IllegalStateException(TextRegionSourceBinding.IMAGE_CHANGED, failure)
+                }
+            }
             check(expectedRevision == null || current.project.revision == expectedRevision) {
                 "项目已发生其他修改，当前草稿尚未保存；请重新载入后编辑。"
             }
-            val step = current.steps.firstOrNull { it.id == stepId } ?: error("步骤已不存在，请刷新。")
             val otherSteps = current.steps.filter { it.id != stepId }
             val otherHotspots = otherSteps.flatMap { it.hotspots }
             val otherNextActions = otherSteps.mapNotNull { it.nextAction }

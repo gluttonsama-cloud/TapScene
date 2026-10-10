@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
@@ -62,8 +63,10 @@ fun EditorCanvas(
     onChangeRect: ((String, OpaqueMask) -> Unit)? = null,
     onTap: ((Float, Float) -> Unit)? = null,
     objectLabel: String = "热点",
+    textRegionRects: List<OpaqueMask> = emptyList(),
 ) {
     val accent = MaterialTheme.colorScheme.primary
+    val suggestionTint = MaterialTheme.colorScheme.tertiary
     val ink = MaterialTheme.colorScheme.onSurface
     val line = MaterialTheme.colorScheme.outlineVariant
     val backdrop = MaterialTheme.colorScheme.surfaceContainerLow
@@ -96,7 +99,7 @@ fun EditorCanvas(
             Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.White.toArgb(); isFakeBoldText = true; textAlign = Paint.Align.CENTER }
         }
         Box(Modifier.size(fittedWidth, fittedHeight)) {
-            Image(image, "已复核的步骤画面", Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
+            Image(image, "当前已保存的安全步骤画面", Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
             val gestures = Modifier
                 .pointerInput(bitmap, enabled, adding, onTap != null) {
                     if (!enabled) return@pointerInput
@@ -185,6 +188,20 @@ fun EditorCanvas(
                     else -> "点选${objectLabel}后拖移，拖动右下角调整尺寸；也可使用对象列表和精调表单"
                 }
             }) {
+                textRegionRects.forEachIndexed { index, rect ->
+                    val position = Offset(rect.left * size.width, rect.top * size.height)
+                    val dimensions = Size((rect.right - rect.left) * size.width, (rect.bottom - rect.top) * size.height)
+                    drawRect(suggestionTint.copy(alpha = .10f), position, dimensions)
+                    drawRect(suggestionTint, position, dimensions, style = Stroke(1.5.dp.toPx(),
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(5.dp.toPx(), 3.dp.toPx()))))
+                    val radius = 9.dp.toPx().coerceAtMost(size.width / 8f)
+                    val center = Offset((position.x - radius).coerceIn(radius, size.width - radius),
+                        (position.y + dimensions.height / 2).coerceIn(radius, size.height - radius))
+                    drawCircle(suggestionTint, radius, center)
+                    labelPaint.textSize = 10.dp.toPx()
+                    drawContext.canvas.nativeCanvas.drawText("${index + 1}", center.x,
+                        center.y - (labelPaint.ascent() + labelPaint.descent()) / 2, labelPaint)
+                }
                 hotspots.forEachIndexed { index, hotspot ->
                     val rect = if (hotspot.id == editedId) editedRect ?: hotspot.rect else hotspot.rect
                     val selected = hotspot.id == selectedHotspotId || hotspot.id == editedId
