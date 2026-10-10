@@ -83,6 +83,21 @@ jobs:
             -PcompatibilityPreview=true -PtapsceneAbi=x86_64 -PtapsceneRuntimeSmoke=true \
             :app:assembleDebug :app:assembleDebugAndroidTest :runtime-target:assembleDebug \
             </dev/null 2>&1 | tee "$RUNNER_TEMP/runtime-results/build.txt"
+          python3 - <<'PY' | tee "$RUNNER_TEMP/runtime-results/dex-packaging.json"
+          import hashlib, json, re, zipfile
+          paths = ['android/app/build/outputs/apk/debug/app-debug.apk',
+                   'android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk',
+                   'android/runtime-target/build/outputs/apk/debug/runtime-target-debug.apk']
+          records = []
+          for path in paths:
+              with zipfile.ZipFile(path) as apk:
+                  dex = [entry for entry in apk.infolist() if re.fullmatch(r'classes(?:[0-9]+)?\.dex', entry.filename)]
+                  records.append({'apk': path, 'dex': [
+                      {'name': entry.filename, 'compression': entry.compress_type, 'bytes': entry.file_size,
+                       'sha256': hashlib.sha256(apk.read(entry)).hexdigest()} for entry in dex]})
+          print(json.dumps(records, sort_keys=True))
+          assert records[0]['dex'] and all(entry['compression'] == zipfile.ZIP_STORED for entry in records[0]['dex']), 'Runtime app DEX must be stored without compression'
+          PY
       - name: Run one isolated software Android instance
         timeout-minutes: 25
         run: bash tools/runtime-checks/run.sh "$RUNNER_TEMP/runtime-results"
