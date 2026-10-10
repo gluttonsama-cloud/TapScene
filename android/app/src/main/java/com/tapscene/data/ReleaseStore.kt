@@ -239,6 +239,78 @@ class ReleaseStore(context: Context) {
         readScene(File(location, "package")).also { check(ViewerPackageCodec.contentDigest(it) == summary.contentDigest) }
     }
 
+    /** Only locally sealed, fully bound reviews may enter hosted publication. No current project lookup. */
+    suspend fun readHostedRelease(releaseId: String, contentDigest: String): HostedReleaseBinding = locked {
+        hostedBinding(releaseId, contentDigest)
+    }
+
+    /**
+     * Copy exactly scene + its declared safe assets into the caller's empty, owned private staging
+     * directory. The caller journals and atomically installs that directory before any network call.
+     * No share URI, raw source, OCR, local review, manifest or AI plan crosses this boundary.
+     */
+    suspend fun copyHostedRelease(releaseId: String, contentDigest: String,
+        targetDirectory: File): HostedReleaseBinding = locked {
+        val binding = hostedBinding(releaseId, contentDigest)
+        val target = targetDirectory.absoluteFile
+        check(target.canonicalFile == target && target.isDirectory && target.listFiles()?.isEmpty() == true &&
+            target.toPath().startsWith(privateRoot.toPath()) && !target.toPath().startsWith(root.toPath())) {
+            "上传快照目录无效。"
+        }
+        val source = File(child(releases, releaseId), "package")
+        verifyPackage(binding.scene, source, decode = true)
+        directory(File(target, "assets"), target)
+        writeSynced(File(target, "scene.json"), ViewerPackageCodec.writeScene(binding.scene))
+        binding.scene.assets.forEach { asset ->
+            currentCoroutineContext().ensureActive()
+            val input = File(source, asset.path)
+            val output = File(target, asset.path)
+            check(input.canonicalFile == input.absoluteFile && input.isFile &&
+                output.canonicalFile == output.absoluteFile && output.parentFile == File(target, "assets")) {
+                "上传资产路径无效。"
+            }
+            FileOutputStream(output).use { sink -> input.inputStream().use { stream ->
+                val buffer = ByteArray(64 * 1024)
+                var count = 0L
+                while (true) {
+                    currentCoroutineContext().ensureActive()
+                    val size = stream.read(buffer)
+                    if (size < 0) break
+                    check(size > 0)
+                    count += size
+                    check(count <= asset.byteLength) { "上传资产发生变化。" }
+                    sink.write(buffer, 0, size)
+                }
+                check(count == asset.byteLength) { "上传资产不完整。" }
+                sink.fd.sync()
+            } }
+            check(output.length() == asset.byteLength && ViewerPackageCodec.sha256(output) == asset.sha256) {
+                "上传快照摘要不匹配。"
+            }
+        }
+        syncDirectory(File(target, "assets"))
+        syncDirectory(target)
+        binding
+    }
+
+    private suspend fun hostedBinding(releaseId: String, contentDigest: String): HostedReleaseBinding {
+        val location = child(releases, releaseId)
+        val summary = readReleaseDirectory(location)
+        check(summary.origin == "local" && summary.contentDigest == contentDigest) {
+            "请选择已复核封存的本机版本；外部导入观看包不能直接发布。"
+        }
+        val review = readCandidateDirectory(location, verifyAssets = false, sealed = true)
+        check(review.contentDigest == contentDigest && review.summaryReviewed && review.fileListReviewed &&
+            review.completedPath && review.reviewedStateIds == review.scene.states.map { it.id }.toSet() &&
+            review.visitedEdgeIds == review.scene.edges.map { it.id }.toSet() &&
+            review.reviewedRegionIds == review.scene.regions.map { it.id }.toSet() &&
+            review.reviewedTransitionAssetIds == review.scene.assets.filter {
+                it.role == ViewerScene.Asset.ROLE_TRANSITION
+            }.map { it.id }.toSet()) { "此本机封存版本的复核绑定不完整。" }
+        return HostedReleaseBinding(summary, review.projectId, review.projectRevision, review.scene,
+            fileListDigest(review.scene))
+    }
+
     suspend fun candidateAssetFile(candidateId: String, stateId: String): File = locked {
         val candidate = readCandidateDirectory(child(candidates, candidateId), verifyAssets = false)
         checkedAsset(candidate.scene, File(child(candidates, candidateId), "package"), stateId)
@@ -450,8 +522,9 @@ class ReleaseStore(context: Context) {
         return latest?.let { readCandidateDirectory(child(candidates, it.id)) }
     }
 
-    private suspend fun readCandidateDirectory(location: File, verifyAssets: Boolean = true): ReleaseCandidate {
-        check(location.parentFile == candidates && location.isDirectory) { "固定候选已不存在，请重新打开。" }
+    private suspend fun readCandidateDirectory(location: File, verifyAssets: Boolean = true,
+        sealed: Boolean = false): ReleaseCandidate {
+        check(location.parentFile == (if (sealed) releases else candidates) && location.isDirectory) { "固定候选已不存在，请重新打开。" }
         validId(location.name)
         check(location.canonicalFile == location.absoluteFile) { "候选目录无效。" }
         val scene = readScene(File(location, "package"))

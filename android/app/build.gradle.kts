@@ -24,10 +24,11 @@ android {
         applicationId = "com.tapscene"
         minSdk = 26
         targetSdk = 36
-        versionCode = 24
-        versionName = "0.19.0-project-copy-dev"
+        versionCode = 25
+        versionName = "0.20.0-local-hosting-dev"
         testInstrumentationRunner = "com.tapscene.media.MediaCompatibilityInstrumentation"
         manifestPlaceholders["appLabel"] = "TapScene"
+        buildConfigField("boolean", "HOSTED_ENABLED", "false")
         ndk { abiFilters += packagedAbis }
         externalNativeBuild {
             cmake {
@@ -45,12 +46,21 @@ android {
                 manifestPlaceholders["appLabel"] = "TapScene 开发版"
             }
         }
+        create("hostedDebug") {
+            initWith(getByName("debug"))
+            matchingFallbacks += listOf("debug")
+            applicationIdSuffix = ".hosted.dev"
+            manifestPlaceholders["appLabel"] = "TapScene 本机托管开发"
+            buildConfigField("boolean", "HOSTED_ENABLED", "true")
+            // This development target is not a signed phone delivery.
+            signingConfig = null
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     externalNativeBuild {
         cmake { path = file("src/main/cpp/CMakeLists.txt"); version = "3.22.1" }
     }

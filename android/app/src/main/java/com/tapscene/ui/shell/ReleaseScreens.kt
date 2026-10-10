@@ -423,6 +423,7 @@ fun ReleaseLibraryContent(
     onReviewCandidate: (String) -> Unit = {},
     onDiscardCandidate: (ReleaseCandidate) -> Unit = {},
     onAi: ((String) -> Unit)? = null,
+    onHosting: (() -> Unit)? = null,
 ) {
     Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
         ShellTopBar("演示库", actions = {
@@ -438,6 +439,7 @@ fun ReleaseLibraryContent(
                     Button(onClick = onImport, enabled = !state.busy, shape = RoundedCornerShape(8.dp), modifier = Modifier.heightIn(min = 48.dp)) { Text("导入包") }
                 }
                 ReleaseStatus(state)
+                if (onHosting != null) ShellActionRow("开发托管", "明确选择本机封存版本，包括旧版。", onClick = onHosting, enabled = !state.busy)
             }
             if (state.pendingCandidates.isNotEmpty()) {
                 item { SectionHeader("待复核", "已固定的候选可继续复核，草稿后续修改不改变此副本。") }

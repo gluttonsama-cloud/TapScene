@@ -1,6 +1,7 @@
 package com.tapscene.ui.shell
 
 import android.graphics.Bitmap
+import com.tapscene.BuildConfig
 import com.tapscene.sharing.offlineShareChooser
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -30,6 +31,8 @@ import kotlinx.coroutines.withContext
 /** The shell routes existing capabilities; unavailable services never manufacture project data. */
 @Composable
 fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: CandidateWorkspace, releases: ReleaseWorkspace) {
+    val hosting: HostingWorkspace = viewModel()
+    val hostingState by hosting.state.collectAsStateWithLifecycle()
     val transitions: TransitionWorkspace = viewModel()
     val regions: RegionWorkspace = viewModel()
     val screenshots: ScreenshotWorkspace = viewModel()
@@ -51,6 +54,43 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     val page = pages.lastOrNull()
     val push: (String) -> Unit = { if (pages.lastOrNull() != it) pages.add(it) }
     val pop: () -> Unit = { if (pages.isNotEmpty()) pages.removeAt(pages.lastIndex) }
+    val hostingVisit = BuildConfig.HOSTED_ENABLED && page in setOf("hosted", "account", "versions")
+    LaunchedEffect(page) {
+        if (hostingVisit) hosting.open(when (page) {
+            "account" -> HostingPage.ACCOUNT
+            "versions" -> HostingPage.PROJECTS
+            else -> HostingPage.SOURCE
+        })
+    }
+    DisposableEffect(hostingVisit) {
+        onDispose { if (hostingVisit) hosting.leave() }
+    }
+    val closeHosting: () -> Unit = { if (!hosting.back()) pop() }
+    val hostingActions = HostingCallbacks(
+        onBack = closeHosting, onSources = hosting::showSources, onRelease = hosting::selectRelease,
+        onAccount = hosting::showAccount, onEmail = hosting::editEmail, onCode = hosting::editCode,
+        onRequestCode = hosting::requestCode, onVerifyCode = hosting::verifyCode,
+        onExpiry = hosting::setExpiry, onPublish = hosting::confirmPublication,
+        onTasks = hosting::showTasks, onTask = hosting::selectTask, onResume = hosting::resumeTask,
+        onStopObservation = hosting::stopObservation, onCancel = hosting::cancelTask,
+        onProjects = hosting::showProjects, onMoreProjects = hosting::moreProjects,
+        onProject = hosting::selectProject, onRefreshVersions = hosting::refreshVersions,
+        onMoreVersions = hosting::moreVersions, onRevoke = hosting::revokePublication,
+        onCheckRevocation = hosting::checkRevocation, onLogout = hosting::logout, onRetrySessions = hosting::retryPendingSessions,
+        onOpenLink = { url ->
+            if (isLocalHostedShareUrl(url)) try {
+                context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch (_: android.content.ActivityNotFoundException) { hosting.message("本机没有可用浏览器；可以复制开发链接。") }
+        },
+        onCopyLink = { url ->
+            if (isLocalHostedShareUrl(url)) {
+                (context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager)
+                    .setPrimaryClip(android.content.ClipData.newPlainText("TapScene 本机开发链接", url))
+                hosting.message("已复制本机开发链接；它不是公网分享地址。")
+            }
+        },
+    )
     var newProject by rememberSaveable { mutableStateOf(false) }
     var importAfterCreate by rememberSaveable { mutableStateOf(false) }
     var awaitingCreatedProject by rememberSaveable { mutableStateOf(false) }
@@ -427,6 +467,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     }
     BackHandler(enabled = page != null && !retainedMedia) { pop() }
     BackHandler(enabled = page in setOf("review", "delivery", "import") && releaseState.busy) { releases.cancel() }
+    BackHandler(enabled = hostingVisit) { closeHosting() }
     BackHandler(enabled = page == "player") { closeReleasePlayer() }
     BackHandler(enabled = page == "step-correction") { closeStepCorrection() }
     BackHandler(enabled = page == "screenshot") { if (!screenshotState.media.busy) closeScreenshot() }
@@ -650,7 +691,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 DeliveryOptionsScreen(pop, openReleaseReview, { if (sealed != null) releases.openAiPackage(sealed.id) else releases.clearAiConfiguration(); push("ai") }, { push("account") }, { push("versions") },
                                     sealedSummary = sealed, onExport = sealed?.let { item -> { releases.prepareExport(item.id) } },
                                     onShare = sealed?.takeIf { it.origin == "local" }?.let { item -> { releases.prepareOfflineShare(item.id) } },
-                                    busy = releaseState.busy || releaseState.shareChooserOpen || releaseState.pendingShare != null || releaseState.exportFile != null || exportPickerPending)
+                                    busy = releaseState.busy || releaseState.shareChooserOpen || releaseState.pendingShare != null || releaseState.exportFile != null || exportPickerPending,
+                                    onHosting = if (BuildConfig.HOSTED_ENABLED) ({ push("hosted") }) else null)
                             }
                             "ai-import" -> AiDraftImportContent(aiImportState,
                                 onBack = { if (!aiImportState.busy) { aiPickerRequested = false; pop(); projects.reload() } },
@@ -675,8 +717,9 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                             "ai" -> AiPackageScreen(pop, releaseState, releases::openAiPackage, releases::chooseAiEdge,
                                 releases::previousAiVisit, releases::resetAiPath, releases::setAiCanvas, releases::setAiHold,
                                 releases::toggleAiEffect, releases::prepareAiExport)
-                            "account" -> HostingAccountScreen(pop, { push("versions") })
-                            "versions" -> HostedVersionsScreen(pop, { push("account") })
+                            "hosted" -> if (BuildConfig.HOSTED_ENABLED) LocalHostingContent(hostingState, hostingActions) else HostingAccountScreen(pop, { push("versions") })
+                            "account" -> if (BuildConfig.HOSTED_ENABLED) LocalHostingContent(hostingState, hostingActions) else HostingAccountScreen(pop, { push("versions") })
+                            "versions" -> if (BuildConfig.HOSTED_ENABLED) LocalHostingContent(hostingState, hostingActions) else HostedVersionsScreen(pop, { push("account") })
                             "import" -> OfflineImportContent(releaseState, pop) {
                                 if (!releaseState.busy) {
                                     releases.clearImportResult(); releases.clearMessage()
@@ -775,7 +818,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 { deletingRelease = it }, { push("settings") },
                                 onReviewCandidate = { id -> reviewCandidateId = id; push("review") },
                                 onDiscardCandidate = { discardingCandidate = it },
-                                onAi = { id -> releases.openAiPackage(id); push("ai") }) }
+                                onAi = { id -> releases.openAiPackage(id); push("ai") },
+                                onHosting = if (BuildConfig.HOSTED_ENABLED) ({ push("hosted") }) else null) }
                             GlobalNavigation(true, { library = false }, {})
                         }
                         else -> ProjectHomeFrame({ push("record") }, requestImport, { push("settings") }, { library = true; releases.reloadLibrary() }, onImportScreenshot = requestScreenshot, onImportAi = openAiImport) {
@@ -908,3 +952,8 @@ private fun ReviewedThumbnail(projects: ProjectWorkspace, snapshot: ProjectSnaps
     }
     return bitmap
 }
+
+/** Only the fixed loopback service's generated share route may leave the app. */
+internal fun isLocalHostedShareUrl(url: String): Boolean = runCatching {
+    com.tapscene.hosting.HostedApi.validateShareUrl(url) == url
+}.getOrDefault(false)
