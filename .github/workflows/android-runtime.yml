@@ -2,25 +2,8 @@ name: Android runtime smoke
 
 on:
   workflow_dispatch:
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths:
-      - '.github/workflows/android-runtime.yml'
-      - 'tools/runtime-checks/**'
-      - 'android/runtime-target/**'
-      - 'android/*.kts'
-      - 'android/gradle.properties'
-      - 'android/app/build.gradle.kts'
-      - 'android/app/src/main/AndroidManifest.xml'
-      - 'android/app/src/main/java/com/tapscene/clickplan/**'
-      - 'android/app/src/main/java/com/tapscene/recording/**'
-      - 'android/app/src/main/java/com/tapscene/media/**'
-      - 'android/app/src/main/java/com/tapscene/data/ProjectStore.kt'
-      - 'android/app/src/main/java/com/tapscene/data/SourceRepository.kt'
-      - 'android/app/src/main/java/com/tapscene/data/WorkspaceStore.kt'
-      - 'android/app/src/main/res/xml/click_accessibility_service.xml'
-      - 'android/app/src/androidTest/java/com/tapscene/runtime/**'
-      - 'android/app/src/runtimeSmoke/**'
+  # Manual only: the software runner repeatedly hit system ANR/Watchdog limits.
+  # A packaging change must not restart this device experiment.
 
 permissions:
   contents: read

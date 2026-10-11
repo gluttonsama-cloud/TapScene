@@ -2,6 +2,8 @@
 
 本入口只在一次性 GitHub `ubuntu-24.04` runner 的合成 Android 设备运行。它执行真实 Android OS、生产无障碍点击与 MediaProjection/EGL/MediaCodec 管线；不是实体手机、OEM 或性能验收。应用仍为开发版本 31，产品代码、权限和超时不因测试修改。
 
+本 lane 现仅保留 `workflow_dispatch` 手动入口，不随 PR 自动运行。多轮系统 ANR/Watchdog 已阻挡完整场景；两次生产静态探针的局部通过不能证明三点击、隐藏定位点或长链通过。本次并存包制作不重跑软件模拟器。
+
 ## 为什么保留软件模拟路线
 
 仓库此前 [CI #16](https://github.com/gluttonsama-cloud/TapScene/actions/runs/37909197077) 使用 `-accel off`、Emulator 37.2.12 / build 16428233 和 `x86_64-35_r02.zip`，日志明确记录 `Boot completed in 410981 ms`；两个 APK 安装成功，随后旧全量 instrumentation 进程崩溃。该次没有保留 logcat，不能把崩溃归因于 KVM，也不能把它当作点击/录屏验证通过。

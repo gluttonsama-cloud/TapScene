@@ -507,7 +507,7 @@ private fun ClickAccessibilityNotice(onSettings: () -> Unit) {
             Text("手动开启点击服务", style = MaterialTheme.typography.titleMedium)
             Text("定位与执行需要无障碍服务。仅在会话期间检查窗口包名与类名，不读取节点文字、键盘输入或通知内容。",
                 style = MaterialTheme.typography.bodySmall)
-            Text("请在系统设置中自行开启 TapScene 点击服务；回来后会检查连接。未开启也可编辑和保存计划。",
+            Text("请在系统设置中自行开启 ${androidx.compose.ui.res.stringResource(com.tapscene.R.string.click_service_label)}；回来后会检查连接。未开启也可编辑和保存计划。",
                 style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
             OutlinedButton(onClick = onSettings, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("打开系统无障碍设置") }
         }
