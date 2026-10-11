@@ -10,7 +10,10 @@ import sys
 import tempfile
 
 
-EXPECTED_CERT_SHA256 = "0929d62a4336760a8c0395cea92c6e9b272c897f02b126f84f5f0a4e0a4fefc2"
+APPROVED_CERTIFICATES = {
+    "legacy": "0929d62a4336760a8c0395cea92c6e9b272c897f02b126f84f5f0a4e0a4fefc2",
+    "preview": "662acdf3f4b7f2027c3394fd31408c44f35992cabea4bdeaab1ed85e80d338b0",
+}
 REPOSITORY = Path(__file__).resolve().parents[2]
 CERT_DIGEST = re.compile(
     r"^Signer #\d+ certificate SHA-256 digest:\s*([0-9a-fA-F:]+)\s*$", re.MULTILINE
@@ -49,7 +52,10 @@ def main():
         "--signing-dir", type=Path, required=True,
         help="explicit repository-external directory containing existing development.p12 and store.pass",
     )
+    parser.add_argument("--certificate-profile", choices=sorted(APPROVED_CERTIFICATES), default="legacy",
+                        help="independently recorded approved certificate; preview is only for the new co-installable package")
     args = parser.parse_args()
+    expected_cert_sha256 = APPROVED_CERTIFICATES[args.certificate_profile]
     try:
         input_apk = args.input_apk.resolve(strict=True)
         if not input_apk.is_file():
@@ -88,7 +94,7 @@ def main():
                 executable, ["verify", "--verbose", "--print-certs", str(candidate)], "verify"
             )
             digests = [value.replace(":", "").lower() for value in CERT_DIGEST.findall(verification)]
-            if digests != [EXPECTED_CERT_SHA256]:
+            if digests != [expected_cert_sha256]:
                 raise SigningError("APK must have exactly the approved development certificate SHA-256; no APK published")
             result = subprocess.run(
                 [sys.executable, str(verifier), str(input_apk), str(candidate)],
@@ -100,7 +106,7 @@ def main():
             # destination, including a symlink created after the earlier check.
             os.link(candidate, output_apk)
         print(result.stdout, end="")
-        print(f"PASS: apksigner verification and approved development certificate SHA-256: {EXPECTED_CERT_SHA256}")
+        print(f"PASS: apksigner verification and approved development certificate SHA-256: {expected_cert_sha256}")
         print(f"Created: {output_apk}")
         print("NOT CHECKED: Android installation/runtime. A different old signing certificate prevents an in-place first update.")
     except (SigningError, OSError, ValueError) as error:

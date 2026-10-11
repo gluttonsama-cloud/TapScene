@@ -48,6 +48,16 @@ android {
                 manifestPlaceholders["appLabel"] = "TapScene 开发版"
             }
         }
+        create("preview") {
+            initWith(getByName("debug"))
+            matchingFallbacks += listOf("debug")
+            // New user-approved identity; never replaces either historical installation.
+            applicationIdSuffix = ".preview"
+            versionNameSuffix = "-preview"
+            manifestPlaceholders["appLabel"] = "点演测试版"
+            // CI produces unsigned bytes; the approved private key stays outside CI/repository.
+            signingConfig = null
+        }
         create("hostedDebug") {
             initWith(getByName("debug"))
             matchingFallbacks += listOf("debug")
@@ -106,6 +116,11 @@ android {
     experimentalProperties["android.experimental.enableScreenshotTest"] = true
     lint { abortOnError = true }
 }
+// The opt-in instrumentation packaging must never masquerade as a phone delivery.
+androidComponents {
+    beforeVariants(selector().withBuildType("preview")) { it.enable = !runtimeSmoke }
+}
+
 kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
 
 dependencies {

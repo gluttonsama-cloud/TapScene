@@ -234,6 +234,61 @@ jobs:
         run: |
           gradle -p android --no-daemon --max-workers=2 -PcompatibilityPreview=true -PtapsceneAbi=arm64-v8a :app:assembleHostedDebug :app:lintHostedDebug
           python3 tools/hosting-checks/check-manifests.py
+      - name: Build the co-installable unsigned phone product and check its own package
+        if: steps.scope.outputs.android == 'true'
+        run: |
+          gradle -p android --no-daemon --max-workers=2 -PtapsceneAbi=arm64-v8a \
+            :app:assemblePreview :app:lintPreview :app:processReleaseManifest :app:testPreviewUnitTest \
+            --tests com.tapscene.preview.PreviewIsolationHostTest \
+            --tests com.tapscene.sharing.OfflineShareHostTest \
+            --tests com.tapscene.clickplan.ClickWindowPolicyTest
+          python3 tools/signing/check-preview-apk.py android/app/build/outputs/apk/preview/app-preview-unsigned.apk --require-unsigned \
+            --aapt "$ANDROID_HOME/build-tools/35.0.0/aapt"
+          python3 tools/signing/check-preview-manifests.py
+          python3 tools/ocr-checks/check-apk.py android/app/build/outputs/apk/preview/app-preview-unsigned.apk --abis arm64-v8a \
+            --readelf "$ANDROID_HOME/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          test -x "$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          if "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify android/app/build/outputs/apk/preview/app-preview-unsigned.apk; then
+            echo "Preview CI artifact must be unsigned; private signing occurs outside CI." >&2
+            exit 1
+          fi
+          python3 - <<'PY_PREVIEW'
+          from pathlib import Path
+          from collections import Counter
+          import xml.etree.ElementTree as ET
+          cases = [case for path in Path("android/app/build/test-results/testPreviewUnitTest").glob("TEST-*.xml")
+                   for case in ET.parse(path).getroot().iter("testcase")]
+          assert Counter(case.get("classname") for case in cases) == {
+              "com.tapscene.preview.PreviewIsolationHostTest": 1,
+              "com.tapscene.sharing.OfflineShareHostTest": 4,
+              "com.tapscene.clickplan.ClickWindowPolicyTest": 1,
+          }
+          assert all(not any(case.find(kind) is not None for kind in ("failure", "error", "skipped")) for case in cases)
+          print("PREVIEW_HOST_CHECKS_OK: actual preview identity and read-only URI boundaries; device co-install NOT_RUN")
+          PY_PREVIEW
+      - name: Keep the unsigned co-installable phone product
+        if: success() && steps.scope.outputs.android == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tapscene-preview-unsigned-arm64-v8a
+          path: |
+            android/app/build/outputs/apk/preview/app-preview-unsigned.apk
+            android/app/build/reports/lint-results-preview.html
+            android/app/build/test-results/testPreviewUnitTest/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Keep preview diagnostics when its checks fail
+        if: failure() && steps.scope.outputs.android == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tapscene-preview-diagnostics
+          path: |
+            android/app/build/test-results/testPreviewUnitTest/
+            android/app/build/reports/lint-results-preview.html
+            android/app/build/intermediates/merged_manifests/preview/
+            android/app/build/intermediates/merged_manifests/release/
+          retention-days: 7
+          if-no-files-found: warn
       - name: Execute production Android data and static AI round-trip checks
         id: host_data
         if: steps.scope.outputs.android == 'true'
@@ -617,6 +672,13 @@ jobs:
         if: steps.scope.outputs.android == 'true'
         timeout-minutes: 15
         run: |
+          # Packaging PRs do not start devices, even if this runner exposes KVM.
+          # Device work is explicitly requested separately; host checks above still run.
+          if [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "NOT_RUN: Android media instrumentation; device execution is manual-only." | tee "$RUNNER_TEMP/media-instrumentation.txt"
+            echo "::warning::Device runtime NOT_RUN: this PR builds and checks the phone product only."
+            exit 0
+          fi
           # Never change KVM/security permissions. Software boot was too slow/unreliable on
           # this runner; a missing runtime check must be visible, not reported as a test pass.
           if ! test -r /dev/kvm || ! test -w /dev/kvm; then

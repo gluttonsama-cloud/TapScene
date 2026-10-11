@@ -106,7 +106,7 @@ class RecordingService : Service() {
         )
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
-            .setContentTitle("TapScene 正在无声录制")
+            .setContentTitle("${applicationInfo.loadLabel(packageManager)} 正在无声录制")
             .setContentText("仅保存在本机；点击停止结束本段录制")
             .setCategory(Notification.CATEGORY_SERVICE)
             .setVisibility(Notification.VISIBILITY_SECRET)

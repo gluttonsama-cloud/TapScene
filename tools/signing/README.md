@@ -2,7 +2,30 @@
 
 本目录只含无秘密说明与 Python 标准库脚本。签名由维护者在已授权环境完成；使用者只接收已核对的 APK，无需配置签名工具或密钥。这里不生成凭据，也不包含实际密钥路径、密码或私钥。
 
-已批准的开发测试证书公开 SHA-256 指纹：
+## 新并存测试包
+
+本次用户批准生成新开发证书，用于独立 `com.tapscene.preview` / “点演测试版”。公开证书 SHA-256：
+
+```text
+662acdf3f4b7f2027c3394fd31408c44f35992cabea4bdeaab1ed85e80d338b0
+```
+
+`preview` 复用完整离线生产代码，默认 arm64，versionCode 31；不是 runtimeSmoke 或 hostedDebug。CI 的 `tapscene-preview-unsigned-arm64-v8a` 只含未签名产品 APK 和无秘密检查报告。签名凭据不进入仓库、CI、产物或附件；当前私钥仅在临时开发环境私有目录，无持久备份，环境重建可能再次丢失。
+
+维护者核对成功 CI 精确 head/tree、实际包名/权限/生产组件和 OCR 资产后，在仓库外已有对应凭据的环境执行：
+
+```sh
+python3 tools/signing/sign-development-apk.py CI_INPUT.apk SIGNED_OUTPUT.apk --signing-dir SIGNING_DIR --certificate-profile preview
+python3 tools/signing/check-preview-apk.py SIGNED_OUTPUT.apk --aapt AAPT
+```
+
+`AAPT` 是可信 Android `aapt` 可执行文件路径；签名后仍须核对公开证书、文件 SHA-256、内容一致性和 16 KiB ZIP/ELF 对齐。可信发行版的 Android apksigner 35.0.2 支持 `--lib-page-alignment 16384`；不要使用不支持 `zipalign -P 16` 的旧版 zipalign 重排原生库。CI 输入已经按 16 KiB 对齐，签名脚本再次检查输入与输出所有条目。
+
+新包与正式 `com.tapscene`、既有 `com.tapscene.preview.hevc` 及 `com.tapscene.hosted.dev` 的 applicationId 和 provider authority 各自独立，不覆盖或迁移旧数据。点击目标列表和运行守卫排除这些安装包；无障碍名称和录屏通知显示测试版身份，避免误开旧服务。系统只允许的投影/无障碍行为仍须真机核验，不承诺两版同时录屏/播放。
+
+## 历史开发证书（私钥已丢失）
+
+以下 `legacy` profile 只保留旧包追溯，默认行为保持兼容；旧公钥无法恢复旧私钥。旧证书公开 SHA-256：
 
 ```text
 0929d62a4336760a8c0395cea92c6e9b272c897f02b126f84f5f0a4e0a4fefc2
@@ -51,8 +74,8 @@ python3 tools/signing/sign-development-apk.py CI_INPUT.apk SIGNED_OUTPUT.apk --s
 
 ## 首次换签与版本边界
 
-- 当前兼容预览包名保持 `com.tapscene.preview.hevc`。当前编辑可用性增量构建配置 `versionCode = 17`；维护者须核对下载 APK 的实际包名、版本及对应成功 CI 提交，脚本不解析 Android 清单。
-- 版本号增加不能解决证书不同的问题。首次从旧的临时调试签名换成专用测试签名，不能直接覆盖旧包。不要自动卸载旧版、清除数据或另增包名来绕过冲突；遇到冲突先保留旧包与本机项目，说明情况并等用户决定。当前项目导出/迁移尚未实现，不能承诺卸载后能恢复。
+- 历史兼容预览包名保持 `com.tapscene.preview.hevc`；维护者须核对下载 APK 的实际包名、版本及对应成功 CI 提交，脚本不解析 Android 清单。
+- 版本号增加不能解决证书不同的问题。首次从旧的临时调试签名换成专用测试签名，不能直接覆盖旧包。不要自动卸载旧版、清除数据或另增包名来绕过冲突；遇到冲突先保留旧包与本机项目，说明情况并等用户决定。现有观看包/AI 包不等于完整私有项目备份，不能承诺卸载后能恢复。
 - 此后只有在包名、固定签名及版本条件均满足时才具备覆盖更新的前提，实际安装仍需验证。后续每次交付继续核对同一公开证书指纹。
 - 开发云环境不是可靠的密钥备份。密钥及必要恢复材料需要另行授权的持久、安全保管安排；未核实恢复能力前，不承诺环境重建后仍能使用同一签名。公开指纹不能恢复私钥，不能替代备份。
 
