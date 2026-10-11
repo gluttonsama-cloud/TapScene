@@ -23,6 +23,8 @@ def main():
     assert permissions == {
         "android.permission.FOREGROUND_SERVICE", "android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION",
         "android.permission.POST_NOTIFICATIONS", "com.tapscene.preview.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",
+        # Existing pinned Media3 ExoPlayer manifest; no new preview permission.
+        "android.permission.WAKE_LOCK",
     }, permissions
     assert '"com.tapscene.preview.offline-share"' in manifest
     assert not any(f'"{old}.offline-share"' in manifest for old in

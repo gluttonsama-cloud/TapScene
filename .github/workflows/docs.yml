@@ -277,6 +277,18 @@ jobs:
             android/app/build/test-results/testPreviewUnitTest/
           retention-days: 7
           if-no-files-found: error
+      - name: Keep preview diagnostics when its checks fail
+        if: failure() && steps.scope.outputs.android == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tapscene-preview-diagnostics
+          path: |
+            android/app/build/test-results/testPreviewUnitTest/
+            android/app/build/reports/lint-results-preview.html
+            android/app/build/intermediates/merged_manifests/preview/
+            android/app/build/intermediates/merged_manifests/release/
+          retention-days: 7
+          if-no-files-found: warn
       - name: Execute production Android data and static AI round-trip checks
         id: host_data
         if: steps.scope.outputs.android == 'true'
