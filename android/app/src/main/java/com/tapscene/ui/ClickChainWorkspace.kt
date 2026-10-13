@@ -53,6 +53,7 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
     @Volatile private var generation = 0L
     private var task: Job? = null
     private val writes = Mutex()
+    private val thumbnailReads = Mutex()
     private var stagingFailure = false
     private var selectedFrame: String? = null
     private var selectedAction: String? = null
@@ -252,7 +253,8 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
             firstAction = saved.firstAction,lastAction = saved.lastAction,totalActions = current.actions.size,framesOnly = saved.framesOnly,
             stages = path.stages.map { stage -> ClickChainStageRow(stage.index,stage.selectedKey?.let(::titleForFrame) ?: "画面待补",
                 stage.choices,stage.selectedKey,stage.selectedKey?.let(::frameReviewed) == true) },actions = actions,
-            frames = allFrames.map { ClickChainFrameRow(it,titleForFrame(it),frameReviewed(it),saved.selectedFrameKeys?.contains(it) != false) },
+            frames = allFrames.map { key -> ClickChainFrameRow(key,titleForFrame(key),frameReviewed(key),saved.selectedFrameKeys?.contains(key) != false,
+                thumbnailDigest = saved.frames[key]?.takeIf { it.reviewed && it.originalPngSha256 == current.frames[key]?.pngSha256 }?.output?.sha256) },
             frameCount = keys.size,reviewedFrameCount = reviewedCount,confirmedActionCount = confirmedCount,
             markLastTerminal = saved.markLastTerminal,issue = issue,
             editingLocked = resultStatus == "committed" || saved.operationId != null && resultStatus !in setOf("aborted","unstarted"),
@@ -470,6 +472,24 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
     private suspend fun readOutput(output: ClickChainOutput): Bitmap = withContext(Dispatchers.IO) {
         val file = validateOutput(output,emptyList())
         BitmapFactory.decodeFile(file.path) ?: error("已生成画面无法读取，请重新生成。")
+    }
+
+    /** A single sampled decode at a time; late images cannot cross runs, owners or replaced outputs. */
+    suspend fun loadReviewedThumbnail(key: String, digest: String): Bitmap? {
+        val saved = draft ?: return null
+        val frame = saved.frames[key]?.takeIf { it.reviewed && it.originalPngSha256 == capture?.frames?.get(key)?.pngSha256 } ?: return null
+        val output = frame.output?.takeIf { it.sha256 == digest } ?: return null
+        val request = generation
+        val bitmap = try {
+            thumbnailReads.withLock {
+                withContext(Dispatchers.IO) { readClickChainThumbnail(reviews.outputFile(saved.runId, output), output) }
+            }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { return null }
+        val current = draft
+        return if (request == generation && current != null && current.runId == saved.runId && current.owner == saved.owner &&
+            current.frames[key]?.let { it.reviewed && it.output == output && it.originalPngSha256 == frame.originalPngSha256 } == true) bitmap
+        else { bitmap.recycle(); null }
     }
     private suspend fun validateOutput(output: ClickChainOutput,masks: List<OpaqueMask>): File {
         val file = reviews.outputFile(checkNotNull(draft).runId,output)

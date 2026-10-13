@@ -94,7 +94,7 @@ internal object ClickChainRoutePolicy {
 }
 
 internal data class ClickChainFrameRow(val key: String, val title: String, val reviewed: Boolean,
-    val selected: Boolean = true, val thumbnail: Bitmap? = null)
+    val selected: Boolean = true, val thumbnail: Bitmap? = null, val thumbnailDigest: String? = null)
 internal data class ClickChainStageRow(val index: Int, val title: String, val choices: List<ClickChainStageChoice>,
     val selectedKey: String?, val reviewed: Boolean)
 internal data class ClickChainActionRow(val actionId: String, val number: Int, val status: String,
@@ -116,3 +116,27 @@ internal data class ClickChainReviewUiState(val runId: String? = null, val title
     val frameEditor: ClickChainFrameEditor? = null, val actionEditor: ClickChainActionEditor? = null,
     val createdProjectId: String? = null, val outcomeUnknown: Boolean = false,
     val canCreate: Boolean = false, val editingLocked: Boolean = false, val retryCreate: Boolean = false)
+
+internal sealed interface ClickChainReviewTarget {
+    data class Frame(val key: String) : ClickChainReviewTarget
+    data class Action(val actionId: String) : ClickChainReviewTarget
+}
+
+/** Navigation only: the workspace still owns actual-output confirmation and creation guards. */
+internal fun ClickChainReviewUiState.nextRequiredReview(): ClickChainReviewTarget? {
+    if (busy || loading || editingLocked || createdProjectId != null || outcomeUnknown ||
+        frameEditor != null || actionEditor != null) return null
+    if (framesOnly) return frames.firstOrNull { it.selected && !it.reviewed }?.let { ClickChainReviewTarget.Frame(it.key) }
+    stages.firstOrNull { stage -> !stage.reviewed && stage.selectedKey != null &&
+        stage.choices.any { it.frameKey == stage.selectedKey } }?.selectedKey?.let { return ClickChainReviewTarget.Frame(it) }
+    return actions.firstOrNull { it.enabled && !it.confirmed }?.let { ClickChainReviewTarget.Action(it.actionId) }
+}
+
+internal fun ClickChainReviewUiState.validationIssue(): String? {
+    if (title.isBlank()) return "请填写新项目名称。"
+    if (loading || totalActions == 0) return null
+    val first = firstAction.toIntOrNull()
+    val last = lastAction.toIntOrNull()
+    return if (first == null || last == null || first !in 1..totalActions || last !in first..totalActions)
+        "请输入 1 至 $totalActions 之间的连续动作范围。" else null
+}
