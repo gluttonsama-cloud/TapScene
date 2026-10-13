@@ -36,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.tapscene.BuildConfig
 import com.tapscene.data.ProjectSnapshot
 import com.tapscene.data.ReleaseSummary
 import com.tapscene.ui.HostingPage
@@ -319,21 +320,24 @@ fun DeliveryOptionsScreen(
             }
             Text("临时分享入口 24 小时有效，已发送副本无法收回。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
         }
-        DetailSection("托管链接", "主动上传封存后的安全内容，由持链者观看。") {
-            ShellLabelValue("有效期选项", "1 天 / 7 天 / 30 天")
-            ShellActionRow("托管账号与版本", "查看账号入口与已发布版本管理。", onClick = onAccount)
-            OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = { onHosting?.invoke() }, enabled = onHosting != null && !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (onHosting == null) "确认并发布" else "选择本机封存版（开发托管）") }
-        }
         DetailSection("AI 数据包", "导出完整图与有限渲染计划，在独立环境中制作动画。") {
             ShellActionRow("查看数据包配置", "路径、画布、停留时间与可见区域。", onClick = onAi)
         }
-        if (onHosting != null) StatusNote("仅连接本机合成开发服务。选择固定版本、登录合成账号并再次确认后才会上传；不会自动发布。")
-        else StatusNote(if (sealedSummary == null) "先完成成品复核与封存，再保存离线观看包。托管尚未接入；AI 数据包可配置后本机导出。" else "此文件保留当前固定版本。托管尚未接入；AI 数据包可配置后本机导出。")
-        Column {
-            ShellActionRow("返回成品复核", onClick = onReview)
-            ShellDivider()
-            ShellActionRow("托管版本管理", onClick = onVersions)
+        if (onHosting != null) {
+            DetailSection("本机开发托管", "仅连接本机合成开发服务，不是公网链接。") {
+                ShellLabelValue("有效期选项", "1 天 / 7 天 / 30 天")
+                OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = onHosting, enabled = !busy,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("选择本机封存版") }
+                ShellActionRow("开发托管账号", onClick = onAccount)
+                ShellDivider()
+                ShellActionRow("开发托管版本", onClick = onVersions)
+                Text("选择固定版本、登录合成账号并再次确认后才会上传。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+            }
+        } else {
+            ShellLabelValue("托管链接", "尚未接入")
         }
+        if (sealedSummary == null) StatusNote("先完成成品复核与封存，再保存离线观看包。")
+        ShellActionRow("返回成品复核", onClick = onReview)
     }
 }
 
@@ -636,14 +640,18 @@ fun SettingsStorageScreen(
     onAccount: () -> Unit,
     onVersions: () -> Unit,
     onManageSources: () -> Unit,
+    hostingAvailable: Boolean = BuildConfig.HOSTED_ENABLED,
+    initiallyShowFormats: Boolean = false,
 ) {
-    var showFormats by rememberSaveable { mutableStateOf(false) }
+    var showFormats by rememberSaveable { mutableStateOf(initiallyShowFormats) }
     var showPrivacy by rememberSaveable { mutableStateOf(false) }
     ServicePage("设置与存储", onBack) {
-        DetailSection("账号与托管") {
-            ShellActionRow("托管账号", "仅用于主动发布与管理链接。", onClick = onAccount)
-            ShellDivider()
-            ShellActionRow("托管版本", "查看到期、撤销与已发布版本。", onClick = onVersions)
+        if (hostingAvailable) {
+            DetailSection("本机开发托管") {
+                ShellActionRow("开发托管账号", "仅连接本机合成开发服务。", onClick = onAccount)
+                ShellDivider()
+                ShellActionRow("开发托管版本", "查看到期、撤销与已发布版本。", onClick = onVersions)
+            }
         }
         DetailSection("本机存储") {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
@@ -664,7 +672,7 @@ fun SettingsStorageScreen(
         DetailSection("使用与隐私") {
             ShellActionRow("支持格式与导入说明", value = if (showFormats) "收起" else "展开", onClick = { showFormats = !showFormats })
             if (showFormats) {
-                Text("目前可导入 H.264 / H.265 编码的 MP4 录屏；截图导入尚未接入。视频解码能力取决于本机，导入时会校验格式、大小与实际画面。原素材只保存在应用私有空间。", style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
+                Text("可导入 H.264 / H.265 编码的 MP4 录屏，或单张 PNG / JPEG 截图。导入时校验格式、大小与实际画面；视频解码能力取决于本机。原素材只保存在应用私有空间。", style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
             }
             ShellDivider()
             ShellActionRow("本机内容与设备丢失", value = if (showPrivacy) "收起" else "展开", onClick = { showPrivacy = !showPrivacy })
@@ -673,10 +681,16 @@ fun SettingsStorageScreen(
             }
         }
         DetailSection("关于 TapScene") {
-            ShellLabelValue("应用", "TapScene 点演 · 开发预览")
+            ShellLabelValue("应用", when {
+                BuildConfig.HOSTED_ENABLED -> "TapScene · 本机托管开发"
+                BuildConfig.BUILD_TYPE == "preview" -> "点演测试版"
+                BuildConfig.DEBUG -> "TapScene · 开发版"
+                else -> "TapScene 点演"
+            })
+            ShellLabelValue("版本", "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
             ShellLabelValue("源码许可", "Apache-2.0")
             ShellLabelValue("交付协议", "生成数据包时记录版本")
-            ShellLabelValue("服务条款与隐私政策", "托管服务接入时提供")
+            if (!hostingAvailable) ShellLabelValue("托管链接", "尚未接入")
         }
     }
 }

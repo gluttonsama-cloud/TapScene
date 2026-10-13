@@ -25,8 +25,8 @@ android {
         applicationId = "com.tapscene"
         minSdk = 26
         targetSdk = 36
-        versionCode = 31
-        versionName = "0.26.0-presentation-clock-dev"
+        versionCode = 32
+        versionName = "0.27.0-overlay-entry-dev"
         testInstrumentationRunner = if (runtimeSmoke) "com.tapscene.runtime.ClickRuntimeInstrumentation"
             else "com.tapscene.media.MediaCompatibilityInstrumentation"
         manifestPlaceholders["appLabel"] = "TapScene"
@@ -126,6 +126,7 @@ kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarg
 dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.16.1")
+    testImplementation("androidx.compose.ui:ui-test-junit4:1.9.4")
     // Review-only host renders. Tooling and sample states stay outside the shipped app.
     screenshotTestImplementation("com.android.tools.screenshot:screenshot-validation-api:0.0.1-alpha16")
     screenshotTestImplementation("androidx.compose.ui:ui-tooling:1.9.4")

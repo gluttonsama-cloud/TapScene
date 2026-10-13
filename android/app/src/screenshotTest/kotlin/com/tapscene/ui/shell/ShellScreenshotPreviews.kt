@@ -32,7 +32,7 @@ import com.tapscene.ui.ProjectUiState
 fun ProjectsEmptyPreview() {
     ReviewSurface(sample = false) {
         ProjectHomeFrame(
-            onRecord = {}, onImportVideo = {}, onSettings = {}, onLibrary = {},
+            onRecord = {}, onImportVideo = {}, onSettings = {}, onLibrary = {}, onClickPlan = {},
         ) {
             ProjectHomeContent(ProjectUiState(), onOpenProject = {}, onRenameProject = {}, onDeleteProject = {})
         }

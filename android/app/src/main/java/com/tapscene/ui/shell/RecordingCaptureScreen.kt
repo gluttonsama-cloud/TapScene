@@ -285,7 +285,7 @@ fun RecordingCaptureContent(
                     }
                     callbacks.onClickPlan?.let { openPlan ->
                         Button(onClick = openPlan, enabled = !recording.canRetry && !projectState.busy && !preparingConsent,
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("编排点击链并录屏") }
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("悬浮编排") }
                         Text("先顺序定位，再隐藏点位播放一次；保留完整点击链与真实录屏。", style = MaterialTheme.typography.bodySmall)
                     }
                     OutlinedButton(onClick = callbacks.onStart,

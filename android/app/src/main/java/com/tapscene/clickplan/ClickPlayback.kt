@@ -157,8 +157,9 @@ object ClickPlayback {
             check(!ClickWindowPolicy.protectedPackage(plan.targetPackage))
             val launch = checkNotNull(context.packageManager.getLaunchIntentForPackage(plan.targetPackage))
             editorPlan = plan; guard = ClickGuard.Unknown
-            context.startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            connected.showEditor(plan)
+            // Stay in TapScene if attachment fails, so the failure is actually visible to the user.
+            openClickEditor(attachOverlay = { connected.showEditor(plan) },
+                launchTarget = { context.startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) })
             mutable.value = mutable.value.copy(message = "可手动切换目标页面；添加点位只记录坐标。准备好后回到起始页。")
         } catch (_: Exception) { failEditor("无法打开目标 App 或定位点，请返回编辑重试。") }
     }
