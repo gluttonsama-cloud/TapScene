@@ -34,8 +34,8 @@ import kotlin.math.sin
 
 /**
  * Opt-in, disposable-emulator lane. Does not inherit or invoke the broad media instrumentation.
- * Target input comes exclusively from production dispatchGesture. UI automation operates setup
- * and consent controls only. No injection, fake window events or weakened production deadlines.
+ * Target input comes exclusively from production dispatchGesture. UI automation operates setup,
+ * own overlay editing and consent controls only. No target injection or weakened product deadlines.
  */
 class ClickRuntimeInstrumentation : Instrumentation() {
     private var arguments = Bundle()
@@ -72,6 +72,7 @@ class ClickRuntimeInstrumentation : Instrumentation() {
             report.put("status", "FAIL").put("failedStage", stage).put("reason", failure.toString())
                 .put("stack", failure.stackTraceToString())
             runCatching { write("failure-ui.txt", ui?.snapshotTree().orEmpty()) }
+            runCatching { if (ui != null) screenshot("failure-screen.png") }
         } finally {
             report.put("systemUiAnrWaitAttempted", ui?.systemUiAnrWaitAttempted == true)
                 .put("systemUiAnrWaitedOnce", ui?.systemUiAnrWaitedOnce == true)
@@ -118,13 +119,10 @@ class ClickRuntimeInstrumentation : Instrumentation() {
         report.put("probe", RuntimeCodecProbe.run(targetContext, File(output, "probe.mp4")))
         mark("production_oes_egl_codec_single_buffer_static_probe")
 
-        stage = "normal_accessibility_ui"; persist()
+        stage = "synthetic_target_geometry"; persist()
         runOnMainSync { ClickPlayback.initialize(targetContext) }
         ui = RuntimeSystemUi(this)
-        requireNotNull(ui).enableService()
-        mark("service_connected_through_settings_ui")
-
-        stage = "synthetic_target_and_plan"; persist()
+        val controls = requireNotNull(ui)
         val nonce = UUID.randomUUID().toString().also { fixtureNonce = it }
         targetContext.startActivity(Intent().setComponent(ComponentName(RuntimeSystemUi.TARGET_PACKAGE,
             "${RuntimeSystemUi.TARGET_PACKAGE}.TargetActivity"))
@@ -137,24 +135,72 @@ class ClickRuntimeInstrumentation : Instrumentation() {
         check(fixture.getString("ioError").isNullOrEmpty()) { "Synthetic target evidence IO failed" }
         val geometry = ClickDevice.geometry(targetContext)
         require(fixture.getInt("width") == geometry.width && fixture.getInt("height") == geometry.height)
-        val project = ProjectStore(targetContext).createProject("Synthetic runtime smoke")
-        projectId = project.project.id
-        val actions = listOf(
-            ClickAction(x = fixture.getInt("button1X"), y = fixture.getInt("button1Y"), waitAfterMs = 8_000),
-            ClickAction(x = fixture.getInt("button2X"), y = fixture.getInt("button2Y"), waitAfterMs = 4_000),
-            ClickAction(x = fixture.getInt("button1X"), y = fixture.getInt("button1Y"), waitAfterMs = 8_000),
-        )
-        val plan = ClickPlan.create(requireNotNull(projectId), RuntimeSystemUi.TARGET_PACKAGE, geometry.width,
-            geometry.height, geometry.rotation, actions)
-        ClickPlanStore(targetContext).savePlan(plan, null)
-        // Enter through the app so openEditor observes an actual app-to-target window transition.
-        // Re-launching a target that was already focused may legitimately emit no new window event.
+
+        stage = "homepage_target_and_service_setup"; persist()
         startActivitySync(Intent(targetContext, com.tapscene.MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         waitForIdleSync()
-        runOnMainSync { ClickPlayback.openEditor(targetContext, plan) }
+        controls.clickApp("悬浮编排")
+        screenshot("homepage-entry.png")
+        controls.clickApp("选择目标 App")
+        controls.searchSyntheticTarget()
+        controls.clickApp(RuntimeSystemUi.TARGET_PACKAGE)
+        check(ProjectStore(targetContext).listProjects().isEmpty()) { "Target selection created a project prematurely" }
+        screenshot("target-selected.png")
+        controls.clickApp("开启无障碍服务")
+        controls.enableService(openSettings = false)
+        mark("service_connected_through_settings_ui")
+        startActivitySync(Intent(targetContext, com.tapscene.MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        waitForIdleSync()
+        controls.clickApp("打开悬浮窗")
+        check(ProjectStore(targetContext).listProjects().isEmpty()) { "Opening notice created a project prematurely" }
+        controls.clickApp("确认并打开")
         await(10_000, "Production locator was not shown: ${ClickPlayback.state.value.message}") { ClickPlayback.state.value.overlayVisible }
-        delay(600) // Let actual overlay drawing establish its viewport, not a fake frame/guard.
-        val screenshot = checkNotNull(requireNotNull(ui).automation.takeScreenshot())
+        projectId = ProjectStore(targetContext).listProjects().single().id
+        val store = ClickPlanStore(targetContext)
+        val initial = requireNotNull(store.getPlan(requireNotNull(projectId)))
+        check(initial.targetPackage == RuntimeSystemUi.TARGET_PACKAGE && initial.actions.isEmpty())
+        await(5_000, "Target did not gain actual window focus under the overlay") { snapshot(nonce).getBoolean("focused") }
+        screenshot("overlay-empty.png")
+        mark("homepage_target_selection_and_confirmed_empty_overlay")
+
+        stage = "add_points_through_overlay_ui"; persist()
+        val positions = listOf(
+            fixture.getInt("button1X") to fixture.getInt("button1Y"),
+            fixture.getInt("button2X") to fixture.getInt("button2Y"),
+            fixture.getInt("button1X") to fixture.getInt("button1Y"),
+        )
+        for ((index, point) in positions.withIndex()) {
+            controls.clickOverlay("添加点位")
+            controls.tapPickingOverlay(point.first, point.second)
+            await(5_000, "Visible overlay tap did not save point ${index + 1}") {
+                store.getPlan(requireNotNull(projectId))?.actions?.size == index + 1
+            }
+            val added = requireNotNull(store.getPlan(requireNotNull(projectId))).actions.last()
+            check(added.x == point.first && added.y == point.second)
+        }
+        check(JSONArray(snapshot(nonce).getString("events")).length() == 0) { "Point placement leaked input to target" }
+        mark("three_points_added_by_real_overlay_taps_without_target_input")
+
+        stage = "drag_small_browse_control"; persist()
+        val placed = requireNotNull(store.getPlan(requireNotNull(projectId)))
+        controls.clickOverlay("浏览页面 · 暂藏点位")
+        screenshot("browse-control-before.png")
+        val (before, after) = controls.dragBrowseControl()
+        report.put("controlDrag", JSONObject().put("before", before.toShortString()).put("after", after.toShortString()))
+        screenshot("browse-control-after.png")
+        check(store.getPlan(requireNotNull(projectId))?.digest == placed.digest)
+        check(JSONArray(snapshot(nonce).getString("events")).length() == 0) { "Control drag leaked input to target" }
+        controls.clickOverlay("继续定位")
+        mark("small_control_drag_preserves_points_and_sends_no_target_input")
+
+        // Long waits are test parameters, not a claim of editing durations through the UI.
+        val actions = placed.actions.mapIndexed { index, point -> point.copy(waitAfterMs = listOf(8_000L, 4_000L, 8_000L)[index]) }
+        val plan = placed.copy(revision = placed.revision + 1, actions = actions)
+        store.savePlan(plan, placed.revision)
+        runOnMainSync { ClickPlayback.updatePlan(targetContext, plan) }
+        report.put("waitSetup", "Only waitAfterMs configured through the production store after all points were added through visible UI")
+        delay(600)
+        val screenshot = checkNotNull(controls.automation.takeScreenshot())
         try {
             File(output, "overlay-before.png").outputStream().use { check(screenshot.compress(Bitmap.CompressFormat.PNG, 100, it)) }
             val point = actions.first()
@@ -163,7 +209,7 @@ class ClickRuntimeInstrumentation : Instrumentation() {
         mark("visible_locator_pixels_at_configured_point")
 
         stage = "fresh_projection_consent_ui"; persist()
-        runOnMainSync { ClickPlayback.prepareConsent(targetContext) }
+        controls.clickOverlay("隐藏点位并准备播放")
         await(5_000, "Production locator did not detach before consent") { !ClickPlayback.state.value.overlayVisible }
         requireNotNull(ui).approveFreshCapture()
         mark("fresh_system_capture_consent_and_overlay_detachment")
@@ -207,6 +253,12 @@ class ClickRuntimeInstrumentation : Instrumentation() {
         stage = "validated_chain_anchors"; persist()
         verifyAnchors(run, source)
         mark("registered_source_real_container_ordinals_and_chain_route")
+    }
+
+    private fun screenshot(name: String) {
+        val bitmap = checkNotNull(requireNotNull(ui).automation.takeScreenshot())
+        try { File(output, name).outputStream().use { check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) } }
+        finally { bitmap.recycle() }
     }
 
     private fun verifyGestures(run: ClickRun, events: JSONArray) {

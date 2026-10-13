@@ -1,16 +1,15 @@
 name: Android runtime smoke
 
-on:
-  workflow_dispatch:
-  # Manual only: the software runner repeatedly hit system ANR/Watchdog limits.
-  # A packaging change must not restart this device experiment.
+on: create
+# There is no ref filter for create. The only job below fails closed to one
+# deliberately created branch, first attempt only. Ordinary creates are skipped.
 
 permissions:
   contents: read
 
 concurrency:
-  group: android-runtime-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: android-runtime-approved-20261013-1312
+  cancel-in-progress: false
 
 defaults:
   run:
@@ -18,6 +17,12 @@ defaults:
 
 jobs:
   smoke:
+    if: >-
+      github.repository == 'gluttonsama-cloud/TapScene' &&
+      github.event_name == 'create' && github.event.ref_type == 'branch' &&
+      github.event.ref == 'test/approved-kvm-once-20261013-1312' &&
+      github.ref == 'refs/heads/test/approved-kvm-once-20261013-1312' &&
+      github.run_attempt == '1'
     name: ci/android-runtime-smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 50
@@ -25,6 +30,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, same as ci/gate
         with:
           persist-credentials: false
+      - name: Verify disposable runner and simple KVM baseline before setup
+        run: bash tools/runtime-checks/kvm-access.sh preflight
       - name: Reuse the runner's JDK and SDK
         run: |
           mkdir -p "$RUNNER_TEMP/runtime-results"
@@ -33,6 +40,7 @@ jobs:
           echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
           echo "$JAVA_HOME_17_X64/bin" >> "$GITHUB_PATH"
           git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/runtime-results/revision.txt"
+          printf 'workflow_sha=%s\nrun_id=%s\nattempt=%s\n' "$GITHUB_WORKFLOW_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$RUNNER_TEMP/runtime-results/revision.txt"
       - uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
         with:
           gradle-version: '8.13'
@@ -59,6 +67,8 @@ jobs:
           # result is authoritative; bare ldd is retained only as diagnostic context.
           "$ANDROID_HOME/emulator/emulator" -version \
             2>&1 | tee "$RUNNER_TEMP/runtime-results/emulator-version.txt"
+      - name: Apply the one approved temporary runner-only ACL and require KVM
+        run: bash tools/runtime-checks/kvm-access.sh grant
       - name: Build only the x86_64 app, dedicated harness and synthetic target
         timeout-minutes: 15
         run: |
@@ -90,9 +100,12 @@ jobs:
             echo 'The dedicated platform Instrumentation must not load unused JUnit3 shared libraries' >&2
             exit 1
           fi
-      - name: Run one isolated software Android instance
+      - name: Run one isolated KVM-accelerated Android instance
         timeout-minutes: 25
         run: bash tools/runtime-checks/run.sh "$RUNNER_TEMP/runtime-results"
+      - name: Restore and verify the exact original KVM ACL
+        if: always()
+        run: bash tools/runtime-checks/kvm-access.sh restore
       - name: Keep the result and crash diagnostics even on failure
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
