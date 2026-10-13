@@ -6,6 +6,10 @@ import com.tapscene.data.HostFileSyncShadow
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
@@ -61,4 +65,43 @@ class ClickChainReviewStoreHostTest {
         check(pending.outputJobs.isNotEmpty())
         check(runCatching { store.outputFile(UUID.randomUUID().toString(),output) }.isFailure)
     }
+
+    @Test fun reviewedThumbnailRequiresExactOutputAndBoundsDecodeWithoutChangingReview() = runBlocking {
+        val store = ClickChainReviewStore(RuntimeEnvironment.getApplication())
+        val run = UUID.randomUUID().toString()
+        val initial = store.open(run, "a".repeat(64), 1)
+        val (working, folder) = store.beginOutput(initial)
+        check(folder.mkdir())
+        val file = File(folder, "candidate-${UUID.randomUUID()}.png")
+        val bitmap = Bitmap.createBitmap(1080, 1920, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLACK) }
+        FileOutputStream(file).use { check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) }
+        bitmap.recycle()
+        val bytes = file.readBytes()
+        val sha = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it.toInt() and 255) }
+        val output = store.output(working, file, sha, 1080, 1920)
+        val frame = ClickChainFrameDraft("$run:1", "b".repeat(64), "画面", output = output, reviewed = true)
+        val saved = store.save(working.copy(serial = working.serial + 1, frames = mapOf(frame.key to frame)))
+        val thumbnail = readClickChainThumbnail(store.outputFile(run, output), output)
+        check(thumbnail.width in 1..1080 && thumbnail.height in 1..1920)
+        check(thumbnail.width.toLong() * thumbnail.height <= 220_000)
+        check(thumbnail.getPixel(0, 0) == Color.BLACK)
+        thumbnail.recycle()
+        check(store.readExisting(run) == saved)
+        check(runCatching { readClickChainThumbnail(file, output.copy(sha256 = "0".repeat(64))) }.isFailure)
+        check(runCatching { readClickChainThumbnail(file, output.copy(width = 1081)) }.isFailure)
+        check(runCatching { readClickChainThumbnail(file, output.copy(width = Int.MAX_VALUE)) }.isFailure)
+        check(runCatching { readClickChainThumbnail(file, output.copy(height = 0)) }.isFailure)
+        file.writeBytes(bytes.copyOf(bytes.size / 2))
+        check(runCatching { readClickChainThumbnail(store.outputFile(run, output), output) }.isFailure)
+        file.writeBytes(bytes)
+        var cancelled = false
+        val job = launch {
+            cancel()
+            try { readClickChainThumbnail(file, output) }
+            catch (_: CancellationException) { cancelled = true }
+        }
+        job.join()
+        check(cancelled && file.readBytes().contentEquals(bytes) && store.readExisting(run) == saved)
+    }
+
 }
