@@ -406,6 +406,7 @@ jobs:
             --tests com.tapscene.ui.CopyWorkspaceHostTest \
             --tests com.tapscene.sharing.OfflineShareHostTest \
             --tests com.tapscene.ui.OfflineShareWorkspaceHostTest \
+            --tests com.tapscene.ui.shell.DeliveryProductPagesHostTest \
             --tests com.tapscene.ui.HostingWorkspaceHostTest \
             --tests com.tapscene.ocr.TextRegionPolicyTest \
             --tests com.tapscene.data.TextRegionDraftHostTest \
@@ -574,6 +575,10 @@ jobs:
               ("com.tapscene.sharing.OfflineShareHostTest", "exactReadOnlyUrisRejectTraversalTamperingAndExpiry"): 2,
               ("com.tapscene.sharing.OfflineShareHostTest", "cacheLimitsAndCancelledPreparationPreserveExistingSnapshots"): 2,
               ("com.tapscene.ui.OfflineShareWorkspaceHostTest", "chooserRequestIsConsumedOnceAndNeverRestoredAfterExit"): 1,
+              ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "noSelectionKeepsReviewAndOtherVersionAiReachableWithoutDeadExportButtons"): 1,
+              ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "selectedVersionDetailsAndBusyStatePreserveExportAndShareCallbacks"): 1,
+              ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "importedVersionCannotShareAndDeveloperHostingRetainsAllDestinations"): 1,
+              ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "settingsOnlyShowsRealStorageAndExpandableAccurateHelp"): 1,
           }
           actual = Counter()
           failures = errors = skipped = 0
