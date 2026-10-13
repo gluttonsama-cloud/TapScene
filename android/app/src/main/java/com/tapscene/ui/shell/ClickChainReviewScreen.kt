@@ -58,6 +58,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.input.KeyboardType
@@ -123,6 +124,7 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
     val editable = !state.busy && !state.loading && !state.editingLocked && state.createdProjectId == null && !state.outcomeUnknown
     val next = state.nextRequiredReview()
     val validation = state.validationIssue()
+    val largeText = LocalDensity.current.fontScale > 1.2f
     var settingsExpanded by rememberSaveable(state.runId) { mutableStateOf(false) }
     LaunchedEffect(validation) { if (validation != null) settingsExpanded = true }
     val listState = rememberLazyListState()
@@ -162,17 +164,22 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
                         }
                         validation?.let { ClickChainMessage(it) }
                     }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(!state.framesOnly, { callbacks.onFramesOnly(false) }, modifier = Modifier.weight(1f),
-                            label = { Text("按点击链") }, enabled = editable)
-                        FilterChip(state.framesOnly, { callbacks.onFramesOnly(true) }, modifier = Modifier.weight(1f),
-                            label = { Text("仅加入画面") }, enabled = editable)
+                    val modeChip: @Composable (Boolean, Modifier) -> Unit = { framesOnly, modifier ->
+                        FilterChip(state.framesOnly == framesOnly, { callbacks.onFramesOnly(framesOnly) }, modifier = modifier,
+                            label = { Text(if (framesOnly) "仅加入画面" else "按点击链") }, enabled = editable)
+                    }
+                    if (largeText) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        modeChip(false, Modifier.fillMaxWidth())
+                        modeChip(true, Modifier.fillMaxWidth())
+                    } else Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        modeChip(false, Modifier.weight(1f))
+                        modeChip(true, Modifier.weight(1f))
                     }
                     state.issue?.takeIf { it != validation }?.let { ClickChainMessage(it) }
                     state.message?.takeIf { it != state.issue && it != validation }?.let { ClickChainMessage(it) }
                     when {
                         state.issue?.startsWith("输入尚未保存") == true -> ClickChainSaveRetry(state, callbacks)
-                        !state.loading && !state.busy && !state.editingLocked && !state.outcomeUnknown && state.createdProjectId == null &&
+                        validation == null && !state.loading && !state.busy && !state.editingLocked && !state.outcomeUnknown && state.createdProjectId == null &&
                             state.stages.isEmpty() && state.actions.isEmpty() && state.frames.isEmpty() &&
                             (state.issue != null || state.message != null) -> TextButton(callbacks.onRetry) { Text("重新读取") }
                     }

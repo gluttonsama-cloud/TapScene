@@ -4,12 +4,10 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
 import android.content.pm.ResolveInfo
-import android.graphics.Bitmap
 import android.provider.Settings
 import android.view.inspector.WindowInspector
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
-import androidx.test.platform.app.InstrumentationRegistry
 import com.tapscene.MainActivity
 import com.tapscene.clickplan.ClickPlayback
 import com.tapscene.clickplan.ClickAccessibilityService
@@ -25,7 +23,6 @@ import com.tapscene.clickplan.ClickPlan
 import androidx.lifecycle.ViewModelProvider
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
-import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
@@ -51,6 +48,7 @@ import org.robolectric.annotation.SQLiteMode
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class ClickEntryNavigationHostTest {
+    private var previousRequestedSize: String? = null
     @get:Rule(order = 0) val database = object : ExternalResource() {
         override fun before() {
             HostSqlite.configure()
@@ -64,6 +62,9 @@ class ClickEntryNavigationHostTest {
                 check(child.deleteRecursively())
             }
             HostFileSyncShadow.begin(app.noBackupFilesDir)
+            // Pinned Robolectric defaults ignore WRAP_CONTENT size/gravity. Honor measured window
+            // size instead of changing production picker content or weakening idle assertions.
+            previousRequestedSize = System.setProperty("robolectric.windowManager.useRequestedSize", "true")
             val target = ResolveInfo().apply {
                 nonLocalizedLabel = "演示样例 App"
                 activityInfo = ActivityInfo().apply {
@@ -76,10 +77,15 @@ class ClickEntryNavigationHostTest {
             shadowOf(app.packageManager).addResolveInfoForIntent(
                 Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), target)
         }
-        override fun after() { HostFileSyncShadow.reset() }
+        override fun after() {
+            try { HostFileSyncShadow.reset() } finally {
+                val key = "robolectric.windowManager.useRequestedSize"
+                previousRequestedSize?.let { System.setProperty(key, it) } ?: System.clearProperty(key)
+            }
+        }
     }
     @get:Rule(order = 1) val compose = createAndroidComposeRule<MainActivity>()
-    @get:Rule(order = 2) val failureCapture = object : TestWatcher() {
+    @get:Rule(order = 2) val failureDiagnostics = object : TestWatcher() {
         override fun failed(error: Throwable, description: Description) {
             runCatching {
                 compose.runOnUiThread {
@@ -88,7 +94,6 @@ class ClickEntryNavigationHostTest {
                             "attached=${root.isAttachedToWindow} layoutRequested=${root.isLayoutRequested} focus=${root.hasWindowFocus()}")
                     }
                 }
-                capture("failure-${description.methodName}", awaitIdle = false)
             }.onFailure { error.addSuppressed(it) }
         }
     }
@@ -105,7 +110,6 @@ class ClickEntryNavigationHostTest {
         val app = RuntimeEnvironment.getApplication()
         check(ProjectStore(app).listProjects().isEmpty())
         assertNull(shadowOf(compose.activity).nextStartedActivity)
-        capture("02-plan-first-use")
 
         val activeService = Robolectric.buildService(ClickAccessibilityService::class.java).create().get()
         compose.runOnIdle {
@@ -123,7 +127,6 @@ class ClickEntryNavigationHostTest {
         compose.onNodeWithText("选择目标 App").assertIsDisplayed().performClick()
         compose.onNodeWithText("演示样例 App").performClick()
         compose.onNodeWithText("开启无障碍服务").assertIsEnabled().assertIsDisplayed()
-        capture("03-plan-service-needed")
         compose.onNodeWithText("开启无障碍服务").performClick()
         assertEquals(Settings.ACTION_ACCESSIBILITY_SETTINGS, shadowOf(compose.activity).nextStartedActivity.action)
         assertNull(shadowOf(compose.activity).nextStartedActivity)
@@ -167,9 +170,21 @@ class ClickEntryNavigationHostTest {
             // A saved auto-open token would otherwise silently save/open after releasing the load.
             compose.runOnIdle { compose.activity.viewModelStore.clear() }
             compose.activityRule.scenario.recreate()
+            compose.waitForIdle() // Attach the new Compose root before polling its restoration effect.
             val fresh = ViewModelProvider(compose.activity)[ProjectWorkspace::class.java]
             check(fresh !== workspace)
-            compose.waitUntil(30_000) { fresh.state.value.project?.project?.id == ProjectStore(app).listProjects().single().id }
+            try {
+                compose.waitUntil(30_000) {
+                    // IO restoration posts back to Android's paused main looper, not the test clock.
+                    compose.waitForIdle()
+                    fresh.state.value.project?.project?.id == ProjectStore(app).listProjects().single().id
+                }
+            } catch (failure: Throwable) {
+                println("HOST_RESTORE busy=${fresh.state.value.busy} stage=${fresh.state.value.stage} " +
+                    "project=${fresh.state.value.project?.project?.id} message=${fresh.state.value.message}")
+                println(compose.onRoot().printToString(maxDepth = 5))
+                throw failure
+            }
             waitFor("保存计划")
         } finally { release.countDown(); holder.join(10_000) }
         val created = ProjectStore(app).listProjects().single()
@@ -193,13 +208,11 @@ class ClickEntryNavigationHostTest {
         compose.onNodeWithContentDescription("返回").performClick()
         compose.onNodeWithContentDescription("返回").performClick()
         waitFor("其他创建方式")
-        capture("01-home-recent-project")
         compose.onNodeWithText("其他创建方式").performClick()
         compose.onNodeWithText("手动录屏").assertIsDisplayed()
         compose.onNodeWithText("导入录屏").assertIsDisplayed()
         compose.onNodeWithText("导入截图").assertIsDisplayed()
         compose.onNodeWithText("导入 AI 包").assertIsDisplayed()
-        capture("04-other-create-options")
         compose.onNodeWithText("手动录屏").performClick()
         compose.onNodeWithText("录制操作").assertIsDisplayed()
         assertNull(shadowOf(compose.activity).nextStartedActivity)
@@ -209,7 +222,6 @@ class ClickEntryNavigationHostTest {
     @Test @Config(sdk = [32]) fun unsupportedSystemShowsTheReasonAndDoesNotAskForService() {
         waitFor("悬浮编排")
         check(ProjectStore(RuntimeEnvironment.getApplication()).listProjects().isEmpty())
-        capture("05-home-empty")
         compose.onNodeWithText("悬浮编排").performClick()
         waitFor("改用手动录屏")
         compose.onNodeWithText("改用手动录屏").assertIsEnabled().assertIsDisplayed()
@@ -219,7 +231,6 @@ class ClickEntryNavigationHostTest {
         compose.onNodeWithText("开启无障碍服务").assertDoesNotExist()
         compose.onNodeWithText("打开系统无障碍设置").assertDoesNotExist()
         assertNull(shadowOf(compose.activity).nextStartedActivity)
-        capture("06-plan-unsupported")
         check(ProjectStore(RuntimeEnvironment.getApplication()).listProjects().isEmpty())
         compose.onNodeWithText("改用手动录屏").performClick()
         compose.onNodeWithText("录制操作").assertIsDisplayed()
@@ -273,33 +284,4 @@ class ClickEntryNavigationHostTest {
             compose.activity.noBackupFilesDir.canonicalFile)
     }
 
-    private fun capture(name: String, awaitIdle: Boolean = true) {
-        val output = System.getenv("TAPSCENE_UI_OUTPUT") ?: return
-        if (awaitIdle) compose.waitForIdle()
-        // Robolectric's native UiAutomation capture renders all attached windows, including sheets.
-        // Compose captureToImage waits for an OS redraw callback that this host does not dispatch.
-        // Use a separate capture renderer: borrowing the live root renderer replaces its surface
-        // and can prevent later dialog/layout work from becoming idle after that surface is released.
-        val property = "robolectric.useEmbeddedViewRoot"
-        val previous = System.setProperty(property, "false")
-        val bitmap = try {
-            checkNotNull(InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot())
-        } finally {
-            if (previous == null) System.clearProperty(property) else System.setProperty(property, previous)
-        }
-        try {
-            check(bitmap.width >= 320 && bitmap.height >= 640)
-            val colors = mutableSetOf<Int>()
-            for (y in 0 until bitmap.height step (bitmap.height / 64).coerceAtLeast(1)) {
-                for (x in 0 until bitmap.width step (bitmap.width / 64).coerceAtLeast(1)) {
-                    colors += bitmap.getPixel(x, y)
-                }
-            }
-            check(colors.size > 8) { "Host capture is blank: $name" }
-            val file = File(output, "$name.png").apply { checkNotNull(parentFile).mkdirs() }
-            file.outputStream().use { stream -> check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)) }
-        } finally {
-            bitmap.recycle()
-        }
-    }
 }

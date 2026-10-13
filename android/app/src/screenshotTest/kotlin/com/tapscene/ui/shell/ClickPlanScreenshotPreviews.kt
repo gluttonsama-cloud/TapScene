@@ -10,6 +10,36 @@ import com.android.tools.screenshot.PreviewTest
 
 /** Synthetic plan data only; previews never connect a service, query installed apps or dispatch taps. */
 @PreviewTest
+@Preview(name = "click_plan_first_use", widthDp = 360, heightDp = 800, locale = "zh-rCN", showBackground = true)
+@Composable
+fun ClickPlanFirstUsePreview() {
+    ClickPlanPreviewSurface {
+        ClickPlanContent(ClickPlanUiState(saveVisible = false), ClickPlanCallbacks())
+    }
+}
+
+@PreviewTest
+@Preview(name = "click_plan_service_needed_small", widthDp = 320, heightDp = 740, locale = "zh-rCN", fontScale = 1.2f, showBackground = true)
+@Composable
+fun ClickPlanServiceNeededSmallPreview() {
+    ClickPlanPreviewSurface {
+        ClickPlanContent(ClickPlanUiState(
+            targetLabel = "演示样例 App", targetPackage = "com.example.demo",
+            width = 1080, height = 2400, saveVisible = false,
+        ), ClickPlanCallbacks())
+    }
+}
+
+@PreviewTest
+@Preview(name = "click_plan_unsupported_first_use", widthDp = 360, heightDp = 800, locale = "zh-rCN", showBackground = true)
+@Composable
+fun ClickPlanUnsupportedFirstUsePreview() {
+    ClickPlanPreviewSurface {
+        ClickPlanContent(ClickPlanUiState(saveVisible = false, overlaySupported = false), ClickPlanCallbacks())
+    }
+}
+
+@PreviewTest
 @Preview(name = "click_plan_populated_small", widthDp = 320, heightDp = 740, locale = "zh-rCN", showBackground = true)
 @Composable
 fun ClickPlanPopulatedSmallPreview() {
