@@ -226,6 +226,36 @@ jobs:
             ${{ runner.temp }}/ai-fixtures/synthetic-video.tapscene-ai
           retention-days: 7
           if-no-files-found: error
+      - name: Check the production overlay entry and interrupted navigation on the host
+        if: steps.scope.outputs.android == 'true'
+        env:
+          TAPSCENE_UI_OUTPUT: ${{ runner.temp }}/overlay-entry-host-ui
+        run: |
+          gradle -p android --no-daemon --max-workers=2 :app:testPreviewUnitTest \
+            --tests com.tapscene.ui.shell.ClickEntryNavigationHostTest \
+            --tests com.tapscene.ui.shell.ClickPlanEntryPolicyTest \
+            --tests com.tapscene.clickplan.ClickEditorLaunchTest
+          python3 - <<'PY_ENTRY'
+          from pathlib import Path
+          import os
+          import xml.etree.ElementTree as ET
+          cases = [case for path in Path("android/app/build/test-results/testPreviewUnitTest").glob("TEST-*.xml")
+                   for case in ET.parse(path).getroot().iter("testcase")]
+          assert len(cases) == 5, f"Expected five entry checks: {len(cases)}"
+          assert all(not any(case.find(kind) is not None for kind in ("failure", "error", "skipped")) for case in cases)
+          assert len(list(Path(os.environ["TAPSCENE_UI_OUTPUT"]).glob("*.png"))) == 6
+          print("OVERLAY_ENTRY_HOST_CHECKS_OK: production navigation only; Android overlay/playback/recording NOT_RUN")
+          PY_ENTRY
+      - name: Keep production entry navigation evidence
+        if: always() && steps.scope.outputs.android == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tapscene-overlay-entry-host-ui
+          path: |
+            ${{ runner.temp }}/overlay-entry-host-ui/
+            android/app/build/test-results/testPreviewUnitTest/
+          retention-days: 7
+          if-no-files-found: warn
       - name: Build the arm64 phone preview and run lint
         if: steps.scope.outputs.android == 'true'
         run: gradle -p android --no-daemon --max-workers=2 -PcompatibilityPreview=true -PtapsceneAbi=arm64-v8a :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
@@ -266,36 +296,6 @@ jobs:
           assert all(not any(case.find(kind) is not None for kind in ("failure", "error", "skipped")) for case in cases)
           print("PREVIEW_HOST_CHECKS_OK: actual preview identity and read-only URI boundaries; device co-install NOT_RUN")
           PY_PREVIEW
-      - name: Check the production overlay entry and interrupted navigation on the host
-        if: steps.scope.outputs.android == 'true'
-        env:
-          TAPSCENE_UI_OUTPUT: ${{ runner.temp }}/overlay-entry-host-ui
-        run: |
-          gradle -p android --no-daemon --max-workers=2 :app:testPreviewUnitTest \
-            --tests com.tapscene.ui.shell.ClickEntryNavigationHostTest \
-            --tests com.tapscene.ui.shell.ClickPlanEntryPolicyTest \
-            --tests com.tapscene.clickplan.ClickEditorLaunchTest
-          python3 - <<'PY_ENTRY'
-          from pathlib import Path
-          import os
-          import xml.etree.ElementTree as ET
-          cases = [case for path in Path("android/app/build/test-results/testPreviewUnitTest").glob("TEST-*.xml")
-                   for case in ET.parse(path).getroot().iter("testcase")]
-          assert len(cases) == 5, f"Expected five entry checks: {len(cases)}"
-          assert all(not any(case.find(kind) is not None for kind in ("failure", "error", "skipped")) for case in cases)
-          assert len(list(Path(os.environ["TAPSCENE_UI_OUTPUT"]).glob("*.png"))) == 6
-          print("OVERLAY_ENTRY_HOST_CHECKS_OK: production navigation only; Android overlay/playback/recording NOT_RUN")
-          PY_ENTRY
-      - name: Keep production entry navigation evidence
-        if: always() && steps.scope.outputs.android == 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: tapscene-overlay-entry-host-ui
-          path: |
-            ${{ runner.temp }}/overlay-entry-host-ui/
-            android/app/build/test-results/testPreviewUnitTest/
-          retention-days: 7
-          if-no-files-found: warn
       - name: Keep the unsigned co-installable phone product
         if: success() && steps.scope.outputs.android == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
