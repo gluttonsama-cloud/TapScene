@@ -25,7 +25,7 @@ fun DeliveryLocalHostingAvailablePreview() = AvailabilityPreviewSurface {
 }
 
 @PreviewTest
-@Preview(name = "settings_supported_formats", widthDp = 360, heightDp = 1050, locale = "zh-rCN", fontScale = 1.2f, showBackground = true)
+@Preview(name = "settings_supported_formats", widthDp = 320, heightDp = 1050, locale = "zh-rCN", fontScale = 1.2f, showBackground = true)
 @Composable
 fun SettingsSupportedFormatsPreview() = AvailabilityPreviewSurface {
     SettingsStorageScreen(2, 42_000_000L, {}, {}, {}, {}, hostingAvailable = false,

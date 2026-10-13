@@ -6,9 +6,9 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.ResolveInfo
 import android.graphics.Bitmap
 import android.provider.Settings
-import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.test.platform.app.InstrumentationRegistry
 import com.tapscene.MainActivity
 import com.tapscene.clickplan.ClickPlayback
 import com.tapscene.clickplan.ClickAccessibilityService
@@ -118,7 +118,7 @@ class ClickEntryNavigationHostTest {
         compose.onNodeWithText("打开悬浮窗").performClick()
         val workspace = ViewModelProvider(compose.activity)[ProjectWorkspace::class.java]
         val operation = ProjectWorkspace::class.java.getDeclaredField("operationLock").apply { isAccessible = true }.get(workspace) as Mutex
-        val storeLock = ClickPlanStore::class.java.getDeclaredField("lock").apply { isAccessible = true }.get(null)
+        val storeLock = checkNotNull(ClickPlanStore::class.java.getDeclaredField("lock").apply { isAccessible = true }.get(null))
         val held = CountDownLatch(1)
         val release = CountDownLatch(1)
         val holder = Thread {
@@ -242,9 +242,23 @@ class ClickEntryNavigationHostTest {
 
     private fun capture(name: String) {
         val output = System.getenv("TAPSCENE_UI_OUTPUT") ?: return
-        val file = File(output, "$name.png").apply { parentFile.mkdirs() }
-        file.outputStream().use { stream ->
-            check(compose.onAllNodes(isRoot())[compose.onAllNodes(isRoot()).fetchSemanticsNodes().lastIndex].captureToImage().asAndroidBitmap().compress(Bitmap.CompressFormat.PNG, 100, stream))
+        compose.waitForIdle()
+        // Robolectric's native UiAutomation capture renders all attached windows, including sheets.
+        // Compose captureToImage waits for an OS redraw callback that this host does not dispatch.
+        val bitmap = checkNotNull(InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot())
+        try {
+            check(bitmap.width >= 320 && bitmap.height >= 640)
+            val colors = mutableSetOf<Int>()
+            for (y in 0 until bitmap.height step (bitmap.height / 64).coerceAtLeast(1)) {
+                for (x in 0 until bitmap.width step (bitmap.width / 64).coerceAtLeast(1)) {
+                    colors += bitmap.getPixel(x, y)
+                }
+            }
+            check(colors.size > 8) { "Host capture is blank: $name" }
+            val file = File(output, "$name.png").apply { checkNotNull(parentFile).mkdirs() }
+            file.outputStream().use { stream -> check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)) }
+        } finally {
+            bitmap.recycle()
         }
     }
 }
