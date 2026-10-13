@@ -9,6 +9,9 @@ REQUIRED_ASSERTIONS = [
     "isolated_synthetic_preflight",
     "production_oes_egl_codec_single_buffer_static_probe",
     "service_connected_through_settings_ui",
+    "homepage_target_selection_and_confirmed_empty_overlay",
+    "three_points_added_by_real_overlay_taps_without_target_input",
+    "small_control_drag_preserves_points_and_sends_no_target_input",
     "visible_locator_pixels_at_configured_point",
     "fresh_system_capture_consent_and_overlay_detachment",
     "actual_target_down_up_coordinates_order_and_waits",
@@ -34,7 +37,7 @@ def check(path):
             total += member.size
         if total > 200 * 1024 * 1024:
             raise ValueError("Evidence exceeds this small run's bound")
-        for filename in ("result.json", "probe.mp4", "capture.mp4", "events.json", "chain.json", "anchors.json", "overlay-before.png"):
+        for filename in ("result.json", "probe.mp4", "capture.mp4", "events.json", "chain.json", "anchors.json", "overlay-before.png", "homepage-entry.png", "target-selected.png", "overlay-empty.png", "browse-control-before.png", "browse-control-after.png"):
             member = archive.getmember("files/runtime-smoke/" + filename)
             if not member.isfile() or member.size <= 0:
                 raise ValueError("Missing real-run artifact: " + filename)

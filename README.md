@@ -11,7 +11,7 @@
 - 验证基线：Android 8.0 / API 26 起；compile / target API 36；JDK 17、Gradle 8.13、AGP 8.13.2、Kotlin 2.2.21、Media3 1.9.4。正式兼容设备范围待实测。
 - 已装上述工具和已接受许可的 Android SDK 时，运行 `gradle -p android :app:assembleDebug :app:lintDebug`；APK 在 `android/app/build/outputs/apk/debug/`。当前未附 Gradle Wrapper 二进制。
 - `ci/gate` 核对合成 AVC/HEVC 素材与项目 SQLite 约束、离线包安全反例及共用播放器状态机、构建 APK、运行 Android lint 与权限检查；有可用硬件加速时才运行模拟器媒体冒烟，否则明确记录 `NOT_RUN`。构建通过不代表设备检查通过；成功产物保留 7 天。
-- 独立[云端 Android 运行入口](tools/runtime-checks/README.md) 在固定 API35 软件模拟器中检查合成目标的真实点击、录屏和静态等待时长，专用 harness 不执行旧全量媒体 suite。实际结果以独立 `ci/android-runtime-smoke` 的精确提交和产物为准；不代表实体手机验收，产品版本仍为 31。
+- 独立[云端 Android 运行入口](tools/runtime-checks/README.md) 在固定 API35 硬件加速模拟器中检查合成目标的真实点击、录屏和静态等待时长，专用 harness 不执行旧全量媒体 suite。实际结果以独立 `ci/android-runtime-smoke` 的精确提交和产物为准；不代表实体手机验收，本轮使用版本 32 源码。
 - 新的 `preview` 手机变体为 `com.tapscene.preview`（名称“点演测试版”，产品 versionCode 32），使用与 `debug` 相同的离线生产源码、arm64 OCR 和视频能力，CI 只产未签名 APK；维护者本地用本次批准的新证书签名。构建 `gradle -p android :app:assemblePreview :app:lintPreview`；不使用 runtimeSmoke 包替代。它与正式 `com.tapscene`、旧 `com.tapscene.preview.hevc` 以及本机托管开发版并存，不自动读取、迁移或清除旧数据。安装/手机完整流程仍须单独验证。
 - 历史 `-PcompatibilityPreview=true` 调试变体仍保留 `com.tapscene.preview.hevc`；其旧专用私钥已在环境重建后丢失，不能用新证书覆盖。新旧签名边界及[本地签名说明](tools/signing/README.md)分别记录；新私钥也仅存当前临时开发环境，尚无经核实的持久安全备份。
 - 当前路径：录制或导入 → 整理候选 → 批量选择 → 同页调帧/按需遮挡/确认实际输出并下一张 → 步骤标题、说明与热点 → 本机点击预览。候选最多 30 个，实际采样最多 361 次，可能遗漏短暂变化；帧时间为毫秒精度。选择候选不等于隐私复核，只有真实生成并确认的派生 PNG 进入步骤。无敏感信息可不加遮挡。

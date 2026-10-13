@@ -14,10 +14,14 @@ export ANDROID_SDK_HOME="$HOME"
 export ANDROID_EMULATOR_HOME="$ANDROID_USER_HOME"
 export ANDROID_AVD_HOME="$RUNNER_TEMP/tapscene-runtime-avd"
 export ADB="$ANDROID_HOME/platform-tools/adb"
-export ANDROID_I_WANT_MY_TCG=yes
+unset ANDROID_I_WANT_MY_TCG
+lease="$RUNNER_TEMP/tapscene-kvm-lease"
+test -f "$lease/grant-attempted"
+test -r /dev/kvm && test -w /dev/kvm
 serial=emulator-5554
 app=com.tapscene.preview.hevc
 emulator_pid=
+emulator_pgid=
 logcat_pid=
 device_owned=false
 adb_owned=false
@@ -54,11 +58,27 @@ collect_and_destroy() {
     timeout 10 "$ADB" -s "$serial" emu kill >> "$out/cleanup.txt" 2>&1
   fi
   if [[ -n "$logcat_pid" ]]; then kill "$logcat_pid" 2>/dev/null; wait "$logcat_pid" 2>/dev/null; fi
-  if [[ -n "$emulator_pid" ]]; then
-    kill "$emulator_pid" 2>/dev/null
-    for _ in {1..10}; do kill -0 "$emulator_pid" 2>/dev/null || break; sleep 1; done
-    kill -KILL "$emulator_pid" 2>/dev/null
-    wait "$emulator_pid" 2>/dev/null
+  # A launcher exit alone does not prove QEMU released /dev/kvm. Stop the isolated
+  # session/group, including descendants, before reporting that the emulator stopped.
+  if [[ -z "$emulator_pgid" && -f "$lease/emulator-pgid" ]]; then
+    emulator_pgid=$(cat "$lease/emulator-pgid")
+  fi
+  if [[ "$emulator_pgid" =~ ^[0-9]+$ ]] && ((emulator_pgid > 1)); then
+    kill -TERM -- "-$emulator_pgid" 2>/dev/null
+    for _ in {1..10}; do kill -0 -- "-$emulator_pgid" 2>/dev/null || break; sleep 1; done
+    kill -KILL -- "-$emulator_pgid" 2>/dev/null
+    if [[ -n "$emulator_pid" ]]; then wait "$emulator_pid" 2>/dev/null; fi
+    for _ in {1..5}; do kill -0 -- "-$emulator_pgid" 2>/dev/null || break; sleep 1; done
+    if ! kill -0 -- "-$emulator_pgid" 2>/dev/null; then
+      : > "$lease/emulator-stopped"
+      echo "Owned emulator process group stopped" >> "$out/cleanup.txt"
+    else
+      echo "cleanup_failed: emulator process group termination unconfirmed" >> "$out/cleanup.txt"
+      original=1
+    fi
+  elif [[ -f "$lease/emulator-started" ]]; then
+    echo "cleanup_failed: emulator group identity unavailable; VM teardown required" >> "$out/cleanup.txt"
+    original=1
   fi
   if "$adb_owned"; then timeout 10 "$ADB" kill-server >> "$out/cleanup.txt" 2>&1; fi
   # These fixed RUNNER_TEMP paths were created solely for this disposable run.
@@ -91,7 +111,10 @@ trap 'exit 143' TERM
   "$ANDROID_HOME/emulator/emulator" -version
   "$ADB" version
 } > "$out/host.txt" 2>&1
-# No KVM chmod/group/udev changes, emulator setup action, account, or new grant.
+# ACL preflight and the one approved temporary grant run before the build.
+# Do not boot unless this exact emulator confirms hardware acceleration again.
+bounded 15 "$ANDROID_HOME/emulator/emulator" -accel-check > "$out/accel-check-before-boot.txt" 2>&1
+grep -Eq 'KVM .*installed and usable|KVM .*is installed and usable' "$out/accel-check-before-boot.txt"
 echo no | bounded 60 "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd --force \
   --name tapscene-runtime --path "$ANDROID_AVD_HOME/tapscene-runtime.avd" \
   --package 'system-images;android-35;default;x86_64' > "$out/avd-create.txt" 2>&1
@@ -111,11 +134,23 @@ if awk 'NR > 1 && NF { found=1 } END { exit !found }' "$out/devices-before.txt";
   exit 1
 fi
 adb_owned=true
-"$ANDROID_HOME/emulator/emulator" -avd tapscene-runtime -port 5554 \
+# The marker precedes spawn so interrupted startup can never claim no emulator existed.
+: > "$lease/emulator-started"
+export TAPSCENE_KVM_LEASE="$lease"
+setsid bash -c '
+  set -e
+  test "$(ps -o pgid= -p $$ | tr -d " ")" = "$$"
+  test "$(ps -o sid= -p $$ | tr -d " ")" = "$$"
+  printf "%s\n" "$$" > "$TAPSCENE_KVM_LEASE/emulator-pgid"
+  exec "$@"
+' tapscene-owned-emulator "$ANDROID_HOME/emulator/emulator" -avd tapscene-runtime -port 5554 \
   -no-window -no-audio -no-boot-anim -no-snapshot -wipe-data -skin 480x800 \
-  -gpu swiftshader -accel off -cores 2 -memory 2560 \
+  -gpu swiftshader -accel on -cores 2 -memory 2560 \
   > "$out/emulator.txt" 2>&1 &
 emulator_pid=$!
+bounded 10 bash -c 'until test -s "$TAPSCENE_KVM_LEASE/emulator-pgid"; do sleep 0.1; done'
+emulator_pgid=$(cat "$lease/emulator-pgid")
+test "$emulator_pgid" = "$emulator_pid"
 export EMULATOR_PID="$emulator_pid"
 printf '%s boot: waiting for sys.boot_completed\n' "$(date -u +%FT%TZ)" >> "$out/runtime-stages.txt"
 bounded 900 bash -c '

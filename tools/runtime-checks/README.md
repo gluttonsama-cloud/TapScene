@@ -1,16 +1,26 @@
 # 有限云端 Android 运行检查
 
-本入口只在一次性 GitHub `ubuntu-24.04` runner 的合成 Android 设备运行。它执行真实 Android OS、生产无障碍点击与 MediaProjection/EGL/MediaCodec 管线；不是实体手机、OEM 或性能验收。应用仍为开发版本 31，产品代码、权限和超时不因测试修改。
+本入口只在一次性 GitHub `ubuntu-24.04` runner 的合成 Android 设备运行。它执行真实 Android OS、生产无障碍点击与 MediaProjection/EGL/MediaCodec 管线；不是实体手机、OEM 或性能验收。本轮使用 PR35 的版本 32 生产源码，产品代码、权限和超时不因测试修改。
 
-本 lane 现仅保留 `workflow_dispatch` 手动入口，不随 PR 自动运行。多轮系统 ANR/Watchdog 已阻挡完整场景；两次生产静态探针的局部通过不能证明三点击、隐藏定位点或长链通过。本次并存包制作不重跑软件模拟器。
+本轮只有一次经批准的硬件加速检查。维护者审核精确提交后，仅创建 `test/approved-kvm-once-20261013-1312` 分支一次作为手动触发。workflow 只接收 `create`，唯一 job 同时核对仓库、事件、branch 类型、精确 ref 和首次 attempt；其他 ref 创建只跳过 job，分支更新和 PR 不触发。不得删除后重建该分支或重新运行；后续权限变更检查须另行授权。它不是发布分支，不生成 release，也不合并任何 PR。
 
-## 为什么保留软件模拟路线
+旧软件模拟多轮系统 ANR/Watchdog 已阻挡完整场景；两次生产静态探针的局部通过不能证明三点击、隐藏定位点或长链通过。本轮禁用软件回退。只有新的完整 runtime 产物可以证明本轮通过。
+
+## 本次 KVM 权限边界
+
+- 在 setup、构建或启动 AVD 前检查官方 GitHub-hosted Ubuntu24 身份、镜像版本格式、已有 getfacl/setfacl、真实非符号链接的 `/dev/kvm` 字符设备。只接受 `root:kvm`、0660 和无命名用户/组、无额外 mask 的简单 rw/rw/none ACL，异常立即停止。
+- `getfacl -p /dev/kvm` 原样保存在 RUNNER_TEMP 的 0700 私有目录/0600 文件，记录设备 inode 身份。只增加当前 runner UID 的 rw ACL：`sudo setfacl -m "u:$(id -u):rw" /dev/kvm`。不 chmod 666、不改组/udev/持久权限、不用 root 启动模拟器。
+- 在构建前要求官方 emulator 的 `-accel-check` 成功且明确 KVM usable；启动前复核，使用 `-accel on`，移除 TCG 环境变量。没有软件回退、矩阵或重试。
+- runtime 退出先停止自己启动的 emulator，再由 workflow 的 always 清理步骤执行 `setfacl --restore` 并逐字核对原 ACL。未确认停止、恢复失败/无法核对均显式失败；整机强制终止时只可说明依赖一次性 VM 销毁，不能声称已恢复。
+- 该目录不进入 artifact；只上传通过/失败的最小诊断。新 SDK 许可仍不能自动接受。
+
+## 旧软件模拟路线与本轮变更依据
 
 仓库此前 [CI #16](https://github.com/gluttonsama-cloud/TapScene/actions/runs/37909197077) 使用 `-accel off`、Emulator 37.2.12 / build 16428233 和 `x86_64-35_r02.zip`，日志明确记录 `Boot completed in 410981 ms`；两个 APK 安装成功，随后旧全量 instrumentation 进程崩溃。该次没有保留 logcat，不能把崩溃归因于 KVM，也不能把它当作点击/录屏验证通过。
 
-本入口复用该 API 35 `default;x86_64` 系统镜像和模拟器。`sdk-lock.py` 先检查 Google 官方 stable feed 中的版本、文件大小和 SHA-1，版本变化时失败，安装后再检查 `source.properties`。不升级到新镜像，不改 `/dev/kvm`、SELinux、主机权限或网络安全设置。
+本入口复用该 API 35 `default;x86_64` 系统镜像和模拟器。`sdk-lock.py` 先检查 Google 官方 stable feed 中的版本、文件大小和 SHA-1，版本变化时失败，安装后再检查 `source.properties`。不升级到新镜像；本轮唯一主机权限变更为上述经批准、结束后恢复的 runner UID KVM ACL。不改 SELinux 或其他主机/网络设置。
 
-官方将 [CPU 软件模拟](https://developer.android.com/studio/run/emulator-commandline) 标为 unsupported / very slow；使用其要求的 `ANDROID_I_WANT_MY_TCG=yes`。图形用同一官方模拟器内的 SwiftShader。一次成功仅证明该固定云端组合，不外推实体机兼容。
+官方将 [CPU 软件模拟](https://developer.android.com/studio/run/emulator-commandline) 标为 unsupported / very slow；旧 lane 使用其要求的 `ANDROID_I_WANT_MY_TCG=yes`；本轮明确移除。图形用同一官方模拟器内的 SwiftShader。一次成功仅证明该固定云端组合，不外推实体机兼容。
 
 ## 已有 SDK 与许可
 
@@ -20,19 +30,19 @@
 
 ## 入口与边界
 
-- `.github/workflows/android-runtime.yml` 是独立非部署 workflow：相关录制/点击/测试路径的 PR 变更触发，也定义 `workflow_dispatch`。新 workflow 的手动入口受 GitHub [默认分支要求](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch) 限制，不能假设未进入默认分支便有 UI 按钮。
+- `.github/workflows/android-runtime.yml` 是独立非部署 workflow。当前连接器没有 dispatch 能力；本轮使用 GitHub 官方 [create 事件](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#create)与精确分支/首次 attempt 门禁。仅通过已有 create_branch 能力创建审查后的精确 SHA，不扩展仓库权限、不依赖合并到 main。
 - `-PtapsceneRuntimeSmoke=true -PtapsceneAbi=x86_64 -PcompatibilityPreview=true` 才选择专用测试 runner 和 `:runtime-target`。默认构建保持原配置；合成目标不属于产品依赖或手机交付。
 - 不运行旧 `MediaCompatibilityInstrumentation`，不运行旧全量媒体/数据 suite；只编译并执行本入口。无新增第三方测试框架。
 - 仅一个隔离 AVD、一个独立 Android 用户目录与临时 ADB 身份；均在 runner 临时目录，不使用用户账户/手机/持久调试凭据。运行只安装主 app、专用 test APK 和无网络的目标 APK。
 - 先 EGL → AVC Surface → MP4 探针，随后一次生产点击链。先通过正常系统设置启用本次测试服务，再通过正常通知/录屏授权 UI。测试控制器使用 `FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES`，否则 [UiAutomation 默认会关闭被测服务](https://developer.android.com/reference/android/app/UiAutomation#FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)。不使用 `pm grant`、`appops`、`settings put`、root 或复用投影令牌。
 - 目标 App 两个大触控区只接受真实 MotionEvent，记录事件时间与接收时间；控制 IPC 不能伪造触摸。演示按钮只有普通合成页面效果，不包含登录、支付或个人内容。
-- 正常生产路径显示定位点、隐藏整个定位层、请求同意、核对目标窗口、派发一次短按并录制。初次场景约 20 秒，含长静态等待及尾段。保留定位层曾可见的截图与真正编码的视频；截图不代替录屏。
+- 真实首页点击“悬浮编排”、选择合成目标、进入系统设置开启服务、确认后才创建项目并附着空浮层；通过浮层真实触摸加入三点，核对未向目标泄漏事件。浏览模式拖动的是小控制器，不是已保存点位；核对控制器实际位移、点位未变及目标零触摸。仅长等待参数通过生产 store 配置，不声称等待时长编辑 UI 已验证。随后正常生产路径隐藏整个定位层、请求同意、核对目标窗口、派发三次短按并录制。初次场景约 20 秒，含长静态等待及尾段。保留定位层曾可见的截图与真正编码的视频；截图不代替录屏。
 - 实际事件顺序/时间、生产计划/执行日志、真正 MP4 样本和时长、录帧中的定位点残留、有效帧证据分别核对。不能把手势回调当成目标实际收到了点击，不能把 elapsed/uptime 强行当作源 PTS，静态像素也不证明系统没有新源帧回调。
 - 生产 15 秒目标臂定时、5–7 秒录制停止边界不放宽；超时或 codec/GL 错误使本轮失败，按保存的证据修复后再决定重试。
 
 ## 资源、诊断与清理
 
-固定 480×800、160 dpi、2 个模拟 CPU、2560 MiB guest RAM；没有矩阵、并行 AVD 或自动重试。构建独立于模拟器运行，避免编译和软件图形同时抢内存。总体 job 最多 50 分钟；runtime 步骤 25 分钟，其中启动最多 900 秒，单 harness 最多 480 秒，全部运行命令共同受 22 分钟预算限制，余时留给诊断和清理。
+固定 480×800、160 dpi、2 个模拟 CPU、2560 MiB guest RAM；没有矩阵、并行 AVD 或自动重试。构建独立于模拟器运行，避免编译和图形同时抢内存。总体 job 最多 50 分钟；runtime 步骤 25 分钟，其中启动最多 900 秒，单 harness 最多 480 秒，全部运行命令共同受 22 分钟预算限制，余时留给诊断和清理。
 
 [第二次精确 CI](https://github.com/gluttonsama-cloud/TapScene/actions/runs/38061310417) 已真正启动 Android，日志为 `Boot completed in 427082 ms`。首个 APK 安装尚未完成即触及原 120 秒部署限额，未进入测试；保留的 logcat 显示 PackageInstaller 校验路径 `streamValidateAndCommit` 持锁 44.233 秒。该证据说明未完成和锁争用，不单独证明安装健康推进。部署限额因此调整为主 APK 360 秒、harness 180 秒、轻量目标 120 秒，仍共用原 22 分钟总预算。每个部署阶段保留 UTC 起始时间、APK 大小和 adb 输出；不跳过签名/包校验、不自动重试安装，也不延长任何产品运行时限。
 
@@ -52,4 +62,4 @@
 
 退出处理先取诊断，再停止测试 app、关闭模拟器/ADB，最后只删除本轮固定临时目录。超时不报告成功；只有专用 runner 完成全部断言的 `TAPSCENE_RUNTIME_SMOKE_OK` 才通过。GitHub 强制终止整机时无法保证退出钩子运行，runner 销毁仍会清除一次性设备；不能把缺失清理日志称作已核验清理。
 
-当前状态：三个 APK 编译/安装、隔离 Android 启动及真实生产 EGL/AVC 单源帧静态探针已通过；正常系统授权后的生产点击/投影场景仍待验证。局部通过不等于整条 runtime 通过，也不替代实体手机 120 秒静态录制、生命周期和 OEM 兼容检查。
+当前状态：历史软件 lane 的三个 APK 编译/安装、隔离 Android 启动及真实生产 EGL/AVC 单源帧静态探针已通过。本轮加速/UI 增量尚未执行，不计通过；正常系统授权后的生产点击/投影场景仍待本次精确运行验证。局部通过不等于整条 runtime 通过，也不替代实体手机 120 秒静态录制、生命周期和 OEM 兼容检查。

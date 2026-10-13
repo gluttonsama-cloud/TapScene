@@ -2,6 +2,11 @@ package com.tapscene.runtime
 
 import android.app.Instrumentation
 import android.app.UiAutomation
+import android.accessibilityservice.AccessibilityServiceInfo
+import android.graphics.Rect
+import android.os.Bundle
+import android.view.InputDevice
+import android.view.MotionEvent
 import android.content.Intent
 import android.os.SystemClock
 import android.provider.Settings
@@ -18,7 +23,101 @@ internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
         private set
     private var observedSettingsAfterWait = false
 
-    fun enableService() {
+    init {
+        // Test controller only. Production service retains canRetrieveWindowContent=false.
+        automation.serviceInfo = automation.serviceInfo.apply {
+            flags = flags or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+        }
+    }
+
+    fun clickApp(text: String) = awaitOwnControl(text, overlayOnly = false) { click(it) }
+    fun clickOverlay(text: String) = awaitOwnControl(text, overlayOnly = true) { click(it) }
+
+    fun searchSyntheticTarget() {
+        val deadline = SystemClock.uptimeMillis() + 10_000
+        while (SystemClock.uptimeMillis() < deadline) {
+            val root = automation.rootInActiveWindow
+            if (root != null) try {
+                if (root.packageName?.toString() == instrumentation.targetContext.packageName) {
+                    val edit = find(root) { it.isVisibleToUser && it.isEnabled && it.isEditable }
+                    if (edit != null) try {
+                        check(edit.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
+                            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, TARGET_PACKAGE)
+                        })) { "Target search input rejected text" }
+                        return
+                    } finally { edit.recycle() }
+                }
+            } finally { root.recycle() }
+            SystemClock.sleep(100)
+        }
+        error("Own target-search input was not visible")
+    }
+
+    /** Normal test input is restricted to TapScene's visible picking/control windows. */
+    fun tapPickingOverlay(x: Int, y: Int) {
+        ownControlBounds("点一下定位 · 取消")
+        check(ClickPlayback.state.value.overlayVisible && !ClickPlayback.state.value.busy)
+        pointerPath(x, y, x, y, 80)
+    }
+
+    fun dragBrowseControl(): Pair<Rect, Rect> {
+        val before = ownControlBounds("继续定位")
+        check(ClickPlayback.state.value.overlayVisible && !ClickPlayback.state.value.busy)
+        pointerPath(before.centerX(), before.centerY(), before.centerX() + 110, before.centerY() + 70, 350)
+        val deadline = SystemClock.uptimeMillis() + 5_000
+        while (SystemClock.uptimeMillis() < deadline) {
+            val after = ownControlBounds("继续定位")
+            if (after.left - before.left >= 80 && after.top - before.top >= 40) return before to after
+            SystemClock.sleep(100)
+        }
+        error("Small browse control did not actually move after drag")
+    }
+
+    private fun pointerPath(x: Int, y: Int, toX: Int, toY: Int, durationMs: Long) {
+        val down = SystemClock.uptimeMillis()
+        fun send(action: Int, px: Int, py: Int) {
+            val event = MotionEvent.obtain(down, SystemClock.uptimeMillis(), action, px.toFloat(), py.toFloat(), 0)
+            event.source = InputDevice.SOURCE_TOUCHSCREEN
+            try { check(automation.injectInputEvent(event, true)) { "Own-overlay pointer event rejected" } }
+            finally { event.recycle() }
+        }
+        send(MotionEvent.ACTION_DOWN, x, y)
+        for (step in 1..10) {
+            SystemClock.sleep(durationMs / 10)
+            send(MotionEvent.ACTION_MOVE, x + (toX - x) * step / 10, y + (toY - y) * step / 10)
+        }
+        send(MotionEvent.ACTION_UP, toX, toY)
+    }
+
+    private fun ownControlBounds(text: String): Rect {
+        var result: Rect? = null
+        awaitOwnControl(text, overlayOnly = true) { node ->
+            result = Rect().also(node::getBoundsInScreen); true
+        }
+        return requireNotNull(result)
+    }
+
+    private fun awaitOwnControl(text: String, overlayOnly: Boolean, action: (AccessibilityNodeInfo) -> Boolean) {
+        val deadline = SystemClock.uptimeMillis() + 15_000
+        while (SystemClock.uptimeMillis() < deadline) {
+            val windows = automation.windows
+            for (window in windows) try {
+                if (overlayOnly && window.type != android.view.accessibility.AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) continue
+                val root = window.root ?: continue
+                try {
+                    // Read labels only inside our app. Never scrape target-app nodes or text.
+                    if (root.packageName?.toString() != instrumentation.targetContext.packageName) continue
+                    val node = find(root) { it.isEnabled && it.isVisibleToUser && it.text?.toString() == text } ?: continue
+                    try { check(action(node)) { "Own control rejected action: $text" }; return }
+                    finally { node.recycle() }
+                } finally { root.recycle() }
+            } finally { window.recycle() }
+            SystemClock.sleep(100)
+        }
+        error("Own control not visible: $text (overlayOnly=$overlayOnly)")
+    }
+
+    fun enableService(openSettings: Boolean = true) {
         if (ClickPlayback.state.value.connected) return
         val setupLog = File(instrumentation.targetContext.filesDir, "runtime-smoke/accessibility-setup.txt")
         fun log(message: String) { setupLog.appendText("${SystemClock.uptimeMillis()} $message\n") }
@@ -26,7 +125,7 @@ internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
         // This is environment preparation before any production click run is armed.
         val deadline = SystemClock.uptimeMillis() + 120_000
         log("open_settings_requested; overall_setup_budget_ms=120000")
-        instrumentation.targetContext.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        if (openSettings) instrumentation.targetContext.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         var selectedService = false
         var toggled = false
         var previousPackage: String? = null
@@ -121,7 +220,11 @@ internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
 
     fun snapshotTree(): String {
         val root = automation.rootInActiveWindow ?: return "No active accessibility root"
-        return try { snapshotTree(root) } finally { root.recycle() }
+        return try {
+            val pkg = root.packageName?.toString().orEmpty()
+            if (pkg == instrumentation.targetContext.packageName || pkg in setOf("android", "com.android.settings", "com.android.systemui") || pkg.endsWith("permissioncontroller")) snapshotTree(root)
+            else "Active root omitted outside the synthetic setup allowlist: $pkg"
+        } finally { root.recycle() }
     }
 
     private fun snapshotTree(root: AccessibilityNodeInfo): String {
