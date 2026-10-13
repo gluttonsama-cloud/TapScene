@@ -569,6 +569,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 } else ScreenEmpty("已返回保存的画面", "未确认的新画面没有替换原步骤。", "返回步骤", closeStepCorrection)
                             }
                             "record" -> RecordingCaptureRoute(projects, pop, requestImport, openRecordedCandidates)
+                            "click-plan" -> ClickPlanEntryRoute(projects, pop, onManualRecording = { pop(); push("record") })
                             "settings" -> {
                                 val storage by produceState<Pair<Int, Long>?>(null, state.projects, state.retainedMediaWorkspaces, mediaState.drafts) {
                                     value = withContext(Dispatchers.IO) {
@@ -807,7 +808,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                         if (scopeReady && !unavailable && !mediaState.busy && !mediaState.unsavedEdits) {
                                             media.selectSource(id); autoAnalyzeSource = id; push("candidates")
                                         }
-                                    }, onImportScreenshot = requestScreenshot)
+                                    }, onImportScreenshot = requestScreenshot, onClickPlan = { push("click-plan") })
                                 }
                                 ProjectTab.CHECKS -> DeliveryCheckScreen(state.project, state.issues, { tab = ProjectTab.STEPS },
                                     { issue -> issue.stepId?.let(projects::openStep) ?: run { tab = ProjectTab.STEPS } },
@@ -826,7 +827,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 onHosting = if (BuildConfig.HOSTED_ENABLED) ({ push("hosted") }) else null) }
                             GlobalNavigation(true, { library = false }, {})
                         }
-                        else -> ProjectHomeFrame({ push("record") }, requestImport, { push("settings") }, { library = true; releases.reloadLibrary() }, onImportScreenshot = requestScreenshot, onImportAi = openAiImport) {
+                        else -> ProjectHomeFrame({ push("record") }, requestImport, { push("settings") }, { library = true; releases.reloadLibrary() }, onImportScreenshot = requestScreenshot, onImportAi = openAiImport, onClickPlan = { push("click-plan") }) {
                             ProjectHomeContent(state, { tab = ProjectTab.STEPS; projects.openProject(it) }, { renaming = it },
                                 { deletingProject = it }, onCopyProject = copyProject)
                         }

@@ -26,7 +26,7 @@ private val screenshotCallbacks = CorrectionUiCallbacks({}, {}, {}, {}, {}, {}, 
 fun ScreenshotImportEntryPreview() {
     TapSceneTheme { Surface(Modifier.fillMaxSize(),color=ShellColors.Background) {
         ProjectWorkspaceFrame("报名演示",ProjectTab.SOURCES,{}, {}, {}, {}) {
-            ProjectSourcesContent(emptyList(),false,false,{}, {}, {}, {}, {}, onImportScreenshot={})
+            ProjectSourcesContent(emptyList(),false,false,{}, {}, {}, {}, {}, onImportScreenshot={}, onClickPlan={})
         }
     } }
 }

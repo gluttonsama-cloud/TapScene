@@ -10,7 +10,7 @@
 662acdf3f4b7f2027c3394fd31408c44f35992cabea4bdeaab1ed85e80d338b0
 ```
 
-`preview` 复用完整离线生产代码，默认 arm64，versionCode 31；不是 runtimeSmoke 或 hostedDebug。CI 的 `tapscene-preview-unsigned-arm64-v8a` 只含未签名产品 APK 和无秘密检查报告。签名凭据不进入仓库、CI、产物或附件；当前私钥仅在临时开发环境私有目录，无持久备份，环境重建可能再次丢失。
+`preview` 复用完整离线生产代码，默认 arm64，versionCode 32；不是 runtimeSmoke 或 hostedDebug。CI 的 `tapscene-preview-unsigned-arm64-v8a` 只含未签名产品 APK 和无秘密检查报告。签名凭据不进入仓库、CI、产物或附件；当前私钥仅在临时开发环境私有目录，无持久备份，环境重建可能再次丢失。
 
 维护者核对成功 CI 精确 head/tree、实际包名/权限/生产组件和 OCR 资产后，在仓库外已有对应凭据的环境执行：
 

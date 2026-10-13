@@ -463,6 +463,7 @@ fun ProjectSourcesContent(
     onOpenCandidates: () -> Unit,
     onAnalyzeSource: (String) -> Unit,
     onImportScreenshot: () -> Unit = {},
+    onClickPlan: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val enabled = !busy && !loadFailed
@@ -473,11 +474,14 @@ fun ProjectSourcesContent(
     ) {
         item(key = "record") {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                WorkspaceSectionTitle("录制一段操作")
-                Text("从 TapScene 开始录制，再操作目标 App。录制结束后，在这里整理为可点击的演示。",
+                WorkspaceSectionTitle("录制操作")
+                Text("放置悬浮点位，按顺序播放并录屏；也可以手动操作录屏。",
                     style = MaterialTheme.typography.bodyMedium)
-                Button(onClick = onRecord, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                    Text("开始录制")
+                Button(onClick = onClickPlan, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                    Text("悬浮编排")
+                }
+                OutlinedButton(onClick = onRecord, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                    Text("手动录屏")
                 }
                 Text("按画面变化整理候选，点击与热点由你校正。",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

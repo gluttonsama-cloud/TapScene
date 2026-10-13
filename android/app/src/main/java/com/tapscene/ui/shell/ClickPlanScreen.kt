@@ -54,6 +54,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tapscene.clickplan.ClickAction
 import com.tapscene.clickplan.ClickActionStatus
 import com.tapscene.clickplan.ClickDevice
+import com.tapscene.clickplan.ClickGeometry
 import com.tapscene.clickplan.ClickPlan
 import com.tapscene.clickplan.ClickPlanStore
 import com.tapscene.clickplan.ClickPlayback
@@ -61,6 +62,9 @@ import com.tapscene.clickplan.ClickRun
 import com.tapscene.clickplan.ClickRunPhase
 import com.tapscene.recording.RecordingCoordinator
 import com.tapscene.clickplan.ClickTargetApp
+import com.tapscene.ui.ProjectWorkspace
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -103,9 +107,115 @@ private val ClickPlanDraftSaver = listSaver<ClickPlanDraft, Any>(
     },
 )
 
+/** First-use preparation is reversible: no project is created until opening the overlay is confirmed. */
+@Composable
+fun ClickPlanEntryRoute(projects: ProjectWorkspace, onBack: () -> Unit, onManualRecording: () -> Unit) {
+    val context = LocalContext.current
+    val state by projects.state.collectAsStateWithLifecycle()
+    val playback by ClickPlayback.state.collectAsStateWithLifecycle()
+    val recording by RecordingCoordinator.state.collectAsStateWithLifecycle()
+    var targetPackage by rememberSaveable { mutableStateOf("") }
+    var creating by rememberSaveable { mutableStateOf(false) }
+    var createdHere by rememberSaveable { mutableStateOf(false) }
+    var entryProjectId by rememberSaveable { mutableStateOf<String?>(null) }
+    var restoreAttempted by remember { mutableStateOf(false) }
+    var restoring by remember { mutableStateOf(false) }
+    // Never reopen an overlay automatically after process recreation.
+    var openAfterCreate by remember { mutableStateOf(false) }
+    var showApps by rememberSaveable { mutableStateOf(false) }
+    var showNotice by rememberSaveable { mutableStateOf(false) }
+    var apps by remember { mutableStateOf<List<ClickTargetApp>>(emptyList()) }
+    var geometry by remember { mutableStateOf<ClickGeometry?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    var message by rememberSaveable { mutableStateOf<String?>(null) }
+    var refresh by remember { mutableIntStateOf(0) }
+    val projectId = state.project?.project?.id
+    val leave: () -> Unit = {
+        if (!creating && !projects.state.value.busy) onBack()
+    }
+    LaunchedEffect(projectId, state.busy, entryProjectId, restoreAttempted) {
+        if (projectId != null) {
+            entryProjectId = projectId
+            restoreAttempted = true
+            restoring = false
+        } else if (entryProjectId != null && !state.busy && !restoreAttempted) {
+            restoreAttempted = true
+            restoring = true
+            projects.openProject(requireNotNull(entryProjectId))
+        } else if (restoring && !state.busy) {
+            restoring = false
+            message = state.message ?: "无法重新打开原点击链，请返回项目列表检查。"
+        }
+    }
+    LaunchedEffect(refresh) {
+        loading = true
+        try {
+            apps = withContext(Dispatchers.IO) { ClickDevice.launcherApps(context) }
+            geometry = ClickDevice.geometry(context)
+            message = null
+        } catch (_: Exception) { message = "无法读取可用 App，请重试。" }
+        finally { loading = false }
+    }
+    LaunchedEffect(creating, state.busy, projectId) {
+        if (creating && !state.busy) {
+            creating = false
+            if (projectId == null) message = state.message ?: "无法创建点击链，请重试。"
+        }
+    }
+    if (projectId != null) {
+        ClickPlanRoute(projectId, onBack = {
+            if (!creating && !projects.state.value.busy) {
+                if (createdHere) projects.back()
+                onBack()
+            }
+        }, onOpenProject = { projects.openProject(it); onBack() },
+            initialTargetPackage = targetPackage.takeIf { createdHere }, openOnLoad = openAfterCreate,
+            onManualRecording = onManualRecording)
+        return
+    }
+    BackHandler(onBack = leave)
+    val target = apps.firstOrNull { it.packageName == targetPackage }
+    val supported = Build.VERSION.SDK_INT >= 33
+    ClickPlanContent(ClickPlanUiState(
+        targetLabel = target?.label, targetPackage = targetPackage,
+        width = geometry?.width ?: 0, height = geometry?.height ?: 0, rotation = geometry?.rotation ?: 0,
+        overlaySupported = supported, connected = playback.connected,
+        loading = loading || state.busy || creating || restoring,
+        editingEnabled = !loading && !state.busy && !creating && !restoring && entryProjectId == null && !playback.busy && !playback.overlayVisible,
+        sessionActive = playback.busy || playback.overlayVisible,
+        canLocate = supported && geometry != null && target != null && playback.connected && !recording.isBusy && !recording.canRetry,
+        saveVisible = false,
+        message = message ?: if (recording.isBusy || recording.canRetry) "请先在录制页处理未完成录制。" else null,
+        reloadAvailable = message != null,
+    ), ClickPlanCallbacks(
+        onBack = leave,
+        onChooseTarget = { showApps = true },
+        onLocate = { showNotice = true },
+        onOpenAccessibility = {
+            try { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+            catch (_: Exception) { message = "无法打开无障碍设置，请从系统设置中手动进入。" }
+        },
+        onReload = {
+            if (entryProjectId != null) restoreAttempted = false
+            if (state.loadFailed) projects.reload()
+            refresh++
+        },
+        onStop = { ClickPlayback.stop(context) },
+        onManualRecording = onManualRecording,
+    ))
+    if (showApps) ClickTargetPicker(apps, { showApps = false }) {
+        targetPackage = it.packageName; showApps = false
+    }
+    if (showNotice) ClickOverlayNotice(onDismiss = { showNotice = false }, onConfirm = {
+        showNotice = false; creating = true; createdHere = true; openAfterCreate = true
+        projects.createProject(LocalDateTime.now().format(DateTimeFormatter.ofPattern("'点击链' MM-dd HH:mm")))
+    })
+}
+
 /** Store work stays off the UI thread; returning from the target never overwrites unsaved inputs. */
 @Composable
-fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String) -> Unit = {}) {
+fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String) -> Unit = {},
+    initialTargetPackage: String? = null, openOnLoad: Boolean = false, onManualRecording: () -> Unit = onBack) {
     val context = LocalContext.current
     val app = context.applicationContext
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -113,6 +223,7 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
     val playback by ClickPlayback.state.collectAsStateWithLifecycle()
     val recording by RecordingCoordinator.state.collectAsStateWithLifecycle()
     var draft by rememberSaveable(projectId, stateSaver = ClickPlanDraftSaver) { mutableStateOf(ClickPlanDraft()) }
+    var openRequested by remember(projectId) { mutableStateOf(openOnLoad) }
     var initialized by rememberSaveable(projectId) { mutableStateOf(false) }
     var dirty by rememberSaveable(projectId) { mutableStateOf(false) }
     var loading by remember(projectId) { mutableStateOf(true) }
@@ -131,6 +242,7 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
     var showApps by rememberSaveable(projectId) { mutableStateOf(false) }
     var showNotice by rememberSaveable(projectId) { mutableStateOf(false) }
     var showLeave by rememberSaveable(projectId) { mutableStateOf(false) }
+    var leaveForManualRecording by rememberSaveable(projectId) { mutableStateOf(false) }
     var showReload by rememberSaveable(projectId) { mutableStateOf(false) }
     var showResetGeometry by rememberSaveable(projectId) { mutableStateOf(false) }
     var pendingTarget by remember { mutableStateOf<ClickTargetApp?>(null) }
@@ -157,7 +269,7 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
             apps = result.second
             val saved = result.first
             if (!initialized || !dirty) {
-                draft = saved?.toDraft() ?: if (!initialized) ClickPlanDraft(width = geometry.width,
+                draft = saved?.toDraft() ?: if (!initialized) ClickPlanDraft(targetPackage = initialTargetPackage.orEmpty(), width = geometry.width,
                     height = geometry.height, rotation = geometry.rotation, displayId = geometry.displayId) else draft
                 initialized = true
                 conflict = false
@@ -201,7 +313,9 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
                     message = if (openEditor) null else "已保存到本机 · 修订 ${plan.revision}"
                     if (openEditor) {
                         ClickPlayback.openEditor(context, plan)
-                    } else if (leave) onBack()
+                    } else if (leave) {
+                        if (leaveForManualRecording) onManualRecording() else onBack()
+                    }
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (_: Exception) {
                     saveFailed = true
@@ -210,11 +324,20 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
             }
         }
     }
-    val leave: () -> Unit = {
-        if (!saving) {
-            if (dirty) showLeave = true else onBack()
+    LaunchedEffect(loading, saving, openRequested) {
+        if (openRequested && !loading && !saving) {
+            openRequested = false
+            if (canEdit && playback.connected) save(true, false)
+            else message = "请核对目标 App 和无障碍服务后重新打开悬浮窗。"
         }
     }
+    val leaveTo: (Boolean) -> Unit = { manualRecording ->
+        if (!saving) {
+            leaveForManualRecording = manualRecording
+            if (dirty) showLeave = true else if (manualRecording) onManualRecording() else onBack()
+        }
+    }
+    val leave: () -> Unit = { leaveTo(false) }
     if (reviewRunId != null) {
         ClickChainReviewRoute(requireNotNull(reviewRunId), onBack = { reviewRunId = null }, onOpenProject = onOpenProject)
         return
@@ -235,15 +358,16 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
             points = draft.points,
             expandedActionId = expandedActionId,
             connected = playback.connected,
+            overlaySupported = Build.VERSION.SDK_INT >= 33,
             loading = loading,
             saving = saving,
             editingEnabled = canEdit,
             dirty = dirty,
             geometryMatches = geometryMatches,
-            canLocate = Build.VERSION.SDK_INT >= 33 && canEdit && playback.connected && geometryMatches && target != null && error == null,
+            canLocate = Build.VERSION.SDK_INT >= 33 && canEdit && playback.connected && geometryMatches && target != null && error == null && !recording.isBusy && !recording.canRetry,
             canSave = canEdit && geometryMatches && error == null,
             validationMessage = error,
-            message = message ?: playback.message ?: if (Build.VERSION.SDK_INT < 33) "点击链需 Android 13 及以上核对显示器；旧系统可继续手动录屏和取帧。" else null,
+            message = message ?: playback.message ?: if (recording.isBusy || recording.canRetry) "请先在录制页停止或处理未完成录制，再打开悬浮窗。" else null,
             reloadAvailable = loadFailed || conflict || saveFailed,
             sessionActive = playback.busy || playback.overlayVisible,
             runLabel = run?.let { "${clickRunLabel(it.phase)} · 已完成 ${it.nextActionIndex} / ${it.plan.actions.size} 点" },
@@ -255,6 +379,7 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
         ),
         callbacks = ClickPlanCallbacks(
             onBack = leave,
+            onManualRecording = { leaveTo(true) },
             onChooseTarget = { if (canEdit) showApps = true },
             onAddPoint = {
                 if (canEdit && draft.points.size < 40 && draft.width > 0 && draft.height > 0) {
@@ -308,14 +433,9 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
             }) { Text("更换并清空点位") } },
             dismissButton = { TextButton(onClick = { pendingTarget = null }) { Text("取消") } })
     }
-    if (showNotice) AlertDialog(onDismissRequest = { showNotice = false }, title = { Text("定位前确认使用范围") },
-        text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("仅编排不含敏感操作的演示。目标 App 内的支付、登录、授权页面无法可靠识别，请确认安全起始页，并避开这些流程。")
-            Text("保持计划的固定方向及全屏。前往后手动切换页面、放置点位；开始执行仍须另行确认，并请求本轮系统录制授权。")
-            Text("会话期间仅检查窗口包名与类名，不读取节点文字、键盘输入或通知内容。")
-        } },
-        confirmButton = { TextButton(onClick = { showNotice = false; save(true, false) }) { Text("确认安全并前往") } },
-        dismissButton = { TextButton(onClick = { showNotice = false }) { Text("取消") } })
+    if (showNotice) ClickOverlayNotice(onDismiss = { showNotice = false }, onConfirm = {
+        showNotice = false; save(true, false)
+    })
     if (showResetGeometry) AlertDialog(onDismissRequest = { showResetGeometry = false }, title = { Text("按当前屏幕重新编排？") },
         text = { Text("当前所有点位将清空，并使用当前屏幕的尺寸与方向。不会缩放旧坐标；保存后才替换本机计划。") },
         confirmButton = { TextButton(enabled = canEdit, onClick = {
@@ -331,11 +451,29 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
     if (showLeave) AlertDialog(onDismissRequest = { showLeave = false }, title = { Text("保留当前修改？") },
         text = { Text("点击计划有尚未保存的修改。可保存后返回，或放弃本次修改。") },
         confirmButton = { TextButton(enabled = canEdit && geometryMatches && error == null, onClick = { showLeave = false; save(false, true) }) { Text("保存并返回") } },
-        dismissButton = { TextButton(onClick = { showLeave = false; onBack() }) { Text("放弃修改并返回") } })
+        dismissButton = { Row {
+            TextButton(onClick = { showLeave = false }) { Text("继续编辑") }
+            TextButton(onClick = {
+                showLeave = false
+                if (leaveForManualRecording) onManualRecording() else onBack()
+            }) { Text(if (leaveForManualRecording) "放弃修改并继续" else "放弃修改并返回") }
+        } })
     if (showReload) AlertDialog(onDismissRequest = { showReload = false }, title = { Text("重新载入已保存计划？") },
         text = { Text("当前尚未保存的输入会被替换。") },
         confirmButton = { TextButton(onClick = { showReload = false; dirty = false; initialized = false; saveFailed = false; message = null; refresh++ }) { Text("重新载入") } },
         dismissButton = { TextButton(onClick = { showReload = false }) { Text("保留输入") } })
+}
+
+@Composable
+private fun ClickOverlayNotice(onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("打开悬浮窗") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("仅编排不含敏感操作的演示。目标 App 内的支付、登录、授权页面无法可靠识别，请确认安全起始页，并避开这些流程。")
+            Text("保持计划的固定方向及全屏。前往后手动切换页面、放置点位；开始执行仍须另行确认，并请求本轮系统录制授权。")
+            Text("会话期间仅检查窗口包名与类名，不读取节点文字、键盘输入或通知内容。")
+        } },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("确认并打开") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }
 
 data class ClickPlanUiState(
@@ -348,6 +486,7 @@ data class ClickPlanUiState(
     val points: List<ClickPointInput> = emptyList(),
     val expandedActionId: String? = null,
     val connected: Boolean = false,
+    val overlaySupported: Boolean = true,
     val loading: Boolean = false,
     val saving: Boolean = false,
     val editingEnabled: Boolean = true,
@@ -355,6 +494,7 @@ data class ClickPlanUiState(
     val geometryMatches: Boolean = true,
     val canLocate: Boolean = false,
     val canSave: Boolean = false,
+    val saveVisible: Boolean = true,
     val validationMessage: String? = null,
     val message: String? = null,
     val reloadAvailable: Boolean = false,
@@ -368,6 +508,7 @@ data class ClickPlanUiState(
 
 data class ClickPlanCallbacks(
     val onBack: () -> Unit = {},
+    val onManualRecording: () -> Unit = onBack,
     val onChooseTarget: () -> Unit = {},
     val onAddPoint: () -> Unit = {},
     val onTogglePoint: (String) -> Unit = {},
@@ -385,29 +526,45 @@ data class ClickPlanCallbacks(
     val onReviewRun: () -> Unit = {},
 )
 
+internal enum class ClickPlanPrimaryAction { Unsupported, Wait, Blocked, EnableService, ChooseTarget, OpenOverlay }
+
+/** Every prerequisite has an actionable next step; opening is never an implicit permission grant. */
+internal fun clickPlanPrimaryAction(state: ClickPlanUiState): ClickPlanPrimaryAction = when {
+    state.loading || state.saving -> ClickPlanPrimaryAction.Wait
+    !state.editingEnabled || state.sessionActive -> ClickPlanPrimaryAction.Blocked
+    !state.overlaySupported -> ClickPlanPrimaryAction.Unsupported
+    state.targetPackage.isBlank() || state.targetLabel == null -> ClickPlanPrimaryAction.ChooseTarget
+    !state.connected -> ClickPlanPrimaryAction.EnableService
+    state.canLocate -> ClickPlanPrimaryAction.OpenOverlay
+    else -> ClickPlanPrimaryAction.Blocked
+}
+
 /** Production content shared by the route and layout-only screenshot previews. */
 @Composable
 fun ClickPlanContent(state: ClickPlanUiState, callbacks: ClickPlanCallbacks) {
     var showDetails by rememberSaveable { mutableStateOf(false) }
+    val hasTarget = state.targetPackage.isNotBlank() && state.targetLabel != null
+    val showPointEditor = state.saveVisible
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        ShellTopBar("编排点击链", callbacks.onBack)
+        ShellTopBar("悬浮编排", callbacks.onBack)
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            item("target") {
+            if (state.overlaySupported || showPointEditor) item("target") {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(state.targetLabel ?: if (state.targetPackage.isBlank()) "先选择目标 App" else "目标 App 不可用",
                                 style = MaterialTheme.typography.titleMedium)
-                            Text("固定方向 · 主屏幕全屏", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                            Text(if (hasTarget) "固定方向 · 主屏幕全屏" else "点位会放在这个 App 的画面上。",
+                                style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                         }
-                        TextButton(onClick = callbacks.onChooseTarget, enabled = state.editingEnabled,
+                        if (hasTarget || showPointEditor) TextButton(onClick = callbacks.onChooseTarget, enabled = state.editingEnabled,
                             modifier = Modifier.heightIn(min = 48.dp)) { Text(if (state.targetPackage.isBlank()) "选择 App" else "更换") }
                     }
-                    TextButton(onClick = { showDetails = !showDetails }, modifier = Modifier.heightIn(min = 48.dp)) {
+                    if (showPointEditor) TextButton(onClick = { showDetails = !showDetails }, modifier = Modifier.heightIn(min = 48.dp)) {
                         Text(if (showDetails) "收起设备与使用说明" else "设备与使用说明")
                     }
-                    if (showDetails) {
+                    if (showPointEditor && showDetails) {
                         Text("${state.width} × ${state.height} px · 方向 ${state.rotation * 90}° · 修订 ${state.revision}",
                             style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                         if (state.targetPackage.isNotBlank()) Text(state.targetPackage,
@@ -419,9 +576,19 @@ fun ClickPlanContent(state: ClickPlanUiState, callbacks: ClickPlanCallbacks) {
                 }
             }
             if (state.loading || state.saving) item("loading") { LinearProgressIndicator(Modifier.fillMaxWidth()) }
-            if (!state.connected) item("permission") { ClickAccessibilityNotice(callbacks.onOpenAccessibility) }
-            else item("connected") {
+            if (!state.overlaySupported) item("unsupported") {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("这台设备可使用手动录屏", style = MaterialTheme.typography.titleLarge)
+                    Text("悬浮编排需要 Android 13 或更新系统。你仍可录下一段操作，或导入已有素材，再整理演示画面。",
+                        style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
+                }
+            }
+            else if (!state.connected && hasTarget) item("permission") { ClickAccessibilityNotice() }
+            else if (state.connected) item("connected") {
                 Text("无障碍服务已连接 · 仅在定位或执行会话中工作", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+            }
+            else item("setup_next") {
+                Text("选好 App 后，再开启点击服务。", style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
             }
             if (state.message != null || state.reloadAvailable) item("message") {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -430,7 +597,7 @@ fun ClickPlanContent(state: ClickPlanUiState, callbacks: ClickPlanCallbacks) {
                         modifier = Modifier.heightIn(min = 48.dp)) { Text("重新载入已保存计划") }
                 }
             }
-            if (!state.geometryMatches) item("geometry_changed") {
+            if (showPointEditor && !state.geometryMatches) item("geometry_changed") {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     StatusNote("当前屏幕与计划尺寸或方向不一致。请恢复原方向及全屏后再定位。")
                     TextButton(onClick = callbacks.onResetGeometry, enabled = state.editingEnabled,
@@ -454,20 +621,20 @@ fun ClickPlanContent(state: ClickPlanUiState, callbacks: ClickPlanCallbacks) {
                         style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                 }
             }
-            item("points_heading") {
+            if (showPointEditor) item("points_heading") {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text("按顺序执行 · ${state.points.size} / 40 点", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                 }
             }
-            if (state.points.isEmpty()) item("empty") {
+            if (showPointEditor && state.points.isEmpty()) item("empty") {
                 Text("还没有点位。前往目标 App 添加，浏览到下一页后继续定位；播放前手动回到起始页。",
                     style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
             }
-            itemsIndexed(state.points, key = { _, point -> point.actionId }) { index, point ->
+            if (showPointEditor) itemsIndexed(state.points, key = { _, point -> point.actionId }) { index, point ->
                 ClickPointCard(point, index, state.points.size, state.width, state.height, state.editingEnabled,
                     state.expandedActionId == point.actionId, state.pointStatuses[point.actionId], callbacks)
             }
-            item("limits") {
+            if (showPointEditor && showDetails) item("limits") {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     val duration = state.points.map { point ->
                         val press = point.pressDurationMs.toLongOrNull()?.takeIf { it in 40L..500L }
@@ -488,28 +655,43 @@ fun ClickPlanContent(state: ClickPlanUiState, callbacks: ClickPlanCallbacks) {
         ShellDivider()
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             state.validationMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (showPointEditor) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = callbacks.onSave, enabled = state.canSave,
                     modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text(if (state.saving) "保存中…" else "保存计划") }
                 if (state.dirty) Text("尚未保存", modifier = Modifier.align(Alignment.CenterVertically),
                     style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
             }
-            Button(onClick = callbacks.onLocate, enabled = state.canLocate,
-                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("前往目标 App 定位") }
+            val action = clickPlanPrimaryAction(state)
+            Button(onClick = when (action) {
+                ClickPlanPrimaryAction.Unsupported -> callbacks.onManualRecording
+                ClickPlanPrimaryAction.EnableService -> callbacks.onOpenAccessibility
+                ClickPlanPrimaryAction.ChooseTarget -> callbacks.onChooseTarget
+                ClickPlanPrimaryAction.OpenOverlay -> callbacks.onLocate
+                else -> ({})
+            }, enabled = action in setOf(ClickPlanPrimaryAction.Unsupported, ClickPlanPrimaryAction.EnableService, ClickPlanPrimaryAction.ChooseTarget, ClickPlanPrimaryAction.OpenOverlay),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                Text(when (action) {
+                    ClickPlanPrimaryAction.EnableService -> "开启无障碍服务"
+                    ClickPlanPrimaryAction.ChooseTarget -> "选择目标 App"
+                    ClickPlanPrimaryAction.OpenOverlay -> "打开悬浮窗"
+                    ClickPlanPrimaryAction.Unsupported -> "改用手动录屏"
+                    ClickPlanPrimaryAction.Wait -> if (state.saving) "正在保存…" else "正在读取…"
+                    ClickPlanPrimaryAction.Blocked -> "打开悬浮窗"
+                })
+            }
         }
     }
 }
 
 @Composable
-private fun ClickAccessibilityNotice(onSettings: () -> Unit) {
+private fun ClickAccessibilityNotice() {
     Card(colors = CardDefaults.cardColors(containerColor = ShellColors.Quiet)) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("手动开启点击服务", style = MaterialTheme.typography.titleMedium)
-            Text("定位与执行需要无障碍服务。仅在会话期间检查窗口包名与类名，不读取节点文字、键盘输入或通知内容。",
+            Text("开启点击服务", style = MaterialTheme.typography.titleMedium)
+            Text("悬浮点位和自动点击需要此服务。",
                 style = MaterialTheme.typography.bodySmall)
-            Text("请在系统设置中自行开启 ${androidx.compose.ui.res.stringResource(com.tapscene.R.string.click_service_label)}；回来后会检查连接。未开启也可编辑和保存计划。",
+            Text("在系统设置中开启“${androidx.compose.ui.res.stringResource(com.tapscene.R.string.click_service_label)}”，然后返回这里。仅在会话中检查窗口包名与类名，不读取节点文字或键盘输入。",
                 style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-            OutlinedButton(onClick = onSettings, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("打开系统无障碍设置") }
         }
     }
 }

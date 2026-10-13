@@ -15,7 +15,7 @@ def main():
     args = parser.parse_args()
     badging = subprocess.check_output([args.aapt, "dump", "badging", str(args.apk)], text=True)
     manifest = subprocess.check_output([args.aapt, "dump", "xmltree", str(args.apk), "AndroidManifest.xml"], text=True)
-    assert re.search(r"^package: name='com\.tapscene\.preview' versionCode='31' versionName='0\.26\.0-presentation-clock-dev-preview'", badging, re.M)
+    assert re.search(r"^package: name='com\.tapscene\.preview' versionCode='32' versionName='0\.27\.0-overlay-entry-dev-preview'", badging, re.M)
     assert "application-label:'点演测试版'" in badging
     assert "native-code: 'arm64-v8a'" in badging
     assert "sdkVersion:'26'" in badging and "targetSdkVersion:'36'" in badging
@@ -45,7 +45,7 @@ def main():
                 assert raw.read(16) != b"APK Sig Block 42", "CI input contains an APK signing block"
         assert {name.split("/")[1] for name in names if name.startswith("lib/") and name.endswith(".so")} == {"arm64-v8a"}
         assert "lib/arm64-v8a/libtapscene_ocr.so" in names and "lib/arm64-v8a/libonnxruntime.so" in names
-    print("PREVIEW_APK_IDENTITY_OK package=com.tapscene.preview versionCode=31 arm64/offline/product components; installation NOT_RUN")
+    print("PREVIEW_APK_IDENTITY_OK package=com.tapscene.preview versionCode=32 arm64/offline/product components; installation NOT_RUN")
 
 
 if __name__ == "__main__":

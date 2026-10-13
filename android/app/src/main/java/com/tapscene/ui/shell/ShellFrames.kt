@@ -1,9 +1,12 @@
 package com.tapscene.ui.shell
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
@@ -15,6 +18,7 @@ enum class ProjectTab(val label: String) { STEPS("步骤"), SOURCES("素材"), C
 
 /** Shared production chrome, also used by the host-side layout previews. */
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 fun ProjectHomeFrame(
     onRecord: () -> Unit,
     onImportVideo: () -> Unit,
@@ -22,22 +26,31 @@ fun ProjectHomeFrame(
     onLibrary: () -> Unit,
     onImportScreenshot: () -> Unit = {},
     onImportAi: () -> Unit = {},
+    onClickPlan: () -> Unit,
     content: @Composable () -> Unit,
 ) {
+    var showCreateOptions by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
         ShellTopBar("TapScene") {
             TextButton(onClick = onSettings) { Text("设置") }
         }
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button(onClick = onRecord, shape = RoundedCornerShape(8.dp), modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("开始录制") }
-            OutlinedButton(onClick = onImportVideo, shape = RoundedCornerShape(8.dp), modifier = Modifier.heightIn(min = 48.dp)) { Text("导入录屏") }
-        }
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            TextButton(onClick = onImportScreenshot, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("导入截图") }
-            TextButton(onClick = onImportAi, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("导入 AI 包") }
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = onClickPlan, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("悬浮编排") }
+            Text("在目标 App 上放置点位，再按顺序播放并录屏。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+            OutlinedButton(onClick = { showCreateOptions = true }, shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("其他创建方式") }
         }
         Box(Modifier.weight(1f)) { content() }
         GlobalNavigation(false, {}, onLibrary)
+    }
+    if (showCreateOptions) ModalBottomSheet(onDismissRequest = { showCreateOptions = false }) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 12.dp)) {
+            Text("其他创建方式", style = MaterialTheme.typography.titleMedium)
+            listOf("手动录屏" to onRecord, "导入录屏" to onImportVideo,
+                "导入截图" to onImportScreenshot, "导入 AI 包" to onImportAi).forEach { (label, action) ->
+                TextButton(onClick = { showCreateOptions = false; action() }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(label) }
+            }
+        }
     }
 }
 
