@@ -543,25 +543,28 @@ internal fun clickPlanPrimaryAction(state: ClickPlanUiState): ClickPlanPrimaryAc
 @Composable
 fun ClickPlanContent(state: ClickPlanUiState, callbacks: ClickPlanCallbacks) {
     var showDetails by rememberSaveable { mutableStateOf(false) }
+    val hasTarget = state.targetPackage.isNotBlank() && state.targetLabel != null
+    val showPointEditor = state.saveVisible
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         ShellTopBar("悬浮编排", callbacks.onBack)
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            item("target") {
+            if (state.overlaySupported || showPointEditor) item("target") {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(state.targetLabel ?: if (state.targetPackage.isBlank()) "先选择目标 App" else "目标 App 不可用",
                                 style = MaterialTheme.typography.titleMedium)
-                            Text("固定方向 · 主屏幕全屏", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                            Text(if (hasTarget) "固定方向 · 主屏幕全屏" else "点位会放在这个 App 的画面上。",
+                                style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                         }
-                        TextButton(onClick = callbacks.onChooseTarget, enabled = state.editingEnabled,
+                        if (hasTarget || showPointEditor) TextButton(onClick = callbacks.onChooseTarget, enabled = state.editingEnabled,
                             modifier = Modifier.heightIn(min = 48.dp)) { Text(if (state.targetPackage.isBlank()) "选择 App" else "更换") }
                     }
-                    TextButton(onClick = { showDetails = !showDetails }, modifier = Modifier.heightIn(min = 48.dp)) {
+                    if (showPointEditor) TextButton(onClick = { showDetails = !showDetails }, modifier = Modifier.heightIn(min = 48.dp)) {
                         Text(if (showDetails) "收起设备与使用说明" else "设备与使用说明")
                     }
-                    if (showDetails) {
+                    if (showPointEditor && showDetails) {
                         Text("${state.width} × ${state.height} px · 方向 ${state.rotation * 90}° · 修订 ${state.revision}",
                             style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                         if (state.targetPackage.isNotBlank()) Text(state.targetPackage,
@@ -574,11 +577,18 @@ fun ClickPlanContent(state: ClickPlanUiState, callbacks: ClickPlanCallbacks) {
             }
             if (state.loading || state.saving) item("loading") { LinearProgressIndicator(Modifier.fillMaxWidth()) }
             if (!state.overlaySupported) item("unsupported") {
-                StatusNote("悬浮编排需要 Android 13 或更新系统。此设备仍可使用手动录屏和导入功能。")
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("这台设备可使用手动录屏", style = MaterialTheme.typography.titleLarge)
+                    Text("悬浮编排需要 Android 13 或更新系统。你仍可录下一段操作，或导入已有素材，再整理演示画面。",
+                        style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
+                }
             }
-            else if (!state.connected) item("permission") { ClickAccessibilityNotice(callbacks.onOpenAccessibility) }
-            else item("connected") {
+            else if (!state.connected && hasTarget) item("permission") { ClickAccessibilityNotice() }
+            else if (state.connected) item("connected") {
                 Text("无障碍服务已连接 · 仅在定位或执行会话中工作", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+            }
+            else item("setup_next") {
+                Text("选好 App 后，再开启点击服务。", style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
             }
             if (state.message != null || state.reloadAvailable) item("message") {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -587,7 +597,7 @@ fun ClickPlanContent(state: ClickPlanUiState, callbacks: ClickPlanCallbacks) {
                         modifier = Modifier.heightIn(min = 48.dp)) { Text("重新载入已保存计划") }
                 }
             }
-            if (!state.geometryMatches) item("geometry_changed") {
+            if (showPointEditor && !state.geometryMatches) item("geometry_changed") {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     StatusNote("当前屏幕与计划尺寸或方向不一致。请恢复原方向及全屏后再定位。")
                     TextButton(onClick = callbacks.onResetGeometry, enabled = state.editingEnabled,
@@ -611,20 +621,20 @@ fun ClickPlanContent(state: ClickPlanUiState, callbacks: ClickPlanCallbacks) {
                         style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                 }
             }
-            item("points_heading") {
+            if (showPointEditor) item("points_heading") {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text("按顺序执行 · ${state.points.size} / 40 点", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                 }
             }
-            if (state.points.isEmpty()) item("empty") {
+            if (showPointEditor && state.points.isEmpty()) item("empty") {
                 Text("还没有点位。前往目标 App 添加，浏览到下一页后继续定位；播放前手动回到起始页。",
                     style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
             }
-            itemsIndexed(state.points, key = { _, point -> point.actionId }) { index, point ->
+            if (showPointEditor) itemsIndexed(state.points, key = { _, point -> point.actionId }) { index, point ->
                 ClickPointCard(point, index, state.points.size, state.width, state.height, state.editingEnabled,
                     state.expandedActionId == point.actionId, state.pointStatuses[point.actionId], callbacks)
             }
-            item("limits") {
+            if (showPointEditor && showDetails) item("limits") {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     val duration = state.points.map { point ->
                         val press = point.pressDurationMs.toLongOrNull()?.takeIf { it in 40L..500L }
@@ -645,7 +655,7 @@ fun ClickPlanContent(state: ClickPlanUiState, callbacks: ClickPlanCallbacks) {
         ShellDivider()
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             state.validationMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
-            if (state.saveVisible) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (showPointEditor) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = callbacks.onSave, enabled = state.canSave,
                     modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text(if (state.saving) "保存中…" else "保存计划") }
                 if (state.dirty) Text("尚未保存", modifier = Modifier.align(Alignment.CenterVertically),
@@ -674,15 +684,14 @@ fun ClickPlanContent(state: ClickPlanUiState, callbacks: ClickPlanCallbacks) {
 }
 
 @Composable
-private fun ClickAccessibilityNotice(onSettings: () -> Unit) {
+private fun ClickAccessibilityNotice() {
     Card(colors = CardDefaults.cardColors(containerColor = ShellColors.Quiet)) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("先开启无障碍服务", style = MaterialTheme.typography.titleMedium)
-            Text("悬浮点位和自动点击需要此服务，无需另开“显示在其他应用上层”。",
+            Text("开启点击服务", style = MaterialTheme.typography.titleMedium)
+            Text("悬浮点位和自动点击需要此服务。",
                 style = MaterialTheme.typography.bodySmall)
             Text("在系统设置中开启“${androidx.compose.ui.res.stringResource(com.tapscene.R.string.click_service_label)}”，然后返回这里。仅在会话中检查窗口包名与类名，不读取节点文字或键盘输入。",
                 style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-            OutlinedButton(onClick = onSettings, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("打开系统无障碍设置") }
         }
     }
 }

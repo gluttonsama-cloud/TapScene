@@ -6,6 +6,7 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.ResolveInfo
 import android.graphics.Bitmap
 import android.provider.Settings
+import android.view.inspector.WindowInspector
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.platform.app.InstrumentationRegistry
@@ -32,6 +33,8 @@ import org.junit.Assert.assertNull
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.ExternalResource
+import org.junit.rules.TestWatcher
+import org.junit.runner.Description
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
@@ -52,6 +55,14 @@ class ClickEntryNavigationHostTest {
         override fun before() {
             HostSqlite.configure()
             val app = RuntimeEnvironment.getApplication()
+            // Only discard synthetic files inside this Robolectric test's own private sandbox.
+            val root = app.noBackupFilesDir.canonicalFile
+            val sandbox = RuntimeEnvironment.getTempDirectory().basePath.toRealPath()
+            check(root.toPath().startsWith(sandbox) && root.toPath() != sandbox)
+            root.listFiles().orEmpty().forEach { child ->
+                check(child.canonicalFile.toPath().startsWith(root.toPath()))
+                check(child.deleteRecursively())
+            }
             HostFileSyncShadow.begin(app.noBackupFilesDir)
             val target = ResolveInfo().apply {
                 nonLocalizedLabel = "演示样例 App"
@@ -68,6 +79,19 @@ class ClickEntryNavigationHostTest {
         override fun after() { HostFileSyncShadow.reset() }
     }
     @get:Rule(order = 1) val compose = createAndroidComposeRule<MainActivity>()
+    @get:Rule(order = 2) val failureCapture = object : TestWatcher() {
+        override fun failed(error: Throwable, description: Description) {
+            runCatching {
+                compose.runOnUiThread {
+                    WindowInspector.getGlobalWindowViews().forEach { root ->
+                        println("HOST_WINDOW ${root.javaClass.simpleName} ${root.width}x${root.height} " +
+                            "attached=${root.isAttachedToWindow} layoutRequested=${root.isLayoutRequested} focus=${root.hasWindowFocus()}")
+                    }
+                }
+                capture("failure-${description.methodName}", awaitIdle = false)
+            }.onFailure { error.addSuppressed(it) }
+        }
+    }
 
     @Test fun homeOpensRealPlanAndKeepsItThroughProjectCreationPickerCancelAndBack() {
         waitFor("悬浮编排")
@@ -75,6 +99,9 @@ class ClickEntryNavigationHostTest {
         waitFor("选择目标 App")
         compose.onNodeWithText("选择目标 App").assertIsEnabled().assertIsDisplayed()
         compose.onNodeWithText("录制操作").assertDoesNotExist()
+        compose.onNodeWithText("按顺序执行", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("计划总时长", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("开启点击服务").assertDoesNotExist()
         val app = RuntimeEnvironment.getApplication()
         check(ProjectStore(app).listProjects().isEmpty())
         assertNull(shadowOf(compose.activity).nextStartedActivity)
@@ -181,10 +208,14 @@ class ClickEntryNavigationHostTest {
 
     @Test @Config(sdk = [32]) fun unsupportedSystemShowsTheReasonAndDoesNotAskForService() {
         waitFor("悬浮编排")
+        check(ProjectStore(RuntimeEnvironment.getApplication()).listProjects().isEmpty())
         capture("05-home-empty")
         compose.onNodeWithText("悬浮编排").performClick()
         waitFor("改用手动录屏")
         compose.onNodeWithText("改用手动录屏").assertIsEnabled().assertIsDisplayed()
+        compose.onNodeWithText("选择目标 App").assertDoesNotExist()
+        compose.onNodeWithText("按顺序执行", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("计划总时长", substring = true).assertDoesNotExist()
         compose.onNodeWithText("开启无障碍服务").assertDoesNotExist()
         compose.onNodeWithText("打开系统无障碍设置").assertDoesNotExist()
         assertNull(shadowOf(compose.activity).nextStartedActivity)
@@ -238,14 +269,24 @@ class ClickEntryNavigationHostTest {
     private fun waitFor(text: String) {
         compose.waitUntil(30_000) { compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty() }
         compose.waitForIdle()
+        assertEquals(RuntimeEnvironment.getApplication().noBackupFilesDir.canonicalFile,
+            compose.activity.noBackupFilesDir.canonicalFile)
     }
 
-    private fun capture(name: String) {
+    private fun capture(name: String, awaitIdle: Boolean = true) {
         val output = System.getenv("TAPSCENE_UI_OUTPUT") ?: return
-        compose.waitForIdle()
+        if (awaitIdle) compose.waitForIdle()
         // Robolectric's native UiAutomation capture renders all attached windows, including sheets.
         // Compose captureToImage waits for an OS redraw callback that this host does not dispatch.
-        val bitmap = checkNotNull(InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot())
+        // Use a separate capture renderer: borrowing the live root renderer replaces its surface
+        // and can prevent later dialog/layout work from becoming idle after that surface is released.
+        val property = "robolectric.useEmbeddedViewRoot"
+        val previous = System.setProperty(property, "false")
+        val bitmap = try {
+            checkNotNull(InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot())
+        } finally {
+            if (previous == null) System.clearProperty(property) else System.setProperty(property, previous)
+        }
         try {
             check(bitmap.width >= 320 && bitmap.height >= 640)
             val colors = mutableSetOf<Int>()

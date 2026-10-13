@@ -256,6 +256,79 @@ jobs:
             android/app/build/test-results/testPreviewUnitTest/
           retention-days: 7
           if-no-files-found: warn
+      - name: Render Compose shell previews on the host
+        if: ${{ !cancelled() && steps.scope.outputs.android == 'true' }}
+        run: |
+          # Layoutlib renders real Compose UI without an emulator or KVM. These are
+          # review images, not device screenshots or a visual-regression pass.
+          gradle -p android --no-daemon -PcompatibilityPreview=true :app:updateDebugScreenshotTest
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import os
+          import struct
+
+          root = Path("android/app/src/screenshotTestDebug/reference")
+          images = sorted(root.rglob("*.png"))
+          assert len(images) == 80, f"Expected eighty Compose review images, found {len(images)}"
+          delivery_images = [image for image in images if "DeliveryAvailabilityScreenshotPreviewsKt" in str(image)]
+          assert len(delivery_images) == 3, f"Expected three delivery availability images, found {len(delivery_images)}"
+          click_review_images = [image for image in images if "ClickChainReviewScreenshotPreviewsKt" in str(image)]
+          assert len(click_review_images) == 9, f"Expected nine click-chain author review images, found {len(click_review_images)}"
+          click_plan_images = [image for image in images if "ClickPlanScreenshotPreviewsKt" in str(image)]
+          assert len(click_plan_images) == 2, f"Expected two click-plan review images, found {len(click_plan_images)}"
+          text_region_images = [image for image in images if "TextRegionScreenshotPreviewsKt" in str(image)]
+          assert len(text_region_images) == 3, f"Expected three text-region review images, found {len(text_region_images)}"
+          hosted_images = [image for image in images if "HostingScreenshotPreviewsKt" in str(image)]
+          assert len(hosted_images) == 3, f"Expected three local-hosting review images, found {len(hosted_images)}"
+          project_copy_images = [image for image in images if "SavedProjectCopyScreenshotPreviewsKt" in str(image)]
+          assert len(project_copy_images) == 2, f"Expected two saved-project-copy review images, found {len(project_copy_images)}"
+          copy_images = [image for image in images if "SavedStepCopyScreenshotPreviewsKt" in str(image)]
+          assert len(copy_images) == 2, f"Expected two saved-step-copy review images, found {len(copy_images)}"
+          share_images = [image for image in images if "OfflineShareScreenshotPreviewsKt" in str(image)]
+          assert len(share_images) == 2, f"Expected two delivery share review images, found {len(share_images)}"
+          ai_draft_images = [image for image in images if "AiDraftScreenshotPreviewsKt" in str(image)]
+          assert len(ai_draft_images) == 8, f"Expected eight AI draft review images, found {len(ai_draft_images)}"
+          lines = [
+              "TapScene shell review: host-side Compose / Layoutlib renders.",
+              "Not device screenshots; does not validate media decoding, touch, or system pickers.",
+              "Sample data exists only in screenshotTest source files.",
+              f"CI commit: {os.environ['GITHUB_SHA']}",
+              "",
+          ]
+          for image in images:
+              data = image.read_bytes()
+              assert data[:8] == b"\x89PNG\r\n\x1a\n", image
+              width, height = struct.unpack(">II", data[16:24])
+              assert width > 0 and height > 0, image
+              if any(name in str(image) for name in ("EditorDraftRecovery", "SafeImage", "ScreenshotImport", "EditorNavigation", "ReviewAiNavigation", "AiDraftScreenshot", "OfflineShareScreenshot", "SavedStepCopyScreenshot", "SavedProjectCopyScreenshot", "HostingScreenshot", "ClickPlanScreenshot", "ClickChainReviewScreenshot")):
+                  # A modal window can yield a valid but blank PNG in Layoutlib. Reject that
+                  # before treating form and AI import images as usable review evidence.
+                  import zlib
+                  offset, compressed = 8, bytearray()
+                  while offset < len(data):
+                      size = struct.unpack(">I", data[offset:offset + 4])[0]
+                      if data[offset + 4:offset + 8] == b"IDAT":
+                          compressed.extend(data[offset + 8:offset + 8 + size])
+                      offset += size + 12
+                  assert len(set(zlib.decompress(compressed))) > 32, f"Blank recovery form render: {image}"
+              lines.append(f"{image.relative_to(root)} | {width}x{height} | SHA256 {hashlib.sha256(data).hexdigest()}")
+          report = Path(os.environ["RUNNER_TEMP"]) / "compose-review.txt"
+          report.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          print(report.read_text(encoding="utf-8"))
+          PY
+      - name: Keep native Compose review images
+        if: always() && steps.scope.outputs.android == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tapscene-compose-review
+          path: |
+            android/app/src/screenshotTestDebug/reference/**/*.png
+            android/app/build/reports/screenshotTest/
+            android/app/build/test-results/screenshotTest/
+            ${{ runner.temp }}/compose-review.txt
+          retention-days: 7
+          if-no-files-found: warn
       - name: Build the arm64 phone preview and run lint
         if: steps.scope.outputs.android == 'true'
         run: gradle -p android --no-daemon --max-workers=2 -PcompatibilityPreview=true -PtapsceneAbi=arm64-v8a :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
@@ -321,7 +394,7 @@ jobs:
           if-no-files-found: warn
       - name: Execute production Android data and static AI round-trip checks
         id: host_data
-        if: steps.scope.outputs.android == 'true'
+        if: ${{ !cancelled() && steps.scope.outputs.android == 'true' }}
         timeout-minutes: 10
         env:
           TAPSCENE_AI_ROUNDTRIP_OUTPUT: ${{ runner.temp }}/ai-round-trip
@@ -360,7 +433,7 @@ jobs:
             --tests com.tapscene.recording.FrameEvidenceStoreHostTest \
             2>&1 | tee "$RUNNER_TEMP/host-data-checks.txt"
       - name: Verify the exact host checks executed without failures or skips
-        if: always() && steps.host_data.outcome != 'skipped' && steps.scope.outputs.android == 'true'
+        if: ${{ !cancelled() && steps.host_data.outcome != 'skipped' && steps.scope.outputs.android == 'true' }}
         run: |
           python3 - <<'PY_HOST'
           from collections import Counter
@@ -637,79 +710,6 @@ jobs:
             android/app/build/reports/lint-results-debug.html
           retention-days: 7
           if-no-files-found: error
-      - name: Render Compose shell previews on the host
-        if: steps.scope.outputs.android == 'true'
-        run: |
-          # Layoutlib renders real Compose UI without an emulator or KVM. These are
-          # review images, not device screenshots or a visual-regression pass.
-          gradle -p android --no-daemon -PcompatibilityPreview=true :app:updateDebugScreenshotTest
-          python3 - <<'PY'
-          from pathlib import Path
-          import hashlib
-          import os
-          import struct
-
-          root = Path("android/app/src/screenshotTestDebug/reference")
-          images = sorted(root.rglob("*.png"))
-          assert len(images) == 80, f"Expected eighty Compose review images, found {len(images)}"
-          delivery_images = [image for image in images if "DeliveryAvailabilityScreenshotPreviewsKt" in str(image)]
-          assert len(delivery_images) == 3, f"Expected three delivery availability images, found {len(delivery_images)}"
-          click_review_images = [image for image in images if "ClickChainReviewScreenshotPreviewsKt" in str(image)]
-          assert len(click_review_images) == 9, f"Expected nine click-chain author review images, found {len(click_review_images)}"
-          click_plan_images = [image for image in images if "ClickPlanScreenshotPreviewsKt" in str(image)]
-          assert len(click_plan_images) == 2, f"Expected two click-plan review images, found {len(click_plan_images)}"
-          text_region_images = [image for image in images if "TextRegionScreenshotPreviewsKt" in str(image)]
-          assert len(text_region_images) == 3, f"Expected three text-region review images, found {len(text_region_images)}"
-          hosted_images = [image for image in images if "HostingScreenshotPreviewsKt" in str(image)]
-          assert len(hosted_images) == 3, f"Expected three local-hosting review images, found {len(hosted_images)}"
-          project_copy_images = [image for image in images if "SavedProjectCopyScreenshotPreviewsKt" in str(image)]
-          assert len(project_copy_images) == 2, f"Expected two saved-project-copy review images, found {len(project_copy_images)}"
-          copy_images = [image for image in images if "SavedStepCopyScreenshotPreviewsKt" in str(image)]
-          assert len(copy_images) == 2, f"Expected two saved-step-copy review images, found {len(copy_images)}"
-          share_images = [image for image in images if "OfflineShareScreenshotPreviewsKt" in str(image)]
-          assert len(share_images) == 2, f"Expected two delivery share review images, found {len(share_images)}"
-          ai_draft_images = [image for image in images if "AiDraftScreenshotPreviewsKt" in str(image)]
-          assert len(ai_draft_images) == 8, f"Expected eight AI draft review images, found {len(ai_draft_images)}"
-          lines = [
-              "TapScene shell review: host-side Compose / Layoutlib renders.",
-              "Not device screenshots; does not validate media decoding, touch, or system pickers.",
-              "Sample data exists only in screenshotTest source files.",
-              f"CI commit: {os.environ['GITHUB_SHA']}",
-              "",
-          ]
-          for image in images:
-              data = image.read_bytes()
-              assert data[:8] == b"\x89PNG\r\n\x1a\n", image
-              width, height = struct.unpack(">II", data[16:24])
-              assert width > 0 and height > 0, image
-              if any(name in str(image) for name in ("EditorDraftRecovery", "SafeImage", "ScreenshotImport", "EditorNavigation", "ReviewAiNavigation", "AiDraftScreenshot", "OfflineShareScreenshot", "SavedStepCopyScreenshot", "SavedProjectCopyScreenshot", "HostingScreenshot", "ClickPlanScreenshot", "ClickChainReviewScreenshot")):
-                  # A modal window can yield a valid but blank PNG in Layoutlib. Reject that
-                  # before treating form and AI import images as usable review evidence.
-                  import zlib
-                  offset, compressed = 8, bytearray()
-                  while offset < len(data):
-                      size = struct.unpack(">I", data[offset:offset + 4])[0]
-                      if data[offset + 4:offset + 8] == b"IDAT":
-                          compressed.extend(data[offset + 8:offset + 8 + size])
-                      offset += size + 12
-                  assert len(set(zlib.decompress(compressed))) > 32, f"Blank recovery form render: {image}"
-              lines.append(f"{image.relative_to(root)} | {width}x{height} | SHA256 {hashlib.sha256(data).hexdigest()}")
-          report = Path(os.environ["RUNNER_TEMP"]) / "compose-review.txt"
-          report.write_text("\n".join(lines) + "\n", encoding="utf-8")
-          print(report.read_text(encoding="utf-8"))
-          PY
-      - name: Keep native Compose review images
-        if: always() && steps.scope.outputs.android == 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: tapscene-compose-review
-          path: |
-            android/app/src/screenshotTestDebug/reference/**/*.png
-            android/app/build/reports/screenshotTest/
-            android/app/build/test-results/screenshotTest/
-            ${{ runner.temp }}/compose-review.txt
-          retention-days: 7
-          if-no-files-found: warn
       - name: Check native media when an accelerated Android emulator is available
         if: steps.scope.outputs.android == 'true'
         timeout-minutes: 15
