@@ -54,6 +54,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tapscene.clickplan.ClickAction
 import com.tapscene.clickplan.ClickActionStatus
 import com.tapscene.clickplan.ClickDevice
+import com.tapscene.clickplan.ClickGeometry
 import com.tapscene.clickplan.ClickPlan
 import com.tapscene.clickplan.ClickPlanStore
 import com.tapscene.clickplan.ClickPlayback
@@ -116,17 +117,41 @@ fun ClickPlanEntryRoute(projects: ProjectWorkspace, onBack: () -> Unit, onManual
     var targetPackage by rememberSaveable { mutableStateOf("") }
     var creating by rememberSaveable { mutableStateOf(false) }
     var createdHere by rememberSaveable { mutableStateOf(false) }
+    var entryProjectId by rememberSaveable { mutableStateOf<String?>(null) }
+    var restoreAttempted by remember { mutableStateOf(false) }
+    var restoring by remember { mutableStateOf(false) }
+    // Never reopen an overlay automatically after process recreation.
+    var openAfterCreate by remember { mutableStateOf(false) }
     var showApps by rememberSaveable { mutableStateOf(false) }
     var showNotice by rememberSaveable { mutableStateOf(false) }
     var apps by remember { mutableStateOf<List<ClickTargetApp>>(emptyList()) }
+    var geometry by remember { mutableStateOf<ClickGeometry?>(null) }
     var loading by remember { mutableStateOf(true) }
     var message by rememberSaveable { mutableStateOf<String?>(null) }
     var refresh by remember { mutableIntStateOf(0) }
     val projectId = state.project?.project?.id
+    val leave: () -> Unit = {
+        if (!creating && !projects.state.value.busy) onBack()
+    }
+    LaunchedEffect(projectId, state.busy, entryProjectId, restoreAttempted) {
+        if (projectId != null) {
+            entryProjectId = projectId
+            restoreAttempted = true
+            restoring = false
+        } else if (entryProjectId != null && !state.busy && !restoreAttempted) {
+            restoreAttempted = true
+            restoring = true
+            projects.openProject(requireNotNull(entryProjectId))
+        } else if (restoring && !state.busy) {
+            restoring = false
+            message = state.message ?: "无法重新打开原点击链，请返回项目列表检查。"
+        }
+    }
     LaunchedEffect(refresh) {
         loading = true
         try {
             apps = withContext(Dispatchers.IO) { ClickDevice.launcherApps(context) }
+            geometry = ClickDevice.geometry(context)
             message = null
         } catch (_: Exception) { message = "无法读取可用 App，请重试。" }
         finally { loading = false }
@@ -139,40 +164,50 @@ fun ClickPlanEntryRoute(projects: ProjectWorkspace, onBack: () -> Unit, onManual
     }
     if (projectId != null) {
         ClickPlanRoute(projectId, onBack = {
-            if (createdHere) projects.back()
-            onBack()
+            if (!creating && !projects.state.value.busy) {
+                if (createdHere) projects.back()
+                onBack()
+            }
         }, onOpenProject = { projects.openProject(it); onBack() },
-            initialTargetPackage = targetPackage.takeIf { createdHere }, openOnLoad = createdHere,
+            initialTargetPackage = targetPackage.takeIf { createdHere }, openOnLoad = openAfterCreate,
             onManualRecording = onManualRecording)
         return
     }
-    BackHandler(onBack = onBack)
+    BackHandler(onBack = leave)
     val target = apps.firstOrNull { it.packageName == targetPackage }
     val supported = Build.VERSION.SDK_INT >= 33
     ClickPlanContent(ClickPlanUiState(
         targetLabel = target?.label, targetPackage = targetPackage,
+        width = geometry?.width ?: 0, height = geometry?.height ?: 0, rotation = geometry?.rotation ?: 0,
         overlaySupported = supported, connected = playback.connected,
-        loading = loading || state.busy || creating, editingEnabled = !loading && !state.busy && !creating,
-        canLocate = supported && target != null && playback.connected && !recording.isBusy && !recording.canRetry,
+        loading = loading || state.busy || creating || restoring,
+        editingEnabled = !loading && !state.busy && !creating && !restoring && entryProjectId == null && !playback.busy && !playback.overlayVisible,
+        sessionActive = playback.busy || playback.overlayVisible,
+        canLocate = supported && geometry != null && target != null && playback.connected && !recording.isBusy && !recording.canRetry,
         saveVisible = false,
         message = message ?: if (recording.isBusy || recording.canRetry) "请先在录制页处理未完成录制。" else null,
         reloadAvailable = message != null,
     ), ClickPlanCallbacks(
-        onBack = onBack,
+        onBack = leave,
         onChooseTarget = { showApps = true },
         onLocate = { showNotice = true },
         onOpenAccessibility = {
             try { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
             catch (_: Exception) { message = "无法打开无障碍设置，请从系统设置中手动进入。" }
         },
-        onReload = { refresh++ },
+        onReload = {
+            if (entryProjectId != null) restoreAttempted = false
+            if (state.loadFailed) projects.reload()
+            refresh++
+        },
+        onStop = { ClickPlayback.stop(context) },
         onManualRecording = onManualRecording,
     ))
     if (showApps) ClickTargetPicker(apps, { showApps = false }) {
         targetPackage = it.packageName; showApps = false
     }
     if (showNotice) ClickOverlayNotice(onDismiss = { showNotice = false }, onConfirm = {
-        showNotice = false; creating = true; createdHere = true
+        showNotice = false; creating = true; createdHere = true; openAfterCreate = true
         projects.createProject(LocalDateTime.now().format(DateTimeFormatter.ofPattern("'点击链' MM-dd HH:mm")))
     })
 }
@@ -188,7 +223,7 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
     val playback by ClickPlayback.state.collectAsStateWithLifecycle()
     val recording by RecordingCoordinator.state.collectAsStateWithLifecycle()
     var draft by rememberSaveable(projectId, stateSaver = ClickPlanDraftSaver) { mutableStateOf(ClickPlanDraft()) }
-    var openRequested by rememberSaveable(projectId) { mutableStateOf(openOnLoad) }
+    var openRequested by remember(projectId) { mutableStateOf(openOnLoad) }
     var initialized by rememberSaveable(projectId) { mutableStateOf(false) }
     var dirty by rememberSaveable(projectId) { mutableStateOf(false) }
     var loading by remember(projectId) { mutableStateOf(true) }
@@ -207,6 +242,7 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
     var showApps by rememberSaveable(projectId) { mutableStateOf(false) }
     var showNotice by rememberSaveable(projectId) { mutableStateOf(false) }
     var showLeave by rememberSaveable(projectId) { mutableStateOf(false) }
+    var leaveForManualRecording by rememberSaveable(projectId) { mutableStateOf(false) }
     var showReload by rememberSaveable(projectId) { mutableStateOf(false) }
     var showResetGeometry by rememberSaveable(projectId) { mutableStateOf(false) }
     var pendingTarget by remember { mutableStateOf<ClickTargetApp?>(null) }
@@ -277,7 +313,9 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
                     message = if (openEditor) null else "已保存到本机 · 修订 ${plan.revision}"
                     if (openEditor) {
                         ClickPlayback.openEditor(context, plan)
-                    } else if (leave) onBack()
+                    } else if (leave) {
+                        if (leaveForManualRecording) onManualRecording() else onBack()
+                    }
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (_: Exception) {
                     saveFailed = true
@@ -293,11 +331,13 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
             else message = "请核对目标 App 和无障碍服务后重新打开悬浮窗。"
         }
     }
-    val leave: () -> Unit = {
+    val leaveTo: (Boolean) -> Unit = { manualRecording ->
         if (!saving) {
-            if (dirty) showLeave = true else onBack()
+            leaveForManualRecording = manualRecording
+            if (dirty) showLeave = true else if (manualRecording) onManualRecording() else onBack()
         }
     }
+    val leave: () -> Unit = { leaveTo(false) }
     if (reviewRunId != null) {
         ClickChainReviewRoute(requireNotNull(reviewRunId), onBack = { reviewRunId = null }, onOpenProject = onOpenProject)
         return
@@ -339,7 +379,7 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
         ),
         callbacks = ClickPlanCallbacks(
             onBack = leave,
-            onManualRecording = onManualRecording,
+            onManualRecording = { leaveTo(true) },
             onChooseTarget = { if (canEdit) showApps = true },
             onAddPoint = {
                 if (canEdit && draft.points.size < 40 && draft.width > 0 && draft.height > 0) {
@@ -411,7 +451,13 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
     if (showLeave) AlertDialog(onDismissRequest = { showLeave = false }, title = { Text("保留当前修改？") },
         text = { Text("点击计划有尚未保存的修改。可保存后返回，或放弃本次修改。") },
         confirmButton = { TextButton(enabled = canEdit && geometryMatches && error == null, onClick = { showLeave = false; save(false, true) }) { Text("保存并返回") } },
-        dismissButton = { TextButton(onClick = { showLeave = false; onBack() }) { Text("放弃修改并返回") } })
+        dismissButton = { Row {
+            TextButton(onClick = { showLeave = false }) { Text("继续编辑") }
+            TextButton(onClick = {
+                showLeave = false
+                if (leaveForManualRecording) onManualRecording() else onBack()
+            }) { Text(if (leaveForManualRecording) "放弃修改并继续" else "放弃修改并返回") }
+        } })
     if (showReload) AlertDialog(onDismissRequest = { showReload = false }, title = { Text("重新载入已保存计划？") },
         text = { Text("当前尚未保存的输入会被替换。") },
         confirmButton = { TextButton(onClick = { showReload = false; dirty = false; initialized = false; saveFailed = false; message = null; refresh++ }) { Text("重新载入") } },
@@ -484,9 +530,9 @@ internal enum class ClickPlanPrimaryAction { Unsupported, Wait, Blocked, EnableS
 
 /** Every prerequisite has an actionable next step; opening is never an implicit permission grant. */
 internal fun clickPlanPrimaryAction(state: ClickPlanUiState): ClickPlanPrimaryAction = when {
-    !state.overlaySupported -> ClickPlanPrimaryAction.Unsupported
     state.loading || state.saving -> ClickPlanPrimaryAction.Wait
     !state.editingEnabled || state.sessionActive -> ClickPlanPrimaryAction.Blocked
+    !state.overlaySupported -> ClickPlanPrimaryAction.Unsupported
     state.targetPackage.isBlank() || state.targetLabel == null -> ClickPlanPrimaryAction.ChooseTarget
     !state.connected -> ClickPlanPrimaryAction.EnableService
     state.canLocate -> ClickPlanPrimaryAction.OpenOverlay

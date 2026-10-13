@@ -11,6 +11,8 @@ class ClickPlanEntryPolicyTest {
         assertEquals(ClickPlanPrimaryAction.EnableService, clickPlanPrimaryAction(chosen))
         assertEquals(ClickPlanPrimaryAction.OpenOverlay, clickPlanPrimaryAction(chosen.copy(connected = true, canLocate = true)))
         assertEquals(ClickPlanPrimaryAction.Unsupported, clickPlanPrimaryAction(chosen.copy(overlaySupported = false)))
+        assertEquals(ClickPlanPrimaryAction.Wait, clickPlanPrimaryAction(chosen.copy(overlaySupported = false, saving = true)))
+        assertEquals(ClickPlanPrimaryAction.Wait, clickPlanPrimaryAction(chosen.copy(overlaySupported = false, loading = true)))
         assertEquals(ClickPlanPrimaryAction.Wait, clickPlanPrimaryAction(chosen.copy(loading = true)))
         assertEquals(ClickPlanPrimaryAction.Wait, clickPlanPrimaryAction(chosen.copy(saving = true)))
         assertEquals(ClickPlanPrimaryAction.Blocked, clickPlanPrimaryAction(chosen.copy(sessionActive = true)))

@@ -281,7 +281,7 @@ jobs:
           import xml.etree.ElementTree as ET
           cases = [case for path in Path("android/app/build/test-results/testPreviewUnitTest").glob("TEST-*.xml")
                    for case in ET.parse(path).getroot().iter("testcase")]
-          assert len(cases) == 4, f"Expected four entry checks: {len(cases)}"
+          assert len(cases) == 5, f"Expected five entry checks: {len(cases)}"
           assert all(not any(case.find(kind) is not None for kind in ("failure", "error", "skipped")) for case in cases)
           assert len(list(Path(os.environ["TAPSCENE_UI_OUTPUT"]).glob("*.png"))) == 6
           print("OVERLAY_ENTRY_HOST_CHECKS_OK: production navigation only; Android overlay/playback/recording NOT_RUN")
