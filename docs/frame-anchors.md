@@ -4,8 +4,8 @@
 
 ## 动作与画面
 
-- 第一点仍须满足目标窗口、完整默认屏幕和原有几何守卫，并收到至少一个真实编码样本；不以编码器 start 返回冒充就绪。
-- before 在实际派发前原子固定已经发布的 FBO 租约。后续 GL 读回使用该租约，不能改取后来画面；PNG 压缩、磁盘写入和编码确认均不延迟点击。
+- 第一点须满足目标窗口、完整默认屏幕和原有几何守卫，在原确认起算的 15 秒内完成[首次画面准入](proposals/initial-frame-admission.md)。请求后的正常呈现 tick 固定当时实际当前源帧，只等待它原始 canonical 的精确提交/mux 匹配；不以全局旧帧 ready 或编码器 start 返回冒充。
+- 首个 before 是准入时选定的初始快照，私有 evidence v2 明确记录选择/消费时间、选择 tick 与原确认截止；不声称是派发瞬间最新画面。后续 before 仍在实际派发前原子固定已发布 FBO。GL 读回使用原租约，不能改取后来画面；PNG 压缩与磁盘写入不额外等待。
 - 进入源采集前在短锁中预留序号，Completed 回调到达时记录含在途采集的保守下界，包括同步回调早于接受日志落盘的情况。waitAfter 结束时取其后观察到、下一动作之前的末个真实帧；这是观察顺序，不能证明业务动作已成功，也不证明生产者在回调后才生成像素。
 - 静态画面没有新帧时 after 为 NoNewFrame；PNG 队列、数量、空间或压缩失败仅使辅助证据 Missing。不会额外等待、补图、重放或改变已配置的点击节奏。
 - 暂停、非目标窗口、几何变化和停止关闭当前 epoch。已经固定的 ticket 可以异步补齐原证据；迟到回调不能改变终态动作事实或填进新一轮。
@@ -15,7 +15,7 @@
 
 SurfaceTexture 的时间起点属于其生产者，只用于真实源身份和源内差值，不与 uptime、elapsed 或 wallclock 对齐。视频采用独立的显式呈现时钟，从第一份实际呈现意图开始使用 elapsedRealtimeNanos 的相对差值，通过 eglPresentationTimeANDROID 送入编码器。时钟倒退、微秒量化冲突或帧率门限明确跳过，不用“上一帧加一”修补。
 
-静态页使用同一个规范化 FBO 的明确重复显示样本维持视频时长。重复显示不调用 updateTexImage，不新增 sourceFrameId/captureSequence/sourceTimestampNs，不生成 after。每个真实源帧只有一份固定的首个呈现绑定；后续重复显示不能替换它，即使首个样本未获编码匹配。尚未呈现的新源帧缺少锚点，不捏造其 PTS。
+静态页使用同一个规范化 FBO 的明确重复显示样本维持视频时长。重复显示不调用 updateTexImage，不新增 sourceFrameId/captureSequence/sourceTimestampNs，不生成 after。每个真实源帧只有一份固定的首个呈现绑定；后续重复显示不能替换它，即使首个样本未获编码匹配。后续边界尚未呈现的新源帧缺少锚点，不捏造其 PTS。首次准入单独保留其选定源，原始匹配未到时只是有界 Pending；不能换用后续重复样本。
 
 真实非配置、非空编码输出到达时先冻结精确的已知关联，muxer 写成功后才分配实际样本序号。写入期间后来出现的同 PTS 不能认领未知输出；EGL 成功返回与编码输出可先后交错，但最终必须两者齐全。没有最近时间猜配；分片、重复和逆序压缩样本失败，不排序重写视频。封口后 MediaExtractor 逐样本读取实际序号/containerPtsUs 并核对样本数量。容器舍入值独立保存，不默认等于 encoderPtsUs，也不用毫秒取帧器乘回微秒作为校验。
 
@@ -25,9 +25,9 @@ SurfaceTexture 的时间起点属于其生产者，只用于真实源身份和�
 
 停止先关闭点击/新帧门禁，独立清理线程断开 VD 和投影，再停止 GL 提交、发送 EOS、有限排空、停止并释放 muxer/codec，之后才 fsync/原子封口 MP4、校验证据、登记稳定 sourceId。EOS 等待最多五秒，外层驱动等待七秒；超时不代表驱动已释放，不标 sealed、不删仍被持有的文件，也不开放新录制。仍保留原所有者，迟到释放后只清理失败片段，不恢复点击或录制。
 
-三份规范化 FBO、最多两个在途截图、一条有界 PNG 队列；每会话最多 80 个边界、100 MiB 原 PNG，单张最多 12 MiB。实际 .part 文件计入预算，写图前另保留当前视频独立登记副本和 64 MiB 空间。耗尽只缺少证据；主视频低空间门禁仍负责停止。读回仍有 GPU 同步和内存峰值成本，不因异步压缩而消失。
+三份规范化 FBO、最多两个在途截图、一条有界 PNG 队列；首次准入最多占用其中一份额外租约，等待时无 Bitmap，取消归还、消费转交原 PNG 管线；每会话最多 80 个边界、100 MiB 原 PNG，单张最多 12 MiB。实际 .part 文件计入预算，写图前另保留当前视频独立登记副本和 64 MiB 空间。耗尽只缺少证据；主视频低空间门禁仍负责停止。读回仍有 GPU 同步和内存峰值成本，不因异步压缩而消失。
 
-证据在 noBackup 私有目录，独立于录制临时 MP4 清理。登记完成只清理临时视频，不删有效 PNG。明确删除源/项目且提交已确认后，以精确归属和持久撤销记录清理；迟到写入不能复活。未知提交、损坏归属或不明文件保留，不猜测清除。恢复不会重启投影、手势或 PNG 任务；旧 v1 录制/点击日志继续可读。
+证据在 noBackup 私有目录，独立于录制临时 MP4 清理。登记完成只清理临时视频，不删有效 PNG。明确删除源/项目且提交已确认后，以精确归属和持久撤销记录清理；迟到写入不能复活。未知提交、损坏归属或不明文件保留，不猜测清除。恢复不会重启投影、手势或 PNG 任务；旧 v1 录制/点击日志和无准入元数据的证据继续可读；含首次快照语义的私有 evidence v2 由旧 reader 拒绝。
 
 ## 后续候选消费合同
 
@@ -39,8 +39,8 @@ withDecodedFrameSuspending 提供自动回收的 Bitmap 作用域，供现有 Sa
 
 ## 核验范围
 
-只增加三组必要检查：真实时间差/精确匹配/样本序号；动作窗口/静态 Missing/迟到回调/至多一次及有限租约；私有存储/旧日志兼容/崩溃与归属删除。Android 构建、lint、主机原生 PNG/SQLite 及必要合成检查以最终 PR 精确 CI 为准。
+必要检查包括：真实时间差/精确匹配/样本序号；动作窗口/静态 Missing/迟到回调/至多一次及有限租约；私有存储/旧日志兼容/崩溃与归属删除。Android 构建、lint、主机原生 PNG/SQLite 及必要合成检查以最终 PR 精确 CI 为准。
 
-实体手机的长屏方向/颜色、坐标/system bars、读回延迟/温度/内存、锁屏/系统停止、驱动 EOS 和进程断电仍未验证。新增[有限云端运行入口](../tools/runtime-checks/README.md) 只在一次性软件模拟器里，按正常系统 UI 授权，向无网络合成目标执行真实点击并检查生产录制；结果以该入口实际产物为准，不外推用户设备。它不生成新的手机交付签名或向用户设备安装 APK。
+实体手机的长屏方向/颜色、坐标/system bars、读回延迟/温度/内存、锁屏/系统停止、驱动 EOS 和进程断电仍未验证。新增[有限云端运行入口](../tools/runtime-checks/README.md) 只在单次批准的一次性固定云端模拟器里，按正常系统 UI 授权，向无网络合成目标执行真实点击并检查生产录制；结果以该入口实际产物为准，不外推用户设备。它不生成新的手机交付签名或向用户设备安装 APK。
 
 官方接口依据：[MediaProjection](https://developer.android.com/media/grow/media-projection)、[SurfaceTexture](https://developer.android.com/reference/android/graphics/SurfaceTexture)、[MediaCodec](https://developer.android.com/reference/android/media/MediaCodec)、[MediaMuxer](https://developer.android.com/reference/android/media/MediaMuxer)、[EGL 时间戳](https://registry.khronos.org/EGL/extensions/ANDROID/EGL_ANDROID_presentation_time.txt)。

@@ -112,6 +112,9 @@ internal class FrameEvidenceStore(context: Context) {
                 "Captured frame identity cannot be rebound"
             }
         }
+        check(ticket.admission == null || session.frames.none { it.ticket.admission != null }) {
+            "Only the initial Before may carry admission provenance"
+        }
         save(session.copy(frames = session.frames + FrameRecord(ticket)))
     }
 
@@ -441,7 +444,8 @@ internal class FrameEvidenceStore(context: Context) {
     private fun save(session: Session) {
         val directory = directory(session.sessionId)
         check(directory.isDirectory)
-        val json = JSONObject().put("version", 1).put("projectId", session.projectId)
+        val version = if (session.frames.any { it.ticket.admission != null }) 2 else 1
+        val json = JSONObject().put("version", version).put("projectId", session.projectId)
             .put("sessionId", session.sessionId).put("sourceId", session.sourceId)
             .put("sealed", session.sealed).put("registered", session.registered)
             .put("sourceSha256", session.sourceSha256 ?: JSONObject.NULL)
@@ -470,14 +474,17 @@ internal class FrameEvidenceStore(context: Context) {
     private fun read(sessionId: String, allowRevoked: Boolean = false): Session {
         check(allowRevoked || !isRevoked(sessionId)) { "Evidence session was deleted" }
         val json = JSONObject(String(readAtomic(atomic(sessionId)), Charsets.UTF_8))
-        check(json.getInt("version") == 1)
+        val version = json.getInt("version")
+        check(version in 1..2) { "Unsupported frame evidence version" }
         val projectId = json.getString("projectId").also(::requireFrameUuid)
         val sourceId = json.getString("sourceId").also(::requireFrameUuid)
         check(json.getString("sessionId") == sessionId)
         val hash = json.nullableString("sourceSha256")?.also(::requireHash)
         val array = json.getJSONArray("frames")
         check(array.length() <= MAX_IMAGES)
-        val frames = (0 until array.length()).map { readFrame(array.getJSONObject(it)) }
+        val frames = (0 until array.length()).map { readFrame(array.getJSONObject(it), version) }
+        val admissions = frames.count { it.ticket.admission != null }
+        check(if (version == 1) admissions == 0 else admissions == 1) { "Invalid admission evidence version" }
         val missingArray = json.optJSONArray("misses") ?: JSONArray()
         check(array.length() + missingArray.length() <= MAX_IMAGES)
         val misses = (0 until missingArray.length()).map { index ->
@@ -544,9 +551,35 @@ internal class FrameEvidenceStore(context: Context) {
             .put("status", if (frame.missingReason != null) "Missing" else if (registered && frame.png != null &&
                 frame.encoderPtsUs != null && frame.containerPtsUs != null && frame.sourceSha256 != null) "Ready" else "Pending")
             .put("missingReason", frame.missingReason?.name ?: JSONObject.NULL)
+            .also { json -> ticket.admission?.let { json.put("admission", admissionJson(it)) } }
     }
 
-    private fun readFrame(json: JSONObject): FrameRecord {
+    private fun admissionJson(value: InitialFrameAdmissionMetadata): JSONObject = JSONObject()
+        .put("kind", "AdmissionTimeSnapshot")
+        .put("confirmedAtUptimeMs", value.confirmedAtUptimeMs).put("deadlineUptimeMs", value.deadlineUptimeMs)
+        .put("selectedAtUptimeMs", value.selectedAtUptimeMs)
+        .put("selectionPresentationSampleId", value.selectionPresentationSampleId)
+        .put("selectionPresentationPtsUs", value.selectionPresentationPtsUs)
+        .put("consumedAtUptimeMs", value.consumedAtUptimeMs)
+
+    private fun readAdmission(value: JSONObject): InitialFrameAdmissionMetadata {
+        check(value.keys().asSequence().toSet() == setOf("kind", "confirmedAtUptimeMs", "deadlineUptimeMs",
+            "selectedAtUptimeMs", "selectionPresentationSampleId", "selectionPresentationPtsUs", "consumedAtUptimeMs"))
+        check(value.getString("kind") == "AdmissionTimeSnapshot") { "Unsupported initial frame semantics" }
+        fun time(name: String): Long {
+            val number = value.get(name)
+            check(number is Number) { "Admission metadata must contain integer timestamps" }
+            return checkNotNull(number.toString().toLongOrNull()) { "Admission timestamp is not an integer" }
+        }
+        return InitialFrameAdmissionMetadata(time("confirmedAtUptimeMs"), time("deadlineUptimeMs"),
+            time("selectedAtUptimeMs"), time("selectionPresentationSampleId"), time("selectionPresentationPtsUs"),
+            time("consumedAtUptimeMs"))
+    }
+
+    private fun readFrame(json: JSONObject, version: Int): FrameRecord {
+        // A v1 reader ignored unknown fields: require v2 before accepting the new Before meaning.
+        check(version >= 2 || !json.has("admission")) { "Admission metadata requires evidence v2" }
+        val admission = if (json.has("admission")) readAdmission(json.getJSONObject("admission")) else null
         val action = json.getJSONObject("action")
         val geometry = json.getJSONObject("geometry")
         val ticket = FrameTicket(json.getString("ticketId"),
@@ -555,7 +588,7 @@ internal class FrameEvidenceStore(context: Context) {
             json.getLong("captureSequence"), json.getLong("sourceTimestampNs"), json.getLong("submittedPtsUs"),
             FrameGeometry(geometry.getString("geometryId"), geometry.getInt("displayWidth"), geometry.getInt("displayHeight"),
                 geometry.getInt("frameWidth"), geometry.getInt("frameHeight"), geometry.getDouble("scale"),
-                geometry.getDouble("offsetX"), geometry.getDouble("offsetY")), FrameFreshness.valueOf(json.getString("freshness")))
+                geometry.getDouble("offsetX"), geometry.getDouble("offsetY")), FrameFreshness.valueOf(json.getString("freshness")), admission)
         val png = json.optJSONObject("png")?.let {
             Png(it.getString("sha256").also(::requireHash), it.getLong("bytes"), it.getInt("width"), it.getInt("height")).also { value ->
                 check(value.bytes in 1..MAX_PNG_BYTES.toLong() && value.width == ticket.geometry.frameWidth && value.height == ticket.geometry.frameHeight)

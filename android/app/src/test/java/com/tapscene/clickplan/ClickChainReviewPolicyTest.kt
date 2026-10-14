@@ -9,6 +9,41 @@ import org.junit.Test
 
 /** Pure author-route policy; no recording, actual touch or human privacy judgment is simulated. */
 class ClickChainReviewPolicyTest {
+    @Test fun initialSnapshotNoticeDoesNotClaimDispatchTimeOrChangeReviewRequirements() {
+        val original = capture(2)
+        val first = original.actions.first()
+        val before = checkNotNull(first.before)
+        val metadata = InitialFrameAdmissionMetadata(100,15_100,120,1,0,250)
+        val admitted = before.copy(ticket = before.ticket.copy(admission = metadata))
+        val capture = original.copy(actions = listOf(first.copy(before = admitted)) + original.actions.drop(1))
+        val route = ClickChainRoutePolicy.route(capture,1,2,emptyMap())
+        check(route.issue == null && route.stages.first().choices.single().label == "首次点击前的初始快照")
+        check(admitted.selectionNotice == INITIAL_SNAPSHOT_NOTICE && before.selectionNotice == null)
+        check(sameCapturedFrame(before,admitted)) // Same source pixels; temporal selection semantics stay separate.
+        check(capture.frames.getValue(admitted.key).ticket.admission == metadata)
+        val pending = ClickChainReviewUiState(totalActions = 2,stages = listOf(reviewStage(0,admitted.key)),
+            frames = listOf(ClickChainFrameRow(admitted.key,"初始画面",false,selectionNotice = admitted.selectionNotice)),
+            actions = listOf(reviewAction(first.action.actionId).copy(selectionNotice = admitted.selectionNotice)))
+        check(pending.nextRequiredReview() == ClickChainReviewTarget.Frame(admitted.key) && !pending.canCreate)
+        check(pending.copy(stages = pending.stages.map { it.copy(reviewed = true) }).nextRequiredReview() ==
+            ClickChainReviewTarget.Action(first.action.actionId))
+    }
+
+    @Test fun boundaryDedupRetainsAdmissionNoticeAndRejectsConflictingSelectionFacts() {
+        val original = capture(1)
+        val action = original.actions.single()
+        val before = checkNotNull(action.before)
+        val admitted = before.copy(ticket = before.ticket.copy(admission = InitialFrameAdmissionMetadata(100,15_100,120,1,0,250)))
+        val reused = before.copy(ticket = before.ticket.copy(ticketId = id(),boundary = FrameBoundary.After,freshness = FrameFreshness.StaticReuse))
+        val capture = original.copy(actions = listOf(action.copy(before = admitted,after = reused)))
+        check(capture.frames.size == 1 && capture.frames.values.single().selectionNotice == INITIAL_SNAPSHOT_NOTICE)
+        // Even if another boundary using those pixels is seen first, selection provenance is retained.
+        val reverse = original.copy(actions = listOf(action.copy(before = before,after = null),action.copy(before = admitted,after = reused)))
+        check(reverse.frames.values.single().ticket.admission == admitted.ticket.admission)
+        val changed = admitted.copy(ticket = admitted.ticket.copy(admission = admitted.ticket.admission!!.copy(consumedAtUptimeMs = 251)))
+        check(runCatching { original.copy(actions = listOf(action.copy(before = admitted),action.copy(before = changed))) }.isFailure)
+    }
+
     @Test fun representativesKeepContinuityWithoutMergingDifferentCapturedFrames() {
         val capture = capture(2)
         val default = ClickChainRoutePolicy.route(capture,1,2,emptyMap())

@@ -45,5 +45,21 @@ class FrameBoundaryWindowTest {
             assertNull(window.afterLowerBound(it))
         }
     }
+    @Test fun admissionSelectionQueryDoesNotBeginTheBoundaryOrBindItsRun() {
+        val window = window()
+        assertFalse(window.hasSelection(action, FrameBoundary.Before))
+        window.complete(action, 9)
+        assertNull(window.afterLowerBound(action))
+        // A mere readiness reservation did not lock the window to this generation.
+        val actual = action.copy(generation = 2)
+        assertTrue(window.accepts(actual))
+        assertNull(window.begin(actual, FrameBoundary.Before))
+        val missing = AnchorResult.Missing(FrameMissingReason.NoFrame)
+        window.retain(actual, FrameBoundary.Before, missing)
+        assertTrue(window.hasSelection(actual, FrameBoundary.Before))
+        window.cancel()
+        assertTrue(window.hasSelection(actual, FrameBoundary.Before))
+    }
+
     companion object { private fun id() = UUID.randomUUID().toString() }
 }

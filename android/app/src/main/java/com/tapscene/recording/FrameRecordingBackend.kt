@@ -74,6 +74,10 @@ internal class FrameRecordingBackend private constructor(
     private val codecThread = workers.codec
     private val gl = Handler(glThread.looper)
     private val output = Handler(codecThread.looper)
+    private var admission: AdmissionRequest? = null
+    private val admissionDeadline = Runnable {
+        if (::renderer.isInitialized) synchronized(renderer.slotLock) { admission?.let(::refreshAdmissionLocked) }
+    }
     override val captureSurface: Surface get() = renderer.captureSurface
     override val captureWidth = canvas.width
     override val captureHeight = canvas.height
@@ -87,8 +91,122 @@ internal class FrameRecordingBackend private constructor(
         }
         override fun afterWait(action: FrameAnchorAction): AnchorResult = freeze(action, FrameBoundary.After)
         override fun cancelEpoch(reason: FrameMissingReason) {
-            synchronized(renderer.slotLock) { window.cancel() }
+            synchronized(renderer.slotLock) {
+                window.cancel()
+                admission?.let { revokeAdmissionLocked(it, InitialFrameAdmissionStatus.Cancelled) }
+            }
         }
+    }
+
+    override val initialFrames: InitialFrameAdmissionPort = object : InitialFrameAdmissionPort {
+        override fun begin(action: FrameAnchorAction, authorization: InitialFrameAuthorization,
+            onChanged: () -> Unit): InitialFrameAdmissionHandle {
+            if (!::renderer.isInitialized) return InitialFrameAdmissionPort.Unavailable.begin(action, authorization, onChanged)
+            return synchronized(renderer.slotLock) {
+                if (!accepts(action) || admission?.reservation?.epoch == window.epoch ||
+                    admission?.reservation?.status == InitialFrameAdmissionStatus.Consumed ||
+                    window.hasSelection(action, FrameBoundary.Before)) {
+                    return@synchronized InitialFrameAdmissionPort.Unavailable.begin(action, authorization, onChanged)
+                }
+                // A prior epoch is terminal, but its returned handle must still safely support cancel.
+                admission?.let { revokeAdmissionLocked(it, InitialFrameAdmissionStatus.Cancelled) }
+                val request = AdmissionRequest(action, authorization, window.epoch, onChanged)
+                admission = request
+                refreshAdmissionLocked(request)
+                if (request.reservation.status == InitialFrameAdmissionStatus.Pending) {
+                    output.removeCallbacks(admissionDeadline)
+                    val delay = (authorization.deadlineUptimeMs - SystemClock.uptimeMillis() + 1).coerceAtLeast(0)
+                    if (!output.postDelayed(admissionDeadline, delay)) {
+                        revokeAdmissionLocked(request, InitialFrameAdmissionStatus.Unavailable)
+                    }
+                }
+                request
+            }
+        }
+    }
+
+    private inner class AdmissionRequest(action: FrameAnchorAction, authorization: InitialFrameAuthorization,
+        epoch: Long, val onChanged: () -> Unit) : InitialFrameAdmissionHandle {
+        val reservation = InitialFrameReservation<RecordingGlRenderer.PinnedSlot>(action, authorization, epoch, renderer::releasePin)
+        var notificationQueued = false
+        override val status: InitialFrameAdmissionStatus
+            get() = synchronized(renderer.slotLock) { refreshAdmissionLocked(this); reservation.status }
+        override fun consume(): AnchorResult = consumeAdmission(this)
+        override fun cancel() = synchronized(renderer.slotLock) {
+            revokeAdmissionLocked(this, InitialFrameAdmissionStatus.Cancelled)
+        }
+    }
+
+    /** Hints are coalesced and invoked after releasing both FBO and ledger locks, even on reentry. */
+    private fun admissionChangedLocked(request: AdmissionRequest, previous: InitialFrameAdmissionStatus) {
+        if (request.reservation.status == previous) return
+        if (request === admission && request.reservation.status != InitialFrameAdmissionStatus.Pending &&
+            request.reservation.status != InitialFrameAdmissionStatus.Ready) output.removeCallbacks(admissionDeadline)
+        if (request.notificationQueued) return
+        request.notificationQueued = true
+        if (!output.post {
+            val callback = synchronized(renderer.slotLock) {
+                request.notificationQueued = false
+                request.onChanged
+            }
+            runCatching(callback)
+        }) request.notificationQueued = false
+    }
+
+    private fun refreshAdmissionLocked(request: AdmissionRequest) {
+        val reservation = request.reservation
+        val previous = reservation.status
+        reservation.refresh(SystemClock.uptimeMillis(), window.epoch,
+            request === admission && accepts(reservation.action), reservation.sourceSequence?.let(ledger::matchSource))
+        admissionChangedLocked(request, previous)
+    }
+
+    private fun revokeAdmissionLocked(request: AdmissionRequest, status: InitialFrameAdmissionStatus) {
+        val previous = request.reservation.status
+        request.reservation.revoke(status)
+        admissionChangedLocked(request, previous)
+    }
+
+    private fun consumeAdmission(request: AdmissionRequest): AnchorResult = synchronized(renderer.slotLock) {
+        refreshAdmissionLocked(request)
+        val reservation = request.reservation
+        if (reservation.status != InitialFrameAdmissionStatus.Ready) {
+            revokeAdmissionLocked(request, InitialFrameAdmissionStatus.Unavailable)
+            return@synchronized AnchorResult.Missing(FrameMissingReason.ClosedEpoch)
+        }
+        val action = reservation.action
+        window.begin(action, FrameBoundary.Before)?.let {
+            revokeAdmissionLocked(request, InitialFrameAdmissionStatus.Unavailable)
+            return@synchronized AnchorResult.Missing(FrameMissingReason.ClosedEpoch)
+        }
+        fun missing(reason: FrameMissingReason): AnchorResult = AnchorResult.Missing(reason).also {
+            revokeAdmissionLocked(request, InitialFrameAdmissionStatus.Unavailable)
+            window.retain(action, FrameBoundary.Before, it)
+            enqueueEvidence { evidence.persistMissing(action, FrameBoundary.Before, reservation.epoch, reason) }
+        }
+        if (imageCount >= 80) return@synchronized missing(FrameMissingReason.BudgetExceeded)
+        if (!pngPermits.tryAcquire()) return@synchronized missing(FrameMissingReason.QueueFull)
+        val selected = reservation.consume(SystemClock.uptimeMillis(), window.epoch, accepts(action),
+            reservation.sourceSequence?.let(ledger::matchSource))
+        admissionChangedLocked(request, InitialFrameAdmissionStatus.Ready)
+        if (selected == null) {
+            pngPermits.release()
+            return@synchronized AnchorResult.Missing(FrameMissingReason.ClosedEpoch)
+        }
+        val frame = selected.selection.canonical
+        val slot = selected.selection.lease
+        val ticket = FrameTicket(UUID.randomUUID().toString(), action, FrameBoundary.Before, reservation.epoch,
+            selected.selection.observation.sourceFrameId, frame.sequence, frame.timestampNs, frame.submittedPtsUs, geometry,
+            if (frame.sequence == lastBoundarySequence) FrameFreshness.StaticReuse else FrameFreshness.Fresh, selected.metadata)
+        if (!enqueueEvidence { evidence.persistTicket(ticket) }) {
+            renderer.releasePin(slot); pngPermits.release()
+            return@synchronized missing(FrameMissingReason.QueueFull)
+        }
+        imageCount++; lastBoundarySequence = frame.sequence; tickets += ticket
+        val result = AnchorResult.Ticket(ticket)
+        window.retain(action, FrameBoundary.Before, result)
+        writePinned(ticket, slot)
+        result
     }
 
     private fun codecCallback(): MediaCodec.Callback = object : MediaCodec.Callback() {
@@ -224,13 +342,27 @@ internal class FrameRecordingBackend private constructor(
                 if (decision !is PresentationDecision.Submit) return@synchronized null
                 slot = checkNotNull(renderer.pinLatest()) { "Observation has no normalized frame" }
                 check(slot!!.frame == decision.sample.observation) { "Presentation observation changed" }
-                ledger.planned(decision.sample)
+                val canonical = ledger.planned(decision.sample)
+                admission?.let { request ->
+                    val previous = request.reservation.status
+                    request.reservation.select(decision.sample, canonical, SystemClock.uptimeMillis(), window.epoch,
+                        accepts(request.reservation.action)) {
+                        checkNotNull(renderer.pinLatest()).also { check(it.frame == decision.sample.observation) }
+                    }
+                    admissionChangedLocked(request, previous)
+                }
                 decision.sample
             }
             if (sample != null) {
                 renderer.submitPinned(checkNotNull(slot), sample.presentationPtsUs)
                 // The callback may have already muxed this exact PTS. Readiness joins both facts.
                 ledger.submitted(sample.presentationSampleId)
+                synchronized(renderer.slotLock) {
+                    admission?.let {
+                        it.reservation.submitted(sample.presentationSampleId)
+                        refreshAdmissionLocked(it)
+                    }
+                }
                 output.post { checkReadiness() }
             }
             schedulePresentation()
@@ -241,17 +373,22 @@ internal class FrameRecordingBackend private constructor(
 
     /** Called only on the codec worker; start() is not evidence of a real encoded sample. */
     private fun checkReadiness() {
+        synchronized(renderer.slotLock) { admission?.let(::refreshAdmissionLocked) }
         if (!encodedSample && !failed && !stopStarted && ledger.hasCanonicalMatch()) {
             encodedSample = true
             onReady()
         }
     }
 
-    private fun accepts(action: FrameAnchorAction): Boolean = accepting && !failed && evidenceAvailable &&
+    private fun accepts(action: FrameAnchorAction): Boolean = accepting && !captureClosed && !stopStarted && !failed && evidenceAvailable &&
         window.accepts(action)
 
     private fun freeze(action: FrameAnchorAction, boundary: FrameBoundary): AnchorResult {
         synchronized(renderer.slotLock) {
+            // The admission capability is the sole owner of this Before until it is consumed.
+            if (boundary == FrameBoundary.Before && admission?.reservation?.let {
+                it.action == action && it.epoch == window.epoch && it.status != InitialFrameAdmissionStatus.Consumed
+            } == true) return AnchorResult.Missing(FrameMissingReason.ClosedEpoch)
             window.begin(action, boundary)?.let { return it }
             if (!accepts(action)) return AnchorResult.Missing(FrameMissingReason.CaptureStopped)
             fun missing(reason: FrameMissingReason): AnchorResult = AnchorResult.Missing(reason).also {
@@ -286,30 +423,34 @@ internal class FrameRecordingBackend private constructor(
             imageCount++; lastBoundarySequence = frame.sequence; tickets += ticket
             val selected = AnchorResult.Ticket(ticket)
             window.retain(action, boundary, selected)
-            // Selection and the pin happened synchronously. This task can never read a newer slot.
-            if (!gl.post {
-                var bitmap: android.graphics.Bitmap? = null
-                try {
-                    bitmap = renderer.readPinned(slot)
-                    val owned = bitmap
-                    if (enqueueEvidence {
-                        try { evidence.recordPng(ticket, checkNotNull(owned)) }
-                        catch (_: Exception) { runCatching { evidence.missing(ticket, FrameMissingReason.PngFailed) } }
-                        catch (_: OutOfMemoryError) { runCatching { evidence.missing(ticket, FrameMissingReason.PngFailed) } }
-                        finally { owned?.recycle(); pngPermits.release() }
-                    }) bitmap = null else pngPermits.release()
-                } catch (_: Exception) {
-                    enqueueEvidence { evidence.missing(ticket, FrameMissingReason.PngFailed) }
-                    pngPermits.release()
-                } catch (_: OutOfMemoryError) {
-                    enqueueEvidence { evidence.missing(ticket, FrameMissingReason.PngFailed) }
-                    pngPermits.release()
-                } finally { bitmap?.recycle(); renderer.releasePin(slot) }
-            }) {
-                renderer.releasePin(slot); pngPermits.release()
-                enqueueEvidence { evidence.missing(ticket, FrameMissingReason.CaptureStopped) }
-            }
+            writePinned(ticket, slot)
             return selected
+        }
+    }
+
+    /** Both ordinary boundaries and admission consumption transfer the same bounded PNG ownership. */
+    private fun writePinned(ticket: FrameTicket, slot: RecordingGlRenderer.PinnedSlot) {
+        if (!gl.post {
+            var bitmap: android.graphics.Bitmap? = null
+            try {
+                bitmap = renderer.readPinned(slot)
+                val owned = bitmap
+                if (enqueueEvidence {
+                    try { evidence.recordPng(ticket, checkNotNull(owned)) }
+                    catch (_: Exception) { runCatching { evidence.missing(ticket, FrameMissingReason.PngFailed) } }
+                    catch (_: OutOfMemoryError) { runCatching { evidence.missing(ticket, FrameMissingReason.PngFailed) } }
+                    finally { owned?.recycle(); pngPermits.release() }
+                }) bitmap = null else pngPermits.release()
+            } catch (_: Exception) {
+                enqueueEvidence { evidence.missing(ticket, FrameMissingReason.PngFailed) }
+                pngPermits.release()
+            } catch (_: OutOfMemoryError) {
+                enqueueEvidence { evidence.missing(ticket, FrameMissingReason.PngFailed) }
+                pngPermits.release()
+            } finally { bitmap?.recycle(); renderer.releasePin(slot) }
+        }) {
+            renderer.releasePin(slot); pngPermits.release()
+            enqueueEvidence { evidence.missing(ticket, FrameMissingReason.CaptureStopped) }
         }
     }
 
@@ -330,6 +471,7 @@ internal class FrameRecordingBackend private constructor(
             // Freeze at the capture gate, never after potentially slow VD/GL/codec cleanup.
             endPresentationPtsUs = presentationClock.close(SystemClock.elapsedRealtimeNanos())
             window.cancel()
+            admission?.let { revokeAdmissionLocked(it, InitialFrameAdmissionStatus.Unavailable) }
         } else {
             captureClosed = true
             accepting = false

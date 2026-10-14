@@ -261,6 +261,7 @@ private fun ClickChainStageContent(stage: ClickChainStageRow, frame: ClickChainF
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Text(when { stage.selectedKey == null -> "缺少画面证据"; stage.reviewed -> "已复核"; else -> "待复核" },
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                frame?.selectionNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 TextButton({ stage.selectedKey?.let(callbacks.onReviewFrame) }, enabled = editable && stage.selectedKey != null) {
                     Text(if (stage.reviewed) "查看画面" else "复核画面")
                 }
@@ -286,6 +287,7 @@ private fun ClickChainFrameRowContent(frame: ClickChainFrameRow, editable: Boole
             Text(frame.title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text(if (frame.reviewed) "已复核" else "待复核", style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
+            frame.selectionNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             TextButton({ callbacks.onReviewFrame(frame.key) }, enabled = editable) { Text(if (frame.reviewed) "查看画面" else "复核画面") }
         }
     }
@@ -324,6 +326,7 @@ private fun ClickChainActionRowContent(action: ClickChainActionRow, editable: Bo
                 maxLines = 3, overflow = TextOverflow.Ellipsis)
             Text(action.detail ?: when { action.confirmed -> "点击区域与去向已确认"; action.enabled -> "点击区域与去向待确认"; else -> "先复核前后画面" },
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            action.selectionNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             TextButton({ callbacks.onReviewAction(action.actionId) }, enabled = editable && action.enabled) {
                 Text(if (action.confirmed) "查看点击区域" else "核对点击区域")
             }
@@ -371,6 +374,7 @@ private fun ClickChainFramePanel(editor: ClickChainFrameEditor, state: ClickChai
                     verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     OutlinedTextField(editor.title, callbacks.onFrameTitleChange, Modifier.fillMaxWidth(),
                         enabled = idle, label = { Text("画面标题") }, singleLine = true)
+                    editor.selectionNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                     if (reviewMode) Text("可双指放大检查完整输出，确认没有遗漏的敏感内容。", style = MaterialTheme.typography.bodySmall)
                     else {
                         Text("拖动画面添加遮挡；无敏感内容可直接生成。", style = MaterialTheme.typography.bodySmall)
@@ -487,6 +491,7 @@ private fun ClickChainActionPanel(editor: ClickChainActionEditor, state: ClickCh
                 Column(modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("拖动区域移动，拖右下角调整大小。", style = MaterialTheme.typography.bodySmall)
+                    editor.selectionNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                     OutlinedTextField(editor.label, callbacks.onActionLabelChange, Modifier.fillMaxWidth(),
                         enabled = idle, label = { Text("动作名称") }, singleLine = true)
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {

@@ -411,6 +411,7 @@ jobs:
             --tests com.tapscene.data.TextRegionDraftHostTest \
             --tests com.tapscene.ui.TextRegionWorkspaceHostTest \
             --tests com.tapscene.clickplan.ClickRunEngineTest \
+            --tests com.tapscene.clickplan.InitialFrameAdmissionEngineTest \
             --tests com.tapscene.clickplan.ClickPlanStoreHostTest \
             --tests com.tapscene.clickplan.ClickOverlayPointHostTest \
             --tests com.tapscene.clickplan.ClickWindowPolicyTest \
@@ -425,6 +426,7 @@ jobs:
             --tests com.tapscene.recording.RecordingPresentationLedgerTest \
             --tests com.tapscene.recording.RecordingDrainGateTest \
             --tests com.tapscene.recording.FrameLeasePoolTest \
+            --tests com.tapscene.recording.InitialFrameReservationTest \
             --tests com.tapscene.recording.FrameBoundaryWindowTest \
             --tests com.tapscene.recording.FrameEvidenceStoreHostTest \
             2>&1 | tee "$RUNNER_TEMP/host-data-checks.txt"
@@ -440,6 +442,41 @@ jobs:
           root = Path("android/app/build/test-results/testDebugUnitTest")
           files = sorted(root.glob("TEST-*.xml"))
           expected = {
+              ("com.tapscene.clickplan.InitialFrameAdmissionEngineTest", "pendingLeavesReadyWithoutStartedIntentOrGestureAndNeverBeginsTwice"): 1,
+              ("com.tapscene.clickplan.InitialFrameAdmissionEngineTest", "preparationPredicatesAndBeginCannotReopenAReentrantlyCancelledRun"): 1,
+              ("com.tapscene.clickplan.InitialFrameAdmissionEngineTest", "synchronousForeignThreadAndDuplicateNotificationsOnlyEnqueueOneStartAndOneCall"): 1,
+              ("com.tapscene.clickplan.InitialFrameAdmissionEngineTest", "intentFsyncStillYieldsForUnsafeWindowStopGeometryAndRecordingEvents"): 1,
+              ("com.tapscene.clickplan.InitialFrameAdmissionEngineTest", "timeoutDoesNotRenewAuthorizationAndExplicitResumeRequiresANewArmAndEpoch"): 1,
+              ("com.tapscene.clickplan.InitialFrameAdmissionEngineTest", "pauseAfterIntentKeepsTheSameUncalledTokenAndResumeDoesNotRewriteStartedOrIntent"): 1,
+              ("com.tapscene.clickplan.InitialFrameAdmissionEngineTest", "waitingAgainAfterIntentKeepsOneIntentUntilTheSameHandleBecomesReady"): 1,
+              ("com.tapscene.clickplan.InitialFrameAdmissionEngineTest", "pendingGuardFailureStopAndRecordingLossCancelAndIgnoreLateReady"): 1,
+              ("com.tapscene.clickplan.InitialFrameAdmissionEngineTest", "changedConfirmationAndExpiredFsyncCannotConsumeAnOtherwiseReadyHandle"): 1,
+              ("com.tapscene.clickplan.InitialFrameAdmissionEngineTest", "consumeReentrantCancellationOrLastMomentDeadlineEndsRunAndCannotReopenBoundary"): 1,
+              ("com.tapscene.clickplan.InitialFrameAdmissionEngineTest", "consumeMissingThrowOrWrongFullTicketIdentityCannotReachPlatform"): 1,
+              ("com.tapscene.clickplan.InitialFrameAdmissionEngineTest", "absentOrDifferentConfirmationMetadataCannotAuthorizeTheFirstGesture"): 1,
+              ("com.tapscene.clickplan.InitialFrameAdmissionEngineTest", "unavailableAdmissionIsNotAnOptionalFramePortFallback"): 1,
+              ("com.tapscene.clickplan.InitialFrameAdmissionEngineTest", "synchronousGestureCompletionAndAllLaterBeforeAfterAndFinalWaitAreUnchanged"): 1,
+              ("com.tapscene.recording.InitialFrameReservationTest", "muxBeforeEglAndEglBeforeMuxBothRequireTheSelectedTickAndOriginalMatch"): 1,
+              ("com.tapscene.recording.InitialFrameReservationTest", "staticRepeatKeepsOriginalCanonicalPtsAndStillRequiresItsOwnEglSuccess"): 1,
+              ("com.tapscene.recording.InitialFrameReservationTest", "repeatedMuxCannotRepairAnUnmatchedOriginalOrAnOutputSeenBeforePlanning"): 1,
+              ("com.tapscene.recording.InitialFrameReservationTest", "continuousNewFramesNeverReplaceTheSelectedSnapshotOrHoldAdditionalLeases"): 1,
+              ("com.tapscene.recording.InitialFrameReservationTest", "readinessForADifferentCanonicalFrameDoesNotAdmitTheSelectedSource"): 1,
+              ("com.tapscene.recording.InitialFrameReservationTest", "consumptionRechecksTheExactCanonicalMatchAfterReadiness"): 1,
+              ("com.tapscene.recording.InitialFrameReservationTest", "cancelExpiryStopAndEpochInvalidationReleaseExactlyOnceBeforeOrAfterReadiness"): 1,
+              ("com.tapscene.recording.InitialFrameReservationTest", "originalDeadlineIsCheckedAtSelectionAndConsumptionWithoutExtendingAuthorization"): 1,
+              ("com.tapscene.recording.InitialFrameReservationTest", "cancelledBeforeSelectionDoesNotAcquireAndConsumedPngFailureCannotReopen"): 1,
+              ("com.tapscene.recording.InitialFrameReservationTest", "admissionMetadataRequiresABeforeWithAnOriginalCanonicalTimestamp"): 1,
+              ("com.tapscene.clickplan.ClickTargetArmTest", "preparationUsesTheOriginalInclusiveDeadlineAndStableConfirmationIdentity"): 1,
+              ("com.tapscene.clickplan.ClickTargetArmTest", "unknownWindowPermanentlyRevokesTheSameArmEvenBeforeItsDeadline"): 1,
+              ("com.tapscene.recording.FrameEvidenceStoreHostTest", "admissionProvenanceUpgradesOnlyItsPrivateSidecarAndSurvivesValidatedRoundTrip"): 1,
+              ("com.tapscene.recording.FrameEvidenceStoreHostTest", "v1CannotSilentlyCarryAdmissionAndV2RequiresTheNewSemantic"): 1,
+              ("com.tapscene.recording.FrameEvidenceStoreHostTest", "admissionMetadataRejectsInvalidBoundariesChronologyKindsAndPartialRecords"): 1,
+              ("com.tapscene.recording.FrameBoundaryWindowTest", "admissionSelectionQueryDoesNotBeginTheBoundaryOrBindItsRun"): 1,
+              ("com.tapscene.clickplan.ClickChainReviewPolicyTest", "initialSnapshotNoticeDoesNotClaimDispatchTimeOrChangeReviewRequirements"): 1,
+              ("com.tapscene.clickplan.ClickChainReviewPolicyTest", "boundaryDedupRetainsAdmissionNoticeAndRejectsConflictingSelectionFacts"): 1,
+              ("com.tapscene.data.ClickChainImportHostTest", "admittedRouteExportsRecordedImagesAndAuthoredLinksWithoutGestureTimingClaims"): 1,
+              ("com.tapscene.data.ClickChainImportHostTest", "reusedSelectedPixelsDoNotRemoveActionAdmissionFromRetryIdentity"): 1,
+              ("com.tapscene.data.ClickChainImportHostTest", "legacyNullAdmissionKeepsExactV1ImportDigest"): 1,
               ("com.tapscene.recording.RecordingDrainGateTest", "unsolicitedEndIsFaultEvenBeforeFirstReadinessOrWithFinalData"): 1,
               ("com.tapscene.recording.RecordingDrainGateTest", "captureClosureAndStopRequestDoNotReleaseTheStillOwnedGlSurface"): 1,
               ("com.tapscene.recording.RecordingDrainGateTest", "failedGlCleanupStillPermitsCodecCleanupWithoutPretendingAllResourcesReleased"): 1,

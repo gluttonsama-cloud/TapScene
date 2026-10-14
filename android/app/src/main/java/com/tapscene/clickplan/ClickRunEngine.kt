@@ -1,5 +1,12 @@
 package com.tapscene.clickplan
 
+import com.tapscene.recording.AnchorResult
+import com.tapscene.recording.FrameBoundary
+import com.tapscene.recording.InitialFrameAdmissionHandle
+import com.tapscene.recording.InitialFrameAdmissionPort
+import com.tapscene.recording.InitialFrameAdmissionStatus
+import com.tapscene.recording.InitialFrameAuthorization
+import java.util.concurrent.atomic.AtomicBoolean
 import com.tapscene.recording.FrameAnchorAction
 import com.tapscene.recording.FrameAnchorPort
 import com.tapscene.recording.FrameMissingReason
@@ -23,6 +30,10 @@ class ClickRunEngine(
     private val onState: (ClickRun) -> Unit = {},
     /** Optional evidence only. Every call must select/enqueue without waiting for pixels or IO. */
     private val frames: FrameAnchorPort = FrameAnchorPort.None,
+    /** Null is for generic/nonproduction runners only. The Android owner always supplies this port. */
+    private val initialFrames: InitialFrameAdmissionPort? = null,
+    private val initialAuthorization: () -> InitialFrameAuthorization? = { null },
+    private val onPreparingInitialFrame: () -> Unit = {},
 ) {
     var state: ClickRun = initial.copy(outcomes = frozenClickList(initial.outcomes), events = frozenClickList(initial.events))
         private set
@@ -34,6 +45,14 @@ class ClickRunEngine(
     private var wakeGeneration = 0L
     private var inFlightFrameAction: FrameAnchorAction? = null
     private var afterWaitFrameAction: FrameAnchorAction? = null
+    private var firstDispatchAttempted = false
+    private var initialConsumeAttempted = false
+    private var initialRequest: InitialRequest? = null
+    private class InitialRequest(val action: FrameAnchorAction, val authorization: InitialFrameAuthorization,
+        val transition: ClickRunEventType) {
+        var handle: InitialFrameAdmissionHandle? = null
+        val notificationQueued = AtomicBoolean(false)
+    }
 
     init {
         state.validate()
@@ -43,13 +62,16 @@ class ClickRunEngine(
 
     fun start(): Boolean {
         if (state.phase != ClickRunPhase.Ready || state.outcomes.any { it.status != ClickActionStatus.Pending }) return false
+        if (initialFrames != null) return prepareInitialFrame()
         if (!commit(state.copy(phase = ClickRunPhase.Running), ClickRunEventType.Started)) return false
         advance()
         return !state.terminal || state.phase == ClickRunPhase.Completed
     }
 
     fun pause(): Boolean {
-        if (state.phase != ClickRunPhase.Running && state.phase != ClickRunPhase.Ready) return false
+        if (state.phase != ClickRunPhase.Running && state.phase != ClickRunPhase.Ready &&
+            !(state.phase == ClickRunPhase.Paused && initialRequest != null)) return false
+        if (initialConsumeAttempted && !firstDispatchAttempted) { stop(ClickStopReason.DispatchUnknown); return true }
         wakeGeneration++
         cancelFrameEpoch(FrameMissingReason.Interrupted)
         return commit(state.copy(phase = ClickRunPhase.Paused), ClickRunEventType.Paused)
@@ -59,6 +81,7 @@ class ClickRunEngine(
     fun resume(confirmed: Boolean): Boolean {
         if (!confirmed || state.phase != ClickRunPhase.Paused) return false
         if (state.outcomes.any { it.status in nonReplayable }) return false
+        if (initialFrames != null && !firstDispatchAttempted) return prepareInitialFrame()
         if (!commit(state.copy(phase = ClickRunPhase.Running), ClickRunEventType.Resumed)) return false
         advance()
         return !state.terminal || state.phase == ClickRunPhase.Completed
@@ -109,6 +132,124 @@ class ClickRunEngine(
             }
             ClickGestureResult.Cancelled -> failAction(ClickActionStatus.Cancelled, ClickStopReason.GestureCancelled, ClickRunEventType.GestureCancelled)
         }
+    }
+
+    private fun firstFrameAction(): FrameAnchorAction? = state.plan.actions.getOrNull(state.nextActionIndex)?.let {
+        FrameAnchorAction(state.runId, it.actionId, state.recordingSessionId, state.sourceId, state.generation)
+    }
+
+    private fun readAuthorization(): InitialFrameAuthorization? = try { initialAuthorization() } catch (_: Exception) { null }
+
+    private fun matchesInitial(request: InitialRequest): Boolean = initialRequest === request &&
+        !state.terminal && !firstDispatchAttempted && request.action == firstFrameAction() &&
+        request.authorization == readAuthorization() && request.authorization.validAt(uptimeMs())
+
+    private fun prepareInitialFrame(): Boolean {
+        val expectedPhase = state.phase
+        if (initialRequest != null || initialConsumeAttempted) return false
+        if (!isRecordingReady()) { stop(ClickStopReason.RecordingLost); return false }
+        when (readGuard()) {
+            ClickGuard.Blocked -> { pauseForGuard(ClickRunEventType.GuardBlocked); return false }
+            ClickGuard.Unknown -> { pauseForGuard(ClickRunEventType.GuardUnknown); return false }
+            ClickGuard.Allowed -> Unit
+        }
+        val authorization = readAuthorization()
+        // Owner predicates are external code too; they cannot reopen a reentrantly paused/stopped run.
+        if (state.phase != expectedPhase || state.terminal || firstDispatchAttempted || initialRequest != null) return false
+        if (authorization == null || !authorization.validAt(uptimeMs())) {
+            pauseForGuard(ClickRunEventType.GuardUnknown); return false
+        }
+        val request = InitialRequest(firstFrameAction() ?: return false, authorization,
+            if (state.events.any { it.type == ClickRunEventType.Started }) ClickRunEventType.Resumed else ClickRunEventType.Started)
+        initialRequest = request
+        val handle = try {
+            requireNotNull(initialFrames).begin(request.action, authorization) { enqueueInitialChange(request) }
+        } catch (_: Exception) {
+            if (initialRequest === request) pauseForGuard(ClickRunEventType.GuardUnknown)
+            return false
+        }
+        request.handle = handle
+        if (!matchesInitial(request)) {
+            if (initialRequest === request) pauseForGuard(ClickRunEventType.GuardUnknown)
+            else frameSafely { handle.cancel() }
+            return false
+        }
+        onPreparingInitialFrame()
+        // The original confirmation deadline bounds the entire preparation, including fsync/yield.
+        scheduleSafely((authorization.deadlineUptimeMs - uptimeMs() + 1).coerceAtLeast(0)) {
+            if (initialRequest === request && !request.authorization.validAt(uptimeMs())) pauseForGuard(ClickRunEventType.GuardUnknown)
+        }
+        if (!enqueueInitialChange(request)) { stop(ClickStopReason.ServiceDestroyed); return false }
+        return !state.terminal
+    }
+
+    /** May be called by GL/codec threads, including synchronously inside begin. Never enter the engine inline. */
+    private fun enqueueInitialChange(request: InitialRequest): Boolean {
+        if (!request.notificationQueued.compareAndSet(false, true)) return true
+        return try {
+            schedule(0) {
+                request.notificationQueued.set(false)
+                initialChanged(request)
+            }
+            true
+        } catch (_: Exception) {
+            // No engine mutation on a foreign thread. The already scheduled deadline still closes it.
+            request.notificationQueued.set(false)
+            false
+        }
+    }
+
+    private fun initialChanged(request: InitialRequest) {
+        if (initialRequest !== request || state.terminal || firstDispatchAttempted) return
+        if (!matchesInitial(request)) { pauseForGuard(ClickRunEventType.GuardUnknown); return }
+        if (!isRecordingReady()) { stop(ClickStopReason.RecordingLost); return }
+        when (readGuard()) {
+            ClickGuard.Blocked -> { pauseForGuard(ClickRunEventType.GuardBlocked); return }
+            ClickGuard.Unknown -> { pauseForGuard(ClickRunEventType.GuardUnknown); return }
+            ClickGuard.Allowed -> Unit
+        }
+        if (!matchesInitial(request)) return
+        when (initialStatus(request)) {
+            InitialFrameAdmissionStatus.Pending -> Unit
+            InitialFrameAdmissionStatus.Ready -> {
+                if (state.phase == ClickRunPhase.Ready || state.phase == ClickRunPhase.Paused) {
+                    if (!commit(state.copy(phase = ClickRunPhase.Running), request.transition)) return
+                }
+                if (matchesInitial(request)) advance()
+            }
+            else -> pauseForGuard(ClickRunEventType.GuardUnknown)
+        }
+    }
+
+    private fun initialStatus(request: InitialRequest): InitialFrameAdmissionStatus =
+        try { request.handle?.status ?: InitialFrameAdmissionStatus.Unavailable }
+        catch (_: Exception) { InitialFrameAdmissionStatus.Unavailable }
+
+    private fun consumeInitialFrame(frameAction: FrameAnchorAction): Boolean {
+        val request = initialRequest
+        if (request == null || !matchesInitial(request) || request.action != frameAction) {
+            pauseForGuard(ClickRunEventType.GuardUnknown); return false
+        }
+        when (initialStatus(request)) {
+            InitialFrameAdmissionStatus.Pending -> return false // Keep the one durable, uncalled token.
+            InitialFrameAdmissionStatus.Ready -> Unit
+            else -> { pauseForGuard(ClickRunEventType.GuardUnknown); return false }
+        }
+        // From this point cancellation is terminal, even when consume reenters pause before returning.
+        initialConsumeAttempted = true
+        val result = try { requireNotNull(request.handle).consume() } catch (_: Exception) { null }
+        val admission = (result as? AnchorResult.Ticket)?.ticket?.admission
+        if (result !is AnchorResult.Ticket || result.ticket.action != frameAction ||
+            result.ticket.boundary != FrameBoundary.Before || admission == null ||
+            admission.confirmedAtUptimeMs != request.authorization.confirmedAtUptimeMs ||
+            admission.deadlineUptimeMs != request.authorization.deadlineUptimeMs ||
+            initialStatus(request) != InitialFrameAdmissionStatus.Consumed) {
+            stop(ClickStopReason.DispatchUnknown); return false
+        }
+        if (!matchesInitial(request)) { stop(ClickStopReason.DispatchUnknown); return false }
+        if (!isRecordingReady()) { stop(ClickStopReason.RecordingLost); return false }
+        if (readGuard() != ClickGuard.Allowed || !matchesInitial(request)) { stop(ClickStopReason.DispatchUnknown); return false }
+        return true
     }
 
     private fun advance() {
@@ -168,13 +309,17 @@ class ClickRunEngine(
         val action = state.plan.actions[state.nextActionIndex]
         val frameAction = FrameAnchorAction(state.runId, action.actionId, state.recordingSessionId, state.sourceId, state.generation)
         inFlightFrameAction = frameAction
-        frameSafely { frames.before(frameAction) }
+        if (initialFrames != null && !firstDispatchAttempted) {
+            if (!consumeInitialFrame(frameAction)) return
+        } else frameSafely { frames.before(frameAction) }
         // A reentrant owner pause/stop still wins. A pause retains the uncalled dispatch capability
         // for explicit resume; its old frame epoch has already been closed.
         if (pendingDispatchToken != token || state.phase != ClickRunPhase.Running || !matchesInFlight(token)) return
         // Consume the uncalled capability before entering platform code. Duplicate queued
         // continuations and synchronous callbacks can never dispatch this action a second time.
         pendingDispatchToken = null
+        firstDispatchAttempted = true
+        initialRequest = null
         dispatching = token
         synchronousResult = null
         val accepted = try {
@@ -208,6 +353,8 @@ class ClickRunEngine(
     private fun isRecordingReady(): Boolean = try { recordingReady(state) } catch (_: Exception) { false }
 
     private fun pauseForGuard(type: ClickRunEventType) {
+        if (state.terminal) return
+        if (initialConsumeAttempted && !firstDispatchAttempted) { stop(ClickStopReason.DispatchUnknown); return }
         wakeGeneration++
         cancelFrameEpoch(FrameMissingReason.Interrupted)
         commit(state.copy(phase = ClickRunPhase.Paused), type)
@@ -249,6 +396,9 @@ class ClickRunEngine(
     }
 
     private fun cancelFrameEpoch(reason: FrameMissingReason) {
+        val request = initialRequest
+        initialRequest = null // Fence late and reentrant notifications before returning the lease.
+        frameSafely { request?.handle?.cancel() }
         inFlightFrameAction = null
         afterWaitFrameAction = null
         frameSafely { frames.cancelEpoch(reason) }
