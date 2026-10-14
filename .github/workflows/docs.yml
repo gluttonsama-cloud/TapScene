@@ -412,6 +412,7 @@ jobs:
             --tests com.tapscene.ui.TextRegionWorkspaceHostTest \
             --tests com.tapscene.clickplan.ClickRunEngineTest \
             --tests com.tapscene.clickplan.ClickPlanStoreHostTest \
+            --tests com.tapscene.clickplan.ClickOverlayPointHostTest \
             --tests com.tapscene.clickplan.ClickWindowPolicyTest \
             --tests com.tapscene.clickplan.ClickTargetArmTest \
             --tests com.tapscene.clickplan.ClickViewportTest \
@@ -529,6 +530,7 @@ jobs:
               ("com.tapscene.clickplan.ClickRunEngineTest", "persistedActiveRunCannotBeConstructedAsAnExecutableEngine"): 1,
               ("com.tapscene.clickplan.ClickPlanStoreHostTest", "optimisticPlansRetainImmutableRunSnapshotAndRecoverUncertainIntentWithoutReplay"): 1,
               ("com.tapscene.clickplan.ClickPlanStoreHostTest", "draftDigestTamperingAndForeignFrameMappingAreRejectedAndPrivatePathIsUsed"): 1,
+              ("com.tapscene.clickplan.ClickOverlayPointHostTest", "actualOverlayRootsPreservePointSavingAndForeignGuardsAndCloseOnRevisionConflict"): 1,
               ("com.tapscene.ocr.TextRegionPolicyTest", "emptyInvalidAndOversizedInputsReturnNoSuggestions"): 1,
               ("com.tapscene.ocr.TextRegionPolicyTest", "twoCharacterLabelsKeepExactSourceBoundsWithoutPadding"): 1,
               ("com.tapscene.ocr.TextRegionPolicyTest", "recognitionThresholdDoesNotBecomeClickProbability"): 1,
