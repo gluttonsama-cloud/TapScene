@@ -143,7 +143,7 @@ class ClickRuntimeInstrumentation : Instrumentation() {
         screenshot("homepage-entry.png")
         controls.clickApp("选择目标 App")
         controls.searchSyntheticTarget()
-        controls.clickApp(RuntimeSystemUi.TARGET_PACKAGE)
+        controls.clickApp("TapScene Runtime Target")
         check(ProjectStore(targetContext).listProjects().isEmpty()) { "Target selection created a project prematurely" }
         screenshot("target-selected.png")
         controls.clickApp("开启无障碍服务")
