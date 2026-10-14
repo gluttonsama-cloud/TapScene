@@ -449,6 +449,8 @@ jobs:
               ("com.tapscene.recording.RecordingPresentationClockTest", "collisionsBackwardsAndLateWakeNeverInventPlusOneOrCatchupFrames"): 1,
               ("com.tapscene.recording.RecordingPresentationClockTest", "deadlinesAvoidThirtyHzQuantizationPollingAndDoNotIncludeCleanupTime"): 1,
               ("com.tapscene.recording.RecordingPresentationClockTest", "closingBeforeFirstFrameOrWithoutPositiveFinalDurationIsExplicitlyUnavailable"): 1,
+              ("com.tapscene.recording.RecordingPresentationLedgerTest", "olderReadinessCannotRepairBeforeSelectedFromANewerUnsubmittedFbo"): 1,
+              ("com.tapscene.recording.RecordingPresentationLedgerTest", "alreadyTicketedCanonicalWithoutOutputCannotBorrowARepeatedSample"): 1,
               ("com.tapscene.recording.RecordingPresentationLedgerTest", "evidenceRequiresPlanSuccessfulSubmissionAndExactSuccessfulWrite"): 1,
               ("com.tapscene.recording.RecordingPresentationLedgerTest", "codecWriteBeforeEglReturnIsJoinedWhenSubmissionArrives"): 1,
               ("com.tapscene.recording.RecordingPresentationLedgerTest", "writtenBeforeAnyPlanRemainsPermanentlyUnknown"): 1,

@@ -1,5 +1,6 @@
 package com.tapscene.recording
 
+import java.util.UUID
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -10,6 +11,100 @@ class RecordingPresentationLedgerTest {
         repeated: Boolean = id != 1L) = VideoPresentationSample(id, source, ptsUs, repeated)
 
     private fun RecordingPresentationLedger.write(ptsUs: Long): MuxedFrame = muxed(outputSeen(ptsUs))
+
+    private fun action() = FrameAnchorAction(UUID.randomUUID().toString(), UUID.randomUUID().toString(),
+        UUID.randomUUID().toString(), UUID.randomUUID().toString(), 1)
+
+    @Test fun olderReadinessCannotRepairBeforeSelectedFromANewerUnsubmittedFbo() {
+        // Synthetic source-proven interleaving, not a claim about the recorded runtime failure:
+        // drawObservation publishes a new lease before presentLatest submits that observation.
+        val ledger = RecordingPresentationLedger()
+        val pool = FrameLeasePool<VideoSourceObservation>()
+        val action = action()
+        val window = FrameBoundaryWindow(action.sessionId, action.sourceId)
+        val older = VideoSourceObservation(41, 41, 9_000_000_001)
+        pool.publish(checkNotNull(pool.claim()), older)
+        val original = ledger.planned(presentation(1, 0, older))
+        ledger.submitted(1)
+        val originalOutput = ledger.write(0)
+        assertTrue(ledger.hasCanonicalMatch())
+
+        val newer = VideoSourceObservation(42, 42, 9_000_000_002)
+        pool.publish(checkNotNull(pool.claim()), newer)
+        val missing = AnchorResult.Missing(FrameMissingReason.EncoderUnmatched)
+        synchronized(pool.lock) {
+            assertNull(window.begin(action, FrameBoundary.Before))
+            val selected = checkNotNull(pool.pinLatest())
+            try {
+                assertSame(newer, selected.frame)
+                assertTrue(ledger.hasCanonicalMatch()) // This proves only the older source is ready.
+                assertNull(ledger.canonicalForSource(selected.frame.captureSequence))
+                window.retain(action, FrameBoundary.Before, missing)
+            } finally { pool.release(selected) }
+        }
+
+        val later = ledger.planned(presentation(2, 40_000, newer, repeated = false))
+        ledger.submitted(2)
+        assertEquals(MuxedFrame(1, 40_000, later), ledger.write(40_000))
+        assertEquals(RecordedSourceFrame(42, 9_000_000_002, 40_000), later)
+        assertSame(later, ledger.canonicalForSource(42))
+        assertEquals(MuxedFrame(1, 40_000, later), ledger.matchSource(42))
+        // The real window returns its original terminal selection; the caller must not select again.
+        assertSame(missing, window.begin(action, FrameBoundary.Before))
+        assertEquals(originalOutput, ledger.matchSource(41))
+        assertSame(original, ledger.canonicalForSource(41))
+        assertEquals(listOf(0L, 40_000L), ledger.samples().map { it.encoderPtsUs })
+    }
+
+    @Test fun alreadyTicketedCanonicalWithoutOutputCannotBorrowARepeatedSample() {
+        // Complementary synthetic path: a ticket was selected after EGL submission, but its
+        // original output never matched. A successful repeat is video, not replacement evidence.
+        val ledger = RecordingPresentationLedger()
+        val pool = FrameLeasePool<VideoSourceObservation>()
+        val action = action()
+        val window = FrameBoundaryWindow(action.sessionId, action.sourceId)
+        val older = VideoSourceObservation(41, 41, 9_000_000_001)
+        pool.publish(checkNotNull(pool.claim()), older)
+        ledger.planned(presentation(1, 0, older))
+        ledger.submitted(1)
+        val originalOutput = ledger.write(0)
+        val newer = VideoSourceObservation(42, 42, 9_000_000_002)
+        pool.publish(checkNotNull(pool.claim()), newer)
+        val canonical = ledger.planned(presentation(2, 40_000, newer, repeated = false))
+        ledger.submitted(2) // Deliberately no output for this exact 40,000 us sample.
+        val selected = checkNotNull(pool.pinLatest())
+        try {
+            val result = synchronized(pool.lock) {
+                assertNull(window.begin(action, FrameBoundary.Before))
+                assertSame(newer, selected.frame)
+                val frame = checkNotNull(ledger.canonicalForSource(selected.frame.captureSequence))
+                assertSame(canonical, frame)
+                AnchorResult.Ticket(FrameTicket(UUID.randomUUID().toString(), action, FrameBoundary.Before,
+                    window.epoch, frame.sequence, frame.sequence, frame.timestampNs, frame.submittedPtsUs,
+                    FrameGeometry.fitCenter(480, 800, 480, 800), FrameFreshness.Fresh)).also {
+                    window.retain(action, FrameBoundary.Before, it)
+                }
+            }
+            assertTrue(ledger.hasCanonicalMatch())
+            assertNull(ledger.matchSource(result.ticket.captureSequence))
+            assertSame(canonical, ledger.planned(presentation(3, 80_000, newer)))
+            ledger.submitted(3)
+            assertEquals(MuxedFrame(1, 80_000, null), ledger.write(80_000))
+            // validateEvidence must still report EncoderUnmatched for this already-selected ticket.
+            assertNull(ledger.matchSource(result.ticket.captureSequence))
+            assertSame(canonical, ledger.canonicalForSource(42))
+            assertEquals(RecordedSourceFrame(42, 9_000_000_002, 40_000), canonical)
+            assertEquals(42L, result.ticket.sourceFrameId)
+            assertEquals(42L, result.ticket.captureSequence)
+            assertEquals(9_000_000_002, result.ticket.sourceTimestampNs)
+            assertEquals(40_000L, result.ticket.submittedPtsUs)
+            assertSame(result, window.begin(action, FrameBoundary.Before))
+            assertSame(newer, selected.frame)
+            assertTrue(pool.isPinned(selected))
+            assertEquals(originalOutput, ledger.matchSource(41))
+            assertEquals(listOf(0L, 80_000L), ledger.samples().map { it.encoderPtsUs })
+        } finally { pool.release(selected) }
+    }
 
     @Test fun evidenceRequiresPlanSuccessfulSubmissionAndExactSuccessfulWrite() {
         val ledger = RecordingPresentationLedger()

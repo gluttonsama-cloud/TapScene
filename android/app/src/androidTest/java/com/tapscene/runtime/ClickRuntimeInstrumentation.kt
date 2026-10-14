@@ -374,6 +374,10 @@ class ClickRuntimeInstrumentation : Instrumentation() {
                 row.ticketId?.let { ticket -> resolved = evidence.readCandidate(run.recordingSessionId, ticket, accessor) }
                 val candidate = (resolved as? FrameCandidateResult.Available)?.candidate
                 val json = JSONObject().put("actionId", action.actionId).put("boundary", boundary.name).put("epoch", row.epoch)
+                    // A no-ticket acquisition miss and a later invalid ticket can share one reason.
+                    // Preserve that existing provenance without exporting private paths or pixels.
+                    .put("ticketId", row.ticketId ?: JSONObject.NULL)
+                    .put("storedMissing", row.missingReason?.name ?: JSONObject.NULL)
                 if (candidate == null) json.put("missing", (resolved as FrameCandidateResult.Missing).reason.name)
                 else {
                     json.put("sourceFrameId", candidate.ticket.sourceFrameId).put("captureSequence", candidate.ticket.captureSequence)
