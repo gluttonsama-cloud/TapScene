@@ -48,22 +48,39 @@ data class ClickViewport(
 
 data class ClickOverlayFrame(val x: Int, val y: Int, val width: Int, val height: Int)
 
-enum class ClickEditorMode { Closed, Locating, Picking, Browsing }
-enum class ClickEditorEvent { AddPoint, Browse, Resume, CancelPick }
+enum class ClickEditorMode { Closed, Locating, Editing, Picking, Removing, Browsing }
+enum class ClickEditorEvent { AddPoint, EditPoints, Relocate, Remove, CancelRemove, Back, Browse, Resume, CancelPick }
 
 /** Browsing only changes editor visibility. It cannot issue a playback or gesture command. */
-data class ClickEditorState(val mode: ClickEditorMode = ClickEditorMode.Closed, val generation: Long = 0) {
-    fun open(): ClickEditorState = ClickEditorState(ClickEditorMode.Locating, generation + 1)
+data class ClickEditorState(
+    val mode: ClickEditorMode = ClickEditorMode.Closed,
+    val generation: Long = 0,
+    val selectedActionId: String? = null,
+) {
+    fun open(selectedActionId: String? = null): ClickEditorState = ClickEditorState(
+        if (selectedActionId == null) ClickEditorMode.Locating else ClickEditorMode.Editing,
+        generation + 1, selectedActionId)
     fun close(): ClickEditorState = ClickEditorState(ClickEditorMode.Closed, generation + 1)
+    fun select(actionId: String, expectedGeneration: Long): ClickEditorState {
+        if (generation != expectedGeneration || mode != ClickEditorMode.Editing) return this
+        return copy(generation = generation + 1, selectedActionId = actionId)
+    }
     fun change(event: ClickEditorEvent, expectedGeneration: Long): ClickEditorState {
         if (generation != expectedGeneration) return this
         val next = when {
             mode == ClickEditorMode.Locating && event == ClickEditorEvent.AddPoint -> ClickEditorMode.Picking
+            mode == ClickEditorMode.Locating && event == ClickEditorEvent.EditPoints -> ClickEditorMode.Editing
+            mode == ClickEditorMode.Editing && selectedActionId != null && event == ClickEditorEvent.Relocate -> ClickEditorMode.Picking
+            mode == ClickEditorMode.Editing && selectedActionId != null && event == ClickEditorEvent.Remove -> ClickEditorMode.Removing
+            mode == ClickEditorMode.Removing && event == ClickEditorEvent.CancelRemove -> ClickEditorMode.Editing
+            mode == ClickEditorMode.Editing && event == ClickEditorEvent.Back -> ClickEditorMode.Locating
             mode == ClickEditorMode.Locating && event == ClickEditorEvent.Browse -> ClickEditorMode.Browsing
             mode == ClickEditorMode.Browsing && event == ClickEditorEvent.Resume -> ClickEditorMode.Locating
-            mode == ClickEditorMode.Picking && event == ClickEditorEvent.CancelPick -> ClickEditorMode.Locating
+            mode == ClickEditorMode.Picking && event == ClickEditorEvent.CancelPick ->
+                if (selectedActionId == null) ClickEditorMode.Locating else ClickEditorMode.Editing
             else -> return this
         }
-        return ClickEditorState(next, generation + 1)
+        return ClickEditorState(next, generation + 1,
+            selectedActionId.takeIf { next in setOf(ClickEditorMode.Editing, ClickEditorMode.Picking, ClickEditorMode.Removing) })
     }
 }

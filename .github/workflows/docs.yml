@@ -554,6 +554,7 @@ jobs:
               ("com.tapscene.clickplan.ClickViewportTest", "actualSystemInsetsLeaveAppNavigationAvailable"): 1,
               ("com.tapscene.clickplan.ClickViewportTest", "actualOverlayOriginMustAgreeWithRawScreenCoordinates"): 1,
               ("com.tapscene.clickplan.ClickViewportTest", "browsingOnlyRestoresEditorAndOldControlsCannotReopenClosedSession"): 1,
+              ("com.tapscene.clickplan.ClickViewportTest", "selectionRelocationAndRemovalConfirmationStayBoundToTheirGeneration"): 1,
               ("com.tapscene.clickplan.ClickRunEngineTest", "queuedWindowPauseAndStopAfterIntentAreObservedBeforeAtMostOnceDispatch"): 1,
               ("com.tapscene.recording.RecordingClickGateTest", "cancellingNewerRequestNeverRevivesQueuedOlderStart"): 1,
               ("com.tapscene.clickplan.ClickRunEngineTest", "pauseBeforeStartRequiresExplicitResumeAndRechecksTheGuards"): 1,
