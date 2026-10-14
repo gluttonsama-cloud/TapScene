@@ -293,7 +293,7 @@ class HostingWorkspace private constructor(application: Application, private val
     }
     fun cancelTask() {
         val task = state.value.task ?: return
-        if (task.accountId != state.value.account?.accountId || task.publication != null || (state.value.busy && !state.value.observing)) return
+        if (task.accountId != state.value.account?.accountId || task.publication != null || task.state == "cancelled" || (state.value.busy && !state.value.observing)) return
         invalidate()
         mutableState.update { it.copy(busy = false, observing = false) }
         execute { expected ->

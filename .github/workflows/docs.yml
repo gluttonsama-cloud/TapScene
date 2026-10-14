@@ -548,6 +548,7 @@ jobs:
               ("com.tapscene.ui.TextRegionWorkspaceHostTest", "exactPixelsLateResultsAndRecoveredFormsKeepTheirSourceAndAuthorIntent"): 1,
               ("com.tapscene.ui.HostingWorkspaceHostTest", "cancellingAfterInstallCannotReopenAccountWhenRetirementIsOffline"): 1,
               ("com.tapscene.ui.HostingWorkspaceHostTest", "repeatedConfirmPreparesOnceAndBusyObservationCanCancel"): 1,
+              ("com.tapscene.ui.HostingWorkspaceHostTest", "cancellationWithoutConfirmedResultCanBeRetried"): 1,
               ("com.tapscene.ui.HostingWorkspaceHostTest", "confirmedCancelIntentSurvivesImmediateLeave"): 1,
               ("com.tapscene.ui.HostingWorkspaceHostTest", "cancelledLoginDrainsAndRevokesLateSessionWithoutResurrectingRoute"): 1,
               ("com.tapscene.ui.HostingWorkspaceHostTest", "unauthorizedManagementAllowsNewLoginWithoutLogout"): 1,

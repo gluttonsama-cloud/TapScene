@@ -31,6 +31,7 @@ import org.robolectric.annotation.LooperMode
 class HostingWorkspaceHostTest {
     @Test fun repeatedConfirmPreparesOnceAndBusyObservationCanCancel() = runBlocking {
         fixture { workspace, backend ->
+            backend.pauseCancel = true
             select(workspace)
             main { workspace.confirmPublication(); workspace.confirmPublication() }
             backend.prepared.await()
@@ -40,10 +41,34 @@ class HostingWorkspaceHostTest {
             check(workspace.state.value.busy && workspace.state.value.observing)
             main { workspace.cancelTask(); workspace.cancelTask() }
             backend.cancelRecorded.await()
+            try {
+                check(backend.cancelCalls.get() == 1) { "In-flight cancellation calls: ${backend.cancelCalls.get()}" }
+                check(workspace.state.value.busy && !workspace.state.value.observing)
+            } finally { backend.allowCancel.complete(Unit) }
             workspace.state.first { !it.busy && it.task?.state == "cancelled" }
-            check(backend.cancelCalls.get() == 1)
+            main { workspace.cancelTask() }
+            check(backend.cancelCalls.get() == 1) { "Confirmed cancellation calls: ${backend.cancelCalls.get()}" }
             check(workspace.state.value.task?.cancelRequested == true)
             println("HOST_HOSTING_WORKSPACE single-confirm/busy-cancel PASS")
+        }
+    }
+
+    @Test fun cancellationWithoutConfirmedResultCanBeRetried() = runBlocking {
+        fixture { workspace, backend ->
+            backend.allowPrepare.complete(Unit)
+            backend.cancelResultState = "receiving"
+            select(workspace)
+            main { workspace.confirmPublication() }
+            backend.resuming.await()
+            main { workspace.cancelTask() }
+            workspace.state.first { !it.busy && it.task?.cancelRequested == true }
+            check(backend.cancelCalls.get() == 1)
+            check(workspace.state.value.task?.state == "receiving")
+            backend.cancelResultState = "cancelled"
+            main { workspace.cancelTask() }
+            workspace.state.first { !it.busy && it.task?.state == "cancelled" }
+            check(backend.cancelCalls.get() == 2)
+            println("HOST_HOSTING_WORKSPACE unconfirmed-cancel/retry PASS")
         }
     }
 
@@ -171,6 +196,9 @@ class HostingWorkspaceHostTest {
         val allowPrepare = CompletableDeferred<Unit>()
         val resuming = CompletableDeferred<Unit>()
         val cancelRecorded = CompletableDeferred<Unit>()
+        val allowCancel = CompletableDeferred<Unit>()
+        var pauseCancel = false
+        var cancelResultState = "cancelled"
         val loginStarted = CompletableDeferred<Unit>()
         val loginResult = CompletableDeferred<HostedModels.Session>()
         val revoked = CompletableDeferred<Unit>()
@@ -220,7 +248,10 @@ class HostingWorkspaceHostTest {
         }
         override suspend fun cancelPublication(id: String): HostedModels.Task {
             // Same cancellation boundary as Repository: persistence is independent of route lifetime.
-            withContext(NonCancellable) { cancelCalls.incrementAndGet(); task = task("cancelled", true); cancelRecorded.complete(Unit) }
+            withContext(NonCancellable) {
+                cancelCalls.incrementAndGet(); task = task(cancelResultState, true); cancelRecorded.complete(Unit)
+                if (pauseCancel) allowCancel.await()
+            }
             return task
         }
         override suspend fun projectsPage(cursor: String?): HostedModels.Page<HostedModels.Project> {
