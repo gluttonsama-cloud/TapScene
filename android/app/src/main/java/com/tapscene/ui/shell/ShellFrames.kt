@@ -7,11 +7,13 @@ import androidx.compose.material3.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 
 enum class ProjectTab(val label: String) { STEPS("步骤"), SOURCES("素材"), CHECKS("检查与交付") }
@@ -83,13 +85,15 @@ fun ProjectWorkspaceFrame(
             TextButton(onClick = onPreview) { Text("预览") }
             TextButton(onClick = onMore) { Text("更多") }
         }
-        Row(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
             ProjectTab.entries.forEach { tab ->
-                Column(Modifier.weight(1f)) {
-                    TextButton(onClick = { onTab(tab) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).semantics { selected = tab == selectedTab; role = Role.Tab }) {
-                        Text(tab.label, color = if (tab == selectedTab) ShellColors.Accent else ShellColors.Muted)
+                Column(Modifier.weight(1f).fillMaxHeight()) {
+                    TextButton(onClick = { onTab(tab) }, modifier = Modifier.fillMaxWidth().weight(1f).heightIn(min = 48.dp).semantics { selected = tab == selectedTab; role = Role.Tab }) {
+                        Text(tab.label, textAlign = TextAlign.Center, color = if (tab == selectedTab) ShellColors.Accent else ShellColors.Muted)
                     }
-                    if (tab == selectedTab) HorizontalDivider(thickness = 2.dp, color = ShellColors.Accent) else ShellDivider()
+                    Box(Modifier.fillMaxWidth().height(2.dp), contentAlignment = Alignment.BottomCenter) {
+                        if (tab == selectedTab) HorizontalDivider(thickness = 2.dp, color = ShellColors.Accent) else ShellDivider()
+                    }
                 }
             }
         }
