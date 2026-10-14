@@ -22,16 +22,20 @@ internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
     var systemUiAnrWaitedOnce = false
         private set
     private var observedSettingsAfterWait = false
+    private val serviceLabel = instrumentation.targetContext.getString(com.tapscene.R.string.click_service_label)
+    private val appLabel = instrumentation.targetContext.applicationInfo.loadLabel(instrumentation.targetContext.packageManager).toString()
 
     init {
         // Test controller only. Production service retains canRetrieveWindowContent=false.
         automation.serviceInfo = automation.serviceInfo.apply {
-            flags = flags or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+            flags = flags or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
+                AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
         }
     }
 
     fun clickApp(text: String) = awaitOwnControl(text, overlayOnly = false) { click(it) }
     fun clickOverlay(text: String) = awaitOwnControl(text, overlayOnly = true) { click(it) }
+    fun awaitApp(text: String) = awaitOwnControl(text, overlayOnly = false) { true }
 
     fun searchSyntheticTarget() {
         val deadline = SystemClock.uptimeMillis() + 10_000
@@ -66,7 +70,7 @@ internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
         pointerPath(before.centerX(), before.centerY(), before.centerX() + 110, before.centerY() + 70, 350)
         val deadline = SystemClock.uptimeMillis() + 5_000
         while (SystemClock.uptimeMillis() < deadline) {
-            val after = ownControlBounds("继续定位")
+            val after = ownControlBounds("继续定位", deadline)
             if (after.left - before.left >= 80 && after.top - before.top >= 40) return before to after
             SystemClock.sleep(100)
         }
@@ -89,16 +93,16 @@ internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
         send(MotionEvent.ACTION_UP, toX, toY)
     }
 
-    private fun ownControlBounds(text: String): Rect {
+    private fun ownControlBounds(text: String, deadline: Long = SystemClock.uptimeMillis() + 15_000): Rect {
         var result: Rect? = null
-        awaitOwnControl(text, overlayOnly = true) { node ->
+        awaitOwnControl(text, overlayOnly = true, deadline = deadline) { node ->
             result = Rect().also(node::getBoundsInScreen); true
         }
         return requireNotNull(result)
     }
 
-    private fun awaitOwnControl(text: String, overlayOnly: Boolean, action: (AccessibilityNodeInfo) -> Boolean) {
-        val deadline = SystemClock.uptimeMillis() + 15_000
+    private fun awaitOwnControl(text: String, overlayOnly: Boolean,
+        deadline: Long = SystemClock.uptimeMillis() + 15_000, action: (AccessibilityNodeInfo) -> Boolean) {
         while (SystemClock.uptimeMillis() < deadline) {
             val windows = automation.windows
             for (window in windows) try {
@@ -109,7 +113,8 @@ internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
                     if (root.packageName?.toString() != instrumentation.targetContext.packageName) continue
                     // A search field can contain the same text as a result row. A setup
                     // button/row action must never resolve to an editable field.
-                    val node = find(root) { !it.isEditable && it.isEnabled && it.isVisibleToUser && it.text?.toString() == text } ?: continue
+                    val node = find(root) { !it.isEditable && it.isEnabled && it.isVisibleToUser &&
+                        it.text?.toString() == text && hasClickableControl(it) } ?: continue
                     try { check(action(node)) { "Own control rejected action: $text" }; return }
                     finally { node.recycle() }
                 } finally { root.recycle() }
@@ -129,7 +134,8 @@ internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
         log("open_settings_requested; overall_setup_budget_ms=120000")
         if (openSettings) instrumentation.targetContext.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         var selectedService = false
-        var toggled = false
+        var toggleRequested = false
+        var confirmationSent = false
         var previousPackage: String? = null
         var loggedAnrWait = false
         while (SystemClock.uptimeMillis() < deadline && !ClickPlayback.state.value.connected) {
@@ -137,28 +143,48 @@ internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
             if (root != null) try {
                 val currentPackage = root.packageName?.toString()
                 if (currentPackage != previousPackage) { log("active_window_package=$currentPackage"); previousPackage = currentPackage }
-                if (!waitForSystemUiOnce(root) && root.packageName?.toString() == "com.android.settings") when {
-                    !selectedService && clickText(root, "TapScene 点击链定位与播放") -> {
-                        selectedService = true; log("service_entry_click_accepted")
-                    }
-                    !selectedService -> clickText(root, "Downloaded apps", "Installed apps", "已下载的应用", "已安装的应用")
-                    !toggled -> {
-                        val switch = find(root) { it.isEnabled && it.isVisibleToUser && it.isCheckable && it.className?.toString()?.contains("Switch") == true }
-                        if (switch != null) {
-                            try {
-                                if (!switch.isChecked) check(click(switch)) { "Accessibility switch did not accept normal UI action" }
-                                toggled = true; log("service_switch_checked_or_click_accepted")
-                            } finally { switch.recycle() }
+                if (!waitForSystemUiOnce(root) && currentPackage == SETTINGS_PACKAGE) {
+                    val permissionTitle = find(root) { it.isVisibleToUser &&
+                        it.viewIdResourceName == "android:id/accessibility_permissionDialog_title" }
+                    if (permissionTitle != null) try {
+                        check(selectedService && toggleRequested && permissionTitle.text?.toString() ==
+                            "Allow $serviceLabel to have full control of your device?") { "Unexpected accessibility permission dialog" }
+                        if (!confirmationSent && clickId(root, "android:id/accessibility_permission_enable_allow_button")) {
+                            confirmationSent = true; log("normal_service_confirmation_click_accepted")
                         }
+                    } finally { permissionTitle.recycle() }
+                    else if (!selectedService) {
+                        if (clickText(root, serviceLabel)) {
+                            selectedService = true; log("service_entry_click_accepted")
+                        } else clickText(root, "Downloaded apps", "Installed apps", "已下载的应用", "已安装的应用")
+                    } else if (!toggleRequested) {
+                        val switch = findServiceMainSwitch(root)
+                        if (switch != null) try {
+                            check(!switch.isChecked) { "Disposable service was already enabled unexpectedly" }
+                            check(click(switch)) { "Accessibility switch did not accept normal UI action" }
+                            toggleRequested = true; log("identified_service_main_switch_click_accepted")
+                        } finally { switch.recycle() }
                     }
-                    else -> if (clickText(root, "Allow", "允许", "OK", "确定")) log("normal_service_confirmation_click_accepted")
                 }
                 if (systemUiAnrWaitedOnce && !loggedAnrWait) { loggedAnrWait = true; log("single_system_ui_anr_wait_accepted") }
             } finally { root.recycle() }
             SystemClock.sleep(200)
         }
-        log("setup_finished; service_connected=${ClickPlayback.state.value.connected}; selected=$selectedService; toggled=$toggled")
+        log("setup_finished; service_connected=${ClickPlayback.state.value.connected}; selected=$selectedService; toggleRequested=$toggleRequested; confirmationSent=$confirmationSent")
         check(ClickPlayback.state.value.connected) { "Accessibility UI did not enable the service; no bypass attempted" }
+    }
+
+    /** The shortcut switch is not the service switch. Bind to the labelled main-switch group. */
+    private fun findServiceMainSwitch(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val group = find(root) { it.isVisibleToUser && it.viewIdResourceName == "$SETTINGS_PACKAGE:id/main_switch_bar" }
+            ?: return null
+        return try {
+            val label = visibleText(group, "$SETTINGS_PACKAGE:id/switch_text")
+            if (label != "Use $serviceLabel") return null
+            // Android15 makes the Switch non-clickable; its main-switch parent owns the action.
+            find(group) { it.viewIdResourceName == "android:id/switch_widget" &&
+                it.isVisibleToUser && it.isEnabled && it.isCheckable && hasClickableControl(it) }
+        } finally { group.recycle() }
     }
 
     /** One normal Wait action for the exact system startup dialog observed in run 38066025600. */
@@ -189,7 +215,10 @@ internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
     fun approveFreshCapture() {
         val deadline = SystemClock.uptimeMillis() + 35_000
         var checked = false
+        var checkRequested = false
+        var ownConsentObserved = false
         var submitted = false
+        var notificationSubmitted = false
         var systemApproved = false
         while (SystemClock.uptimeMillis() < deadline) {
             val root = automation.rootInActiveWindow
@@ -197,20 +226,33 @@ internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
                 val pkg = root.packageName?.toString().orEmpty()
                 when {
                     pkg == instrumentation.targetContext.packageName && !submitted -> {
-                        if (!checked) {
+                        if (!ownConsentObserved) {
+                            val title = find(root) { it.isVisibleToUser && it.text?.toString() == "确认起始页并播放一次" }
+                            ownConsentObserved = title != null
+                            title?.recycle()
+                        } else if (!checked) {
                             val box = find(root) { it.isEnabled && it.isVisibleToUser && it.isCheckable && it.className?.toString()?.contains("CheckBox") == true }
                             if (box != null) try {
-                                checked = box.isChecked || click(box)
+                                // Observe the changed state in a fresh tree; action acceptance
+                                // alone must not advance or repeat the checkbox toggle.
+                                checked = box.isChecked
+                                if (!checked && !checkRequested) checkRequested = click(box)
                             } finally { box.recycle() }
-                            if (!checked) scroll(root)
+                            if (box == null && !checkRequested) scroll(root)
                         } else {
                             submitted = clickText(root, "确认并授权录屏")
                             if (!submitted) scroll(root)
                         }
                     }
-                    pkg.endsWith("permissioncontroller") -> clickText(root, "Allow", "允许")
-                    pkg == "com.android.systemui" && submitted -> {
-                        systemApproved = clickText(root, "Start now", "Start recording", "Share screen", "立即开始", "开始录制") || systemApproved
+                    pkg == PERMISSION_PACKAGE && submitted && !notificationSubmitted -> {
+                        val message = visibleText(root, "$PERMISSION_PACKAGE:id/permission_message")
+                        if (message != null) {
+                            check(message == "Allow $appLabel to send you notifications?") { "Unexpected runtime permission prompt" }
+                            notificationSubmitted = clickId(root, "$PERMISSION_PACKAGE:id/permission_allow_button")
+                        }
+                    }
+                    pkg == SYSTEM_UI_PACKAGE && submitted && !systemApproved -> {
+                        systemApproved = approveProjectionDialog(root)
                     }
                     pkg == TARGET_PACKAGE && systemApproved -> return
                 }
@@ -220,11 +262,46 @@ internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
         error("Fresh MediaProjection consent UI did not complete; no grant reuse or privileged workaround attempted")
     }
 
+    /** Two exact Android15 layouts; neither branch changes the requested capture scope. */
+    private fun approveProjectionDialog(root: AccessibilityNodeInfo): Boolean {
+        check(root.packageName?.toString() == SYSTEM_UI_PACKAGE)
+        val expectedTitle = "Start recording or casting with $appLabel?"
+        val title = visibleText(root, "$SYSTEM_UI_PACKAGE:id/screen_share_dialog_title")
+        val layout: String
+        if (title != null) {
+            check(title == expectedTitle) { "Unexpected MediaProjection dialog identity" }
+            val spinner = find(root) { it.isVisibleToUser &&
+                it.viewIdResourceName == "$SYSTEM_UI_PACKAGE:id/screen_share_mode_spinner" } ?: return false
+            try {
+                // Inspect only this known spinner, never target-app node content.
+                val mode = find(spinner) { it.isVisibleToUser && it.text?.toString() == "Entire screen" }
+                check(mode != null) { "MediaProjection is not set to the complete display" }
+                mode.recycle()
+            } finally { spinner.recycle() }
+            layout = "api35_selected_entire_screen"
+        } else {
+            // With partial-screen-sharing disabled, Android15's legacy positive action
+            // grants ENTIRE_SCREEN directly. Identify its full warning, never any button1.
+            val legacyTitle = visibleText(root, "android:id/alertTitle") ?: return false
+            val expectedWarning = "$appLabel will have access to all of the information that is visible on your screen or played from your device while recording or casting. This includes information such as passwords, payment details, photos, messages, and audio that you play."
+            check(legacyTitle == expectedTitle && visibleText(root, "android:id/message") == expectedWarning) {
+                "Unexpected legacy MediaProjection dialog identity or scope warning"
+            }
+            layout = "api35_legacy_entire_screen"
+        }
+        check(instrumentation.targetContext.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED) { "Notification permission did not become granted" }
+        val accepted = clickId(root, "android:id/button1")
+        if (accepted) File(instrumentation.targetContext.filesDir, "runtime-smoke/capture-setup.txt")
+            .appendText("${SystemClock.uptimeMillis()} $layout; normal_positive_button_accepted\n")
+        return accepted
+    }
+
     fun snapshotTree(): String {
         val root = automation.rootInActiveWindow ?: return "No active accessibility root"
         return try {
             val pkg = root.packageName?.toString().orEmpty()
-            if (pkg == instrumentation.targetContext.packageName || pkg in setOf("android", "com.android.settings", "com.android.systemui") || pkg.endsWith("permissioncontroller")) snapshotTree(root)
+            if (pkg == instrumentation.targetContext.packageName || pkg in setOf("android", SETTINGS_PACKAGE, SYSTEM_UI_PACKAGE, PERMISSION_PACKAGE)) snapshotTree(root)
             else "Active root omitted outside the synthetic setup allowlist: $pkg"
         } finally { root.recycle() }
     }
@@ -243,8 +320,20 @@ internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
     }
 
     private fun clickText(root: AccessibilityNodeInfo, vararg texts: String): Boolean {
-        val node = find(root) { it.isEnabled && it.isVisibleToUser && it.text?.toString() in texts } ?: return false
+        val node = find(root) { !it.isEditable && it.isEnabled && it.isVisibleToUser &&
+            it.text?.toString() in texts && hasClickableControl(it) } ?: return false
         return try { click(node) } finally { node.recycle() }
+    }
+
+    private fun clickId(root: AccessibilityNodeInfo, id: String): Boolean {
+        val node = find(root) { it.viewIdResourceName == id && it.isEnabled && it.isVisibleToUser &&
+            !it.isEditable && hasClickableControl(it) } ?: return false
+        return try { click(node) } finally { node.recycle() }
+    }
+
+    private fun visibleText(root: AccessibilityNodeInfo, id: String): String? {
+        val node = find(root) { it.viewIdResourceName == id && it.isVisibleToUser } ?: return null
+        return try { node.text?.toString() } finally { node.recycle() }
     }
 
     private fun click(node: AccessibilityNodeInfo): Boolean {
@@ -254,6 +343,21 @@ internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
             val parent = current ?: return false
             try {
                 if (parent.isClickable && parent.isEnabled) return parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                current = parent.parent
+            } finally { parent.recycle() }
+        }
+        current?.recycle()
+        return false
+    }
+
+    /** A label is not readiness proof when its owning button is disabled or absent. */
+    private fun hasClickableControl(node: AccessibilityNodeInfo): Boolean {
+        if (node.isClickable) return node.isEnabled && node.isVisibleToUser
+        var current = node.parent
+        repeat(5) {
+            val parent = current ?: return false
+            try {
+                if (parent.isClickable) return parent.isEnabled && parent.isVisibleToUser
                 current = parent.parent
             } finally { parent.recycle() }
         }
@@ -275,5 +379,10 @@ internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
         return null
     }
 
-    companion object { const val TARGET_PACKAGE = "com.tapscene.runtime.target" }
+    companion object {
+        const val TARGET_PACKAGE = "com.tapscene.runtime.target"
+        private const val SETTINGS_PACKAGE = "com.android.settings"
+        private const val PERMISSION_PACKAGE = "com.android.permissioncontroller"
+        private const val SYSTEM_UI_PACKAGE = "com.android.systemui"
+    }
 }

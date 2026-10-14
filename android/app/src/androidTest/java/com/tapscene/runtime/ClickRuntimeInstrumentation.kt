@@ -22,6 +22,7 @@ import com.tapscene.recording.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
@@ -79,8 +80,10 @@ class ClickRuntimeInstrumentation : Instrumentation() {
             // Only this invocation's capability is stopped. Driver timeout is NOT release proof.
             runCatching {
                 if (projectId != null && (ClickPlayback.state.value.run?.projectId == projectId || ClickPlayback.state.value.overlayVisible)) {
-                    runOnMainSync { ClickPlayback.stop(targetContext) }
-                    runBlocking { withTimeout(10_000) { RecordingCoordinator.awaitCommandBoundary() } }
+                    runBlocking { withTimeout(10_000) {
+                        withContext(Dispatchers.Main) { ClickPlayback.stop(targetContext) }
+                        RecordingCoordinator.awaitCommandBoundary()
+                    } }
                 }
                 val recording = RecordingCoordinator.state.value
                 report.put("cleanup", JSONObject().put("recordingPhase", recording.phase.name)
@@ -120,7 +123,7 @@ class ClickRuntimeInstrumentation : Instrumentation() {
         mark("production_oes_egl_codec_single_buffer_static_probe")
 
         stage = "synthetic_target_geometry"; persist()
-        runOnMainSync { ClickPlayback.initialize(targetContext) }
+        withContext(Dispatchers.Main) { ClickPlayback.initialize(targetContext) }
         ui = RuntimeSystemUi(this)
         val controls = requireNotNull(ui)
         val nonce = UUID.randomUUID().toString().also { fixtureNonce = it }
@@ -137,20 +140,25 @@ class ClickRuntimeInstrumentation : Instrumentation() {
         require(fixture.getInt("width") == geometry.width && fixture.getInt("height") == geometry.height)
 
         stage = "homepage_target_and_service_setup"; persist()
-        startActivitySync(Intent(targetContext, com.tapscene.MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        waitForIdleSync()
+        // MainActivity is singleTask: a return launch may only call onNewIntent.
+        // startActivitySync waits for a new onCreate and can block without a deadline.
+        targetContext.startActivity(Intent(targetContext, com.tapscene.MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         controls.clickApp("悬浮编排")
+        controls.awaitApp("选择目标 App")
         screenshot("homepage-entry.png")
         controls.clickApp("选择目标 App")
         controls.searchSyntheticTarget()
         controls.clickApp("TapScene Runtime Target")
+        controls.awaitApp("开启无障碍服务")
         check(ProjectStore(targetContext).listProjects().isEmpty()) { "Target selection created a project prematurely" }
         screenshot("target-selected.png")
+        stage = "accessibility_service_settings"; persist()
         controls.clickApp("开启无障碍服务")
         controls.enableService(openSettings = false)
         mark("service_connected_through_settings_ui")
-        startActivitySync(Intent(targetContext, com.tapscene.MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        waitForIdleSync()
+        stage = "return_to_entry_after_service"; persist()
+        targetContext.startActivity(Intent(targetContext, com.tapscene.MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        controls.awaitApp("打开悬浮窗")
         controls.clickApp("打开悬浮窗")
         check(ProjectStore(targetContext).listProjects().isEmpty()) { "Opening notice created a project prematurely" }
         controls.clickApp("确认并打开")
@@ -197,7 +205,7 @@ class ClickRuntimeInstrumentation : Instrumentation() {
         val actions = placed.actions.mapIndexed { index, point -> point.copy(waitAfterMs = listOf(8_000L, 4_000L, 8_000L)[index]) }
         val plan = placed.copy(revision = placed.revision + 1, actions = actions)
         store.savePlan(plan, placed.revision)
-        runOnMainSync { ClickPlayback.updatePlan(targetContext, plan) }
+        withContext(Dispatchers.Main) { ClickPlayback.updatePlan(targetContext, plan) }
         report.put("waitSetup", "Only waitAfterMs configured through the production store after all points were added through visible UI")
         delay(600)
         val screenshot = checkNotNull(controls.automation.takeScreenshot())
