@@ -47,6 +47,7 @@ fun RecordingCaptureRoute(
     onBack: () -> Unit,
     onImportVideo: () -> Unit,
     onCandidates: (projectId: String, sourceId: String, analyze: Boolean) -> Unit,
+    onOpenProject: (String) -> Unit,
 ) {
     val context = LocalContext.current
     val app = context.applicationContext
@@ -154,12 +155,12 @@ fun RecordingCaptureRoute(
     }
     if (reviewRunId != null) {
         ClickChainReviewRoute(requireNotNull(reviewRunId), onBack = { reviewRunId = null },
-            onOpenProject = { id -> reviewRunId = null; projects.openProject(id); onBack() })
+            onOpenProject = { id -> reviewRunId = null; onOpenProject(id) })
         return
     }
     if (showClickPlan && projectState.project?.project?.id != null) {
         ClickPlanRoute(requireNotNull(projectState.project?.project?.id), onBack = { showClickPlan = false },
-            onOpenProject = { id -> showClickPlan = false; projects.openProject(id); onBack() })
+            onOpenProject = { id -> showClickPlan = false; onOpenProject(id) })
         return
     }
     BackHandler(onBack = leave)

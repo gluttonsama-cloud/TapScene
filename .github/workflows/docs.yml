@@ -238,7 +238,7 @@ jobs:
           import xml.etree.ElementTree as ET
           cases = [case for path in Path("android/app/build/test-results/testPreviewUnitTest").glob("TEST-*.xml")
                    for case in ET.parse(path).getroot().iter("testcase")]
-          assert len(cases) == 5, f"Expected five entry checks: {len(cases)}"
+          assert len(cases) == 6, f"Expected six entry checks: {len(cases)}"
           assert all(not any(case.find(kind) is not None for kind in ("failure", "error", "skipped")) for case in cases)
           print("OVERLAY_ENTRY_HOST_CHECKS_OK: production navigation only; Android overlay/playback/recording NOT_RUN")
           PY_ENTRY
@@ -265,7 +265,7 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 86, f"Expected eighty-six Compose review images, found {len(images)}"
+          assert len(images) == 87, f"Expected eighty-seven Compose review images, found {len(images)}"
           delivery_images = [image for image in images if "DeliveryAvailabilityScreenshotPreviewsKt" in str(image)]
           assert len(delivery_images) == 3, f"Expected three delivery availability images, found {len(delivery_images)}"
           click_review_images = [image for image in images if "ClickChainReviewScreenshotPreviewsKt" in str(image)]
@@ -626,6 +626,7 @@ jobs:
               ("com.tapscene.ui.shell.HomeMaterialPagesHostTest", "acquisitionSheetDismissesAndKeepsEachCallbackSeparate"): 1,
               ("com.tapscene.ui.shell.HomeMaterialPagesHostTest", "quotaLoadFailureAndBusyKeepExistingActionGates"): 1,
               ("com.tapscene.ui.shell.HomeMaterialPagesHostTest", "sourceSelectionAndGlobalCandidatesStayDistinctAcrossFailure"): 1,
+              ("com.tapscene.ui.shell.HomeMaterialPagesHostTest", "projectTabsShareHeightAndKeepLabelsSelectionAndCallbacksAtLargeFontScales"): 1,
           }
           actual = Counter()
           failures = errors = skipped = 0

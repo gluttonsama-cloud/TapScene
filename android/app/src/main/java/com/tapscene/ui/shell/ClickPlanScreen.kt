@@ -109,7 +109,8 @@ private val ClickPlanDraftSaver = listSaver<ClickPlanDraft, Any>(
 
 /** First-use preparation is reversible: no project is created until opening the overlay is confirmed. */
 @Composable
-fun ClickPlanEntryRoute(projects: ProjectWorkspace, onBack: () -> Unit, onManualRecording: () -> Unit) {
+fun ClickPlanEntryRoute(projects: ProjectWorkspace, onBack: () -> Unit, onManualRecording: () -> Unit,
+    onOpenProject: (String) -> Unit) {
     val context = LocalContext.current
     val state by projects.state.collectAsStateWithLifecycle()
     val playback by ClickPlayback.state.collectAsStateWithLifecycle()
@@ -168,7 +169,7 @@ fun ClickPlanEntryRoute(projects: ProjectWorkspace, onBack: () -> Unit, onManual
                 if (createdHere) projects.back()
                 onBack()
             }
-        }, onOpenProject = { projects.openProject(it); onBack() },
+        }, onOpenProject = onOpenProject,
             initialTargetPackage = targetPackage.takeIf { createdHere }, openOnLoad = openAfterCreate,
             onManualRecording = onManualRecording)
         return

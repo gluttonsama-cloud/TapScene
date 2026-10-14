@@ -20,11 +20,17 @@ import com.tapscene.ui.ProjectWorkspace
 import com.tapscene.clickplan.ClickAction
 import com.tapscene.clickplan.ClickDevice
 import com.tapscene.clickplan.ClickPlan
+import com.tapscene.clickplan.ClickRun
+import com.tapscene.clickplan.ClickChainReviewUiState
+import com.tapscene.ui.ClickChainWorkspace
+import com.tapscene.ui.MediaWorkspace
 import androidx.lifecycle.ViewModelProvider
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.UUID
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Rule
@@ -217,6 +223,75 @@ class ClickEntryNavigationHostTest {
         compose.onNodeWithText("录制操作").assertIsDisplayed()
         assertNull(shadowOf(compose.activity).nextStartedActivity)
         println("HOST_CLICK_ENTRY production home/creation/plan/picker-cancel/settings-intent/back/reopen/manual PASS; Android overlay/playback/recording NOT_RUN")
+    }
+
+    @Test fun openingReviewedProjectSelectsStepsWhileOrdinaryBackKeepsSources() {
+        waitFor("悬浮编排")
+        val app = RuntimeEnvironment.getApplication()
+        val projects = ViewModelProvider(compose.activity)[ProjectWorkspace::class.java]
+        val media = ViewModelProvider(compose.activity)[MediaWorkspace::class.java]
+        fun awaitWorkspaceIdle() = compose.waitUntil(30_000) {
+            compose.waitForIdle(); !projects.state.value.busy && !media.state.value.busy
+        }
+        awaitWorkspaceIdle()
+        val (source, created) = ProjectStore.withTemporary(app) { store ->
+            store.createProject("原点击链项目") to store.createProject("已生成的新项目")
+        }
+        val geometry = ClickDevice.geometry(app)
+        val plan = ClickPlan.create(source.project.id, "com.example.demo", geometry.width, geometry.height,
+            geometry.rotation, listOf(ClickAction(x = geometry.width / 2, y = geometry.height / 2)))
+        val store = ClickPlanStore(app)
+        store.savePlan(plan, null)
+        val run = ClickRun.create(plan, UUID.randomUUID().toString(), UUID.randomUUID().toString(), 1, 100)
+        store.beginRun(run)
+        store.recoverInterruptedRuns()
+        compose.runOnIdle { projects.reload() }
+        for (entry in listOf("plan", "record-review", "record-plan")) {
+            waitFor("原点击链项目")
+            compose.onNodeWithText("原点击链项目").performClick()
+            waitFor("素材")
+            awaitWorkspaceIdle()
+            compose.onNodeWithText("素材").performClick()
+            val openEntry: () -> Unit = {
+                if (entry == "plan") compose.onNodeWithText("悬浮编排").performClick()
+                else {
+                    compose.onNodeWithText("其他方式").performClick()
+                    compose.onNodeWithText("手动录屏").performClick()
+                }
+                waitFor("整理已录制点击链")
+            }
+            openEntry()
+            compose.onNodeWithContentDescription("返回").performClick()
+            compose.onNodeWithText("素材").assertIsSelected()
+            openEntry()
+            if (entry == "record-plan") {
+                compose.onNodeWithText("悬浮编排").performScrollTo().performClick()
+                waitFor("整理已录制点击链")
+            }
+            compose.onNodeWithText("整理已录制点击链").performScrollTo().performClick()
+            waitFor("整理点击链")
+            val review = ViewModelProvider(compose.activity)["click-chain-review", ClickChainWorkspace::class.java]
+            compose.waitUntil(30_000) { compose.waitForIdle(); !review.state.value.loading }
+            // Only the completed review state is synthetic. Exercise the real review callback,
+            // nested routes, shell tab state and persisted project opening, not media generation.
+            @Suppress("UNCHECKED_CAST")
+            val reviewState = ClickChainWorkspace::class.java.getDeclaredField("mutable").apply { isAccessible = true }
+                .get(review) as MutableStateFlow<ClickChainReviewUiState>
+            compose.runOnIdle {
+                reviewState.value = ClickChainReviewUiState(runId = run.runId, editingLocked = true,
+                    createdProjectId = created.project.id)
+            }
+            compose.onNodeWithText("打开新项目").performClick()
+            waitFor("已生成的新项目")
+            compose.onNodeWithText("步骤").assertIsSelected()
+            compose.onNodeWithText("素材").assertIsNotSelected()
+            compose.onNodeWithText("检查与交付").assertIsNotSelected()
+            assertEquals(created.project.id, ViewModelProvider(compose.activity)[ProjectWorkspace::class.java].state.value.project?.project?.id)
+            compose.onNodeWithText("整理点击链").assertDoesNotExist()
+            awaitWorkspaceIdle()
+            compose.onNodeWithContentDescription("返回").performClick()
+            waitFor("其他创建方式")
+        }
     }
 
     @Test @Config(sdk = [32]) fun unsupportedSystemShowsTheReasonAndDoesNotAskForService() {

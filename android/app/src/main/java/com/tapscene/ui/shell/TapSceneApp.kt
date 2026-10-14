@@ -54,6 +54,9 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     val page = pages.lastOrNull()
     val push: (String) -> Unit = { if (pages.lastOrNull() != it) pages.add(it) }
     val pop: () -> Unit = { if (pages.isNotEmpty()) pages.removeAt(pages.lastIndex) }
+    val openCreatedProject: (String) -> Unit = { id ->
+        pages.clear(); library = false; tab = ProjectTab.STEPS; projects.openProject(id)
+    }
     val hostingVisit = BuildConfig.HOSTED_ENABLED && page in setOf("hosted", "account", "versions")
     LaunchedEffect(page) {
         if (hostingVisit) hosting.open(when (page) {
@@ -568,8 +571,9 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                             onUseSafeImage = media::useSafeImageBase))
                                 } else ScreenEmpty("已返回保存的画面", "未确认的新画面没有替换原步骤。", "返回步骤", closeStepCorrection)
                             }
-                            "record" -> RecordingCaptureRoute(projects, pop, requestImport, openRecordedCandidates)
-                            "click-plan" -> ClickPlanEntryRoute(projects, pop, onManualRecording = { pop(); push("record") })
+                            "record" -> RecordingCaptureRoute(projects, pop, requestImport, openRecordedCandidates, openCreatedProject)
+                            "click-plan" -> ClickPlanEntryRoute(projects, pop, onManualRecording = { pop(); push("record") },
+                                onOpenProject = openCreatedProject)
                             "settings" -> {
                                 val storage by produceState<Pair<Int, Long>?>(null, state.projects, state.retainedMediaWorkspaces, mediaState.drafts) {
                                     value = withContext(Dispatchers.IO) {

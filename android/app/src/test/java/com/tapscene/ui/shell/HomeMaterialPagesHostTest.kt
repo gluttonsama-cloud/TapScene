@@ -2,10 +2,18 @@ package com.tapscene.ui.shell
 
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import com.tapscene.MainActivity
 import com.tapscene.data.HostSqlite
 import com.tapscene.data.SourceDraft
@@ -37,6 +45,55 @@ class HomeMaterialPagesHostTest {
 
     private fun source(index: Int) = SourceDraft(ImportedSource("source-$index", "unused/source-$index.mp4",
         "录屏 $index.mp4", SourceMetadata("video/avc", 2_097_152L, "0".repeat(64), 480, 840, 0, 18_000_000L)))
+
+    @Test fun projectTabsShareHeightAndKeepLabelsSelectionAndCallbacksAtLargeFontScales() {
+        val fontScale = mutableStateOf(1f)
+        val selected = mutableStateOf(ProjectTab.SOURCES)
+        val calls = mutableListOf<String>()
+        content {
+            CompositionLocalProvider(LocalDensity provides Density(LocalDensity.current.density, fontScale.value)) {
+                ProjectWorkspaceFrame("报名演示", selected.value,
+                    { selected.value = it; calls += it.name }, { calls += "back" },
+                    { calls += "preview" }, { calls += "more" }) {}
+            }
+        }
+        for (scale in listOf(1f, 1.5f, 2f)) {
+            compose.runOnIdle { fontScale.value = scale }
+            val bounds = ProjectTab.entries.map { tab ->
+                val node = compose.onNodeWithText(tab.label)
+                node.assertIsDisplayed().assertHeightIsAtLeast(48.dp)
+                    .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Tab))
+                val layouts = mutableListOf<TextLayoutResult>()
+                compose.onNodeWithText(tab.label, useUnmergedTree = true)
+                    .performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+                val layout = layouts.single()
+                // BasicText rebuilds the semantics MultiParagraph with the incoming max width,
+                // which can exceed its actual measured size. Check the lines, not paragraph width.
+                check(!layout.didOverflowHeight && layout.getLineEnd(layout.lineCount - 1) == tab.label.length &&
+                    (0 until layout.lineCount).all { line -> !layout.isLineEllipsized(line) &&
+                        layout.getLineRight(line) - layout.getLineLeft(line) <= layout.size.width + 1f }) {
+                    "${tab.label} clipped at fontScale=$scale: size=${layout.size}, lines=${layout.lineCount}"
+                }
+                node.fetchSemanticsNode().boundsInRoot
+            }
+            bounds.forEach {
+                assertEquals(bounds.first().top, it.top, 0.5f)
+                assertEquals(bounds.first().bottom, it.bottom, 0.5f)
+            }
+            ProjectTab.entries.forEach { tab ->
+                // The added height remains part of each destination's actual touch target.
+                compose.onNodeWithText(tab.label).performTouchInput { click(Offset(width / 2f, height - 2f)) }
+                ProjectTab.entries.forEach { other ->
+                    if (other == tab) compose.onNodeWithText(other.label).assertIsSelected()
+                    else compose.onNodeWithText(other.label).assertIsNotSelected()
+                }
+            }
+        }
+        compose.onNodeWithContentDescription("返回").performClick()
+        compose.onNodeWithText("预览").performClick()
+        compose.onNodeWithText("更多").performClick()
+        assertEquals(List(3) { ProjectTab.entries.map { it.name } }.flatten() + listOf("back", "preview", "more"), calls)
+    }
 
     @Test fun healthyHomeEmptyStateDoesNotReplaceLoadingOrFailure() {
         val state = mutableStateOf(ProjectUiState())

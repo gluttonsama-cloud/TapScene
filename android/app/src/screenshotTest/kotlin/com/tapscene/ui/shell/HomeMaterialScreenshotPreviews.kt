@@ -10,6 +10,7 @@ import com.android.tools.screenshot.PreviewTest
 /** Production source UI with in-memory metadata only; no device or media decoding evidence. */
 @PreviewTest
 @Preview(name = "sources_narrow_large_text", widthDp = 320, heightDp = 915, fontScale = 1.5f, locale = "zh-rCN", showBackground = true)
+@Preview(name = "sources_narrow_largest_text", widthDp = 320, heightDp = 915, fontScale = 2f, locale = "zh-rCN", showBackground = true)
 @Composable
 fun SourcesNarrowLargeTextPreview() = HomeMaterialSurface {
     ProjectWorkspaceFrame("报名演示", ProjectTab.SOURCES, {}, {}, {}, {}) {
