@@ -2,26 +2,39 @@
 
 本目录只含无秘密说明与 Python 标准库脚本。签名由维护者在已授权环境完成；使用者只接收已核对的 APK，无需配置签名工具或密钥。这里不生成凭据，也不包含实际密钥路径、密码或私钥。
 
-## 新并存测试包
+## 当前并存测试包
 
-本次用户批准生成新开发证书，用于独立 `com.tapscene.preview` / “点演测试版”。公开证书 SHA-256：
+2026-10-14 用户单独批准新的测试签名和独立应用身份 `com.tapscene.preview.r33` / “点演预览33”，与旧安装并存且不删除旧数据。`preview-r33` 公开证书 SHA-256：
 
 ```text
-662acdf3f4b7f2027c3394fd31408c44f35992cabea4bdeaab1ed85e80d338b0
+bda5105dacc64b0fcb8d49bc699842a93d53d39df4cdc9579872c063c647c824
 ```
 
-`preview` 复用完整离线生产代码，默认 arm64，versionCode 32；不是 runtimeSmoke 或 hostedDebug。CI 的 `tapscene-preview-unsigned-arm64-v8a` 只含未签名产品 APK 和无秘密检查报告。签名凭据不进入仓库、CI、产物或附件；当前私钥仅在临时开发环境私有目录，无持久备份，环境重建可能再次丢失。
+`preview` 复用完整离线生产代码，默认 arm64，当前集成 versionCode 33；不是 runtimeSmoke 或 hostedDebug。CI 的 `tapscene-preview-unsigned-arm64-v8a` 只含未签名产品 APK 和无秘密检查报告。签名凭据不进入仓库、CI、产物或附件。
+
+新密钥只生成一次，保留在已授权开发环境的仓库外私有目录供后续同环境复用；目录和凭据文件权限已核对。该环境仍不等于持久可靠备份，恢复能力未验证。签名脚本不生成或轮换密钥；后续继续匹配独立记录的同一证书，不能拿新产物自报的指纹替代预期值。
 
 维护者核对成功 CI 精确 head/tree、实际包名/权限/生产组件和 OCR 资产后，在仓库外已有对应凭据的环境执行：
 
 ```sh
-python3 tools/signing/sign-development-apk.py CI_INPUT.apk SIGNED_OUTPUT.apk --signing-dir SIGNING_DIR --certificate-profile preview
+python3 tools/signing/check-preview-apk.py CI_INPUT.apk --require-unsigned --aapt AAPT
+python3 tools/signing/sign-development-apk.py CI_INPUT.apk SIGNED_OUTPUT.apk --signing-dir SIGNING_DIR --certificate-profile preview-r33
 python3 tools/signing/check-preview-apk.py SIGNED_OUTPUT.apk --aapt AAPT
 ```
 
 `AAPT` 是可信 Android `aapt` 可执行文件路径；签名后仍须核对公开证书、文件 SHA-256、内容一致性和 16 KiB ZIP/ELF 对齐。可信发行版的 Android apksigner 35.0.2 支持 `--lib-page-alignment 16384`；不要使用不支持 `zipalign -P 16` 的旧版 zipalign 重排原生库。CI 输入已经按 16 KiB 对齐，签名脚本再次检查输入与输出所有条目。
 
-新包与正式 `com.tapscene`、既有 `com.tapscene.preview.hevc` 及 `com.tapscene.hosted.dev` 的 applicationId 和 provider authority 各自独立，不覆盖或迁移旧数据。点击目标列表和运行守卫排除这些安装包；无障碍名称和录屏通知显示测试版身份，避免误开旧服务。系统只允许的投影/无障碍行为仍须真机核验，不承诺两版同时录屏/播放。
+新包与正式 `com.tapscene`、既有 `com.tapscene.preview`、`com.tapscene.preview.hevc` 及 `com.tapscene.hosted.dev` 的 applicationId 和 provider authority 各自独立，不覆盖或迁移旧数据。点击目标列表和运行守卫排除这些安装包；无障碍名称和录屏通知显示“点演预览33”，避免误开旧服务。系统只允许的投影/无障碍行为仍须真机核验，不承诺两版同时录屏/播放。
+
+## 旧 preview-v31 证书（私钥未找到）
+
+`preview` profile 对应 `com.tapscene.preview` / “点演测试版”，公开证书 SHA-256：
+
+```text
+662acdf3f4b7f2027c3394fd31408c44f35992cabea4bdeaab1ed85e80d338b0
+```
+
+重建后的开发环境已找不到原签名目录及所需凭据，暂无经核实的持久安全备份。旧 `preview-v31` APK 的文件摘要与 Release 记录一致，公开证书也与该指纹一致；公钥不能恢复私钥。保留此 profile 供历史追溯，不使用新证书签署旧包名，也不卸载或清除旧版。
 
 ## 历史开发证书（私钥已丢失）
 

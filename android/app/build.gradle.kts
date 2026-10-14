@@ -25,8 +25,8 @@ android {
         applicationId = "com.tapscene"
         minSdk = 26
         targetSdk = 36
-        versionCode = 32
-        versionName = "0.27.0-overlay-entry-dev"
+        versionCode = 33
+        versionName = "0.28.0-preview-integration-dev"
         testInstrumentationRunner = if (runtimeSmoke) "com.tapscene.runtime.ClickRuntimeInstrumentation"
             else "com.tapscene.media.MediaCompatibilityInstrumentation"
         manifestPlaceholders["appLabel"] = "TapScene"
@@ -52,9 +52,9 @@ android {
             initWith(getByName("debug"))
             matchingFallbacks += listOf("debug")
             // New user-approved identity; never replaces either historical installation.
-            applicationIdSuffix = ".preview"
+            applicationIdSuffix = ".preview.r33"
             versionNameSuffix = "-preview"
-            manifestPlaceholders["appLabel"] = "点演测试版"
+            manifestPlaceholders["appLabel"] = "点演预览33"
             // CI produces unsigned bytes; the approved private key stays outside CI/repository.
             signingConfig = null
         }
