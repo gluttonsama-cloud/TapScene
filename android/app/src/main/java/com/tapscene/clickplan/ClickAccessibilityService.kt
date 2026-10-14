@@ -21,6 +21,7 @@ import android.hardware.display.DisplayManager
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityManager
+import android.view.inspector.WindowInspector
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -265,14 +266,37 @@ class ClickAccessibilityService : AccessibilityService() {
         val removed = overlays.toList()
         var failed = false
         removed.forEach { view ->
-            try { windows.removeViewImmediate(view) } catch (_: Exception) { failed = true }
+            val detached = try {
+                windows.removeViewImmediate(view)
+                !view.isAttachedToWindow
+            } catch (_: Exception) {
+                // addView may already have rolled back a rejected root. Conversely, a root
+                // can be registered before its first attachment: retain that ownership on
+                // failure, even across another hide request. Inspect our process's roots only.
+                runCatching {
+                    Build.VERSION.SDK_INT >= 29 && !view.isAttachedToWindow &&
+                        WindowInspector.getGlobalWindowViews().none { it === view }
+                }.getOrDefault(false)
+            }
+            if (detached) overlays.remove(view) else failed = true
         }
-        overlays.removeAll { !it.isAttachedToWindow }
         return !failed && removed.none { it.isAttachedToWindow } && overlays.isEmpty()
     }
 
     private fun addOverlay(view: View, width: Int, height: Int, flags: Int, gravity: Int,
         fullDisplay: Boolean = false, x: Int = 0, y: Int = 0): WindowManager.LayoutParams {
+        // ViewRoot announces each newly visible root as a window-state change, even when it is
+        // not focusable. Our locator is not a new foreground page. Suppress that announcement
+        // at its exact owned root; never exempt a received event by package, class or timing.
+        // Child controls, node actions and all other accessibility events remain unchanged.
+        view.accessibilityDelegate = object : View.AccessibilityDelegate() {
+            override fun sendAccessibilityEvent(host: View, eventType: Int) {
+                if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) super.sendAccessibilityEvent(host, eventType)
+            }
+            override fun sendAccessibilityEventUnchecked(host: View, event: AccessibilityEvent) {
+                if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) super.sendAccessibilityEventUnchecked(host, event)
+            }
+        }
         val params = WindowManager.LayoutParams(width, height, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             flags, PixelFormat.TRANSLUCENT).apply {
             this.gravity = gravity; this.x = x; this.y = y

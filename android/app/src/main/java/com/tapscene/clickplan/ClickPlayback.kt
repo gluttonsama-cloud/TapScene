@@ -30,7 +30,20 @@ data class ClickPlaybackUi(
     val message: String? = null,
     val run: ClickRun? = null,
     val overlayVisible: Boolean = false,
+    val pointFailure: ClickPointFailure? = null,
 )
+
+/** Bounded operation category only: no target package, class, content or exception is retained. */
+enum class ClickPointFailure(val message: String, val requiresReopen: Boolean = false) {
+    SessionUnavailable("点位未保存：定位会话已失效，请返回 TapScene 重新打开定位。", true),
+    DisplayChanged("点位未保存：屏幕尺寸或方向已变，请返回 TapScene 重新编排。", true),
+    TargetWindowUnknown("点位未保存：尚未确认目标 App 为全屏页面，请回到目标页面后重试。"),
+    TargetWindowBlocked("点位未保存：当前窗口未通过安全核对，请回到目标 App 的全屏页面后重试。"),
+    InvalidPlan("点位未保存：最多 40 个点，且总计划不能超过 120 秒。"),
+    InvalidViewport("点位未保存：请在 App 内容区定位，避开系统栏。"),
+    SaveUnconfirmed("点位保存结果未能确认，请返回 TapScene 重新打开定位并核对点数，勿重复添加。", true),
+    OverlayRefresh("点位已保存，但定位面板未能刷新。请返回 TapScene 重新打开定位并核对点数。", true),
+}
 internal data class ClickConsentRequest(val nonce: String, val plan: ClickPlan, val resume: Boolean, val viewport: ClickViewport)
 
 /** Process-local capability owner. No boot resume, retained grant or automatic gesture retry. */
@@ -160,26 +173,38 @@ object ClickPlayback {
             // Stay in TapScene if attachment fails, so the failure is actually visible to the user.
             openClickEditor(attachOverlay = { connected.showEditor(plan) },
                 launchTarget = { context.startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) })
-            mutable.value = mutable.value.copy(message = "可手动切换目标页面；添加点位只记录坐标。准备好后回到起始页。")
+            mutable.value = mutable.value.copy(pointFailure = null,
+                message = "可手动切换目标页面；添加点位只记录坐标。准备好后回到起始页。")
         } catch (_: Exception) { failEditor("无法打开目标 App 或定位点，请返回编辑重试。") }
     }
 
     internal fun addPoint(x: Int, y: Int) {
         val plan = editorPlan ?: return
         if (mutable.value.busy) return
+        var failure = ClickPointFailure.SessionUnavailable
         try {
             val context = requireNotNull(app)
-            check(ClickDevice.matches(context, plan) && guard == ClickGuard.Allowed)
+            failure = ClickPointFailure.DisplayChanged
+            check(ClickDevice.matches(context, plan))
+            failure = if (guard == ClickGuard.Blocked) ClickPointFailure.TargetWindowBlocked else ClickPointFailure.TargetWindowUnknown
+            check(guard == ClickGuard.Allowed)
+            failure = ClickPointFailure.InvalidPlan
             val updated = plan.copy(revision = plan.revision + 1, actions = plan.actions + ClickAction(x = x, y = y))
+            failure = ClickPointFailure.InvalidViewport
             require(service?.currentViewport()?.contains(updated) == true)
+            failure = ClickPointFailure.SaveUnconfirmed
             ClickPlanStore(context).savePlan(updated, plan.revision)
             editorPlan = updated
+            failure = ClickPointFailure.OverlayRefresh
             service?.showEditor(updated)
+            mutable.value = mutable.value.copy(pointFailure = null, message = "已保存第 ${updated.actions.size} 个点。")
         } catch (_: Exception) {
-            val message = "点位未保存：请在 App 内容区定位，避开系统栏；最多 40 点且总计划不超过 120 秒。"
-            mutable.value = mutable.value.copy(message = message)
-            service?.notice(message)
-            runCatching { service?.showEditor(plan) }
+            mutable.value = mutable.value.copy(message = failure.message, pointFailure = failure)
+            // Atomic replacement can precede a durability failure. Never retry or redraw an old
+            // plan after an uncertain save, and never describe a committed point as unsaved.
+            if (failure.requiresReopen) failEditor(failure.message)
+            else runCatching { service?.showEditor(plan) }
+            service?.notice(failure.message)
         }
     }
 
