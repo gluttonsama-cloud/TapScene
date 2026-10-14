@@ -6,6 +6,9 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
 import android.os.Looper
 import android.os.SystemClock
 import android.view.Display
@@ -19,6 +22,8 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityRecord
 import android.view.inspector.WindowInspector
 import android.widget.Button
+import android.widget.ScrollView
+import java.io.File
 import com.tapscene.data.HostFileSyncShadow
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -100,7 +105,8 @@ class ClickOverlayPointHostTest {
         awaitRecoverySetup()
         store = ClickPlanStore(app)
         val geometry = ClickDevice.geometry(app)
-        assertEquals(ClickGeometry(480, 800, 0, 0), geometry)
+        assertEquals(ClickGeometry(app.resources.configuration.screenWidthDp,
+            app.resources.configuration.screenHeightDp, 0, 0), geometry)
         initial = ClickPlan.create(UUID.randomUUID().toString(), TARGET_PACKAGE,
             geometry.width, geometry.height, geometry.rotation, emptyList())
         store.savePlan(initial, null)
@@ -250,6 +256,334 @@ class ClickOverlayPointHostTest {
         assertEquals(committed.digest, requireNotNull(store.getPlan(initial.projectId)).digest)
         HostFileSyncShadow.assertDirectorySyncEvidence()
         println("HOST_OVERLAY_POINT_REGRESSION savedPoints=${committed.actions.size} rejectedWindowFixtures=4 revisionConflict=closed-no-retry postSaveRenderFailure=closed-no-retry attachedDetachFailure=fail-closed pendingDetachFailure=retained-twice ownRootWindowEvents=0 androidRouting=not-modeled")
+        // One process-local owner across the interaction sequence, as in production. Robolectric
+        // recreates Applications between test methods but does not reset this Kotlin singleton.
+        actualPointSelectionRelocationCancelRemovalAndStaleControlsPreserveThePlan()
+        pointEditsKeepWindowGuardsAndCloseOnConflictsOrCommittedRefreshFailure()
+        fortyPointsKeepTheSelectedNumberReachableAndMarksUntouchable()
+        narrowLargeTextNumberListAndRelocationControlsRemainReachable()
+    }
+
+    private fun actualPointSelectionRelocationCancelRemovalAndStaleControlsPreserveThePlan() {
+        startFreshEditorPlan()
+        assertFalse(button("修改点位").isEnabled)
+        val original = openPlanWithPoints(3)
+        captureOverlay("01-home")
+        clickAccessible(button("修改点位")); idle()
+        assertFalse(button("重新定位").isEnabled)
+        assertFalse(button("移除").isEnabled)
+        clickAccessible(button("1")); idle()
+        assertTrue(button("1").isSelected)
+        assertFalse(service.canPreparePlayback)
+        assertMarksPassThrough()
+        captureOverlay("02-selected-overlap")
+
+        clickAccessible(button("重新定位")); idle()
+        val oldPicker = marks()
+        val cancel = button("重定位第 1 点 · 取消")
+        captureOverlay("03-relocating")
+        clickAccessible(cancel); idle()
+        assertEquals(original.digest, savedPlan().digest)
+        assertTrue(button("1").isSelected)
+        assertMarksPassThrough()
+        assertFalse(sendTouch(oldPicker, 220, 260))
+        assertEquals(original.digest, savedPlan().digest)
+
+        clickAccessible(button("重新定位")); idle()
+        tapMarks(220, 260)
+        val moved = savedPlan()
+        assertEquals(original.revision + 1, moved.revision)
+        assertEquals(original.actions.map { it.actionId }, moved.actions.map { it.actionId })
+        assertEquals(original.actions[0].copy(x = 220, y = 260), moved.actions[0])
+        assertEquals(original.actions.drop(1), moved.actions.drop(1))
+        assertTrue(button("1").isSelected)
+        assertMarksPassThrough()
+        captureOverlay("04-relocated")
+        // Both an old callback and the old picker are inert after a successful edit.
+        ClickPlayback.relocatePoint(original, original.actions[0].actionId, 240, 270)
+        assertFalse(sendTouch(oldPicker, 240, 270))
+        assertEquals(moved.digest, savedPlan().digest)
+
+        clickAccessible(button("移除")); idle()
+        val oldConfirm = button("确认移除")
+        assertEquals(moved.digest, savedPlan().digest)
+        assertMarksPassThrough()
+        captureOverlay("05-confirm-remove")
+        clickAccessible(button("取消")); idle()
+        oldConfirm.performClick(); idle()
+        assertEquals(moved.digest, savedPlan().digest)
+        assertTrue(button("1").isSelected)
+        // Reopening the exact same plan must still revoke controls from the previous session.
+        // Snapshot equality alone cannot protect this boundary; the service generation does.
+        ClickPlayback.closeEditor(app); idle()
+        ClickPlayback.openEditor(app, moved); idle()
+        service.onAccessibilityEvent(windowFixture())
+        oldConfirm.performClick(); idle()
+        assertEquals(moved.digest, savedPlan().digest)
+        clickAccessible(button("修改点位")); idle()
+        clickAccessible(button("1")); idle()
+        clickAccessible(button("移除")); idle()
+        val confirm = button("确认移除")
+        clickAccessible(confirm); idle()
+        val removed = savedPlan()
+        assertEquals(moved.revision + 1, removed.revision)
+        assertEquals(moved.actions.drop(1), removed.actions)
+        assertTrue(button("1").isSelected)
+        assertEquals("第 1 点", button("1").contentDescription)
+        confirm.performClick(); idle()
+        assertEquals(removed.digest, savedPlan().digest)
+        captureOverlay("06-removed-renumbered")
+
+        clickAccessible(button("返回")); idle()
+        clickAccessible(button("浏览页面 · 暂藏点位")); idle()
+        assertEquals(1, overlayRoots().size)
+        assertTrue(overlayRoots().single() is Button)
+        assertFalse(service.canPreparePlayback)
+        assertEquals(removed.digest, savedPlan().digest)
+        clickAccessible(button("继续定位")); idle()
+        assertMarksPassThrough()
+        assertEquals(removed.digest, savedPlan().digest)
+
+        // Removing the final point returns to the ordinary empty editor; no hidden selection survives.
+        repeat(removed.actions.size) {
+            clickAccessible(button("修改点位")); idle()
+            clickAccessible(button("1")); idle()
+            clickAccessible(button("移除")); idle()
+            clickAccessible(button("确认移除")); idle()
+            if (savedPlan().actions.isNotEmpty()) { clickAccessible(button("返回")); idle() }
+        }
+        assertTrue(savedPlan().actions.isEmpty())
+        assertFalse(button("修改点位").isEnabled)
+        assertFalse(button("隐藏点位并准备播放").isEnabled)
+        assertNull(ClickPlayback.state.value.run)
+        assertNoOwnWindowAnnouncements("selection, relocation, cancellation and confirmed removal")
+        println("HOST_OVERLAY_EDIT success=stable-id-order-timing cancel=unchanged stale-controls=inert remove=explicit-confirmation browse=unchanged final-point=empty androidRouting=not-modeled")
+    }
+
+    private fun pointEditsKeepWindowGuardsAndCloseOnConflictsOrCommittedRefreshFailure() {
+        startFreshEditorPlan()
+        var before = openPlanWithPoints(3)
+        for (remove in listOf(false, true)) {
+            for ((event, expectedFailure) in listOf(
+                windowFixture(null, null) to ClickPointFailure.TargetWindowUnknown,
+                windowFixture("com.example.foreign", "com.example.foreign.MainActivity") to ClickPointFailure.TargetWindowBlocked,
+            )) {
+                clickAccessible(button("修改点位")); idle()
+                clickAccessible(button("2")); idle()
+                service.onAccessibilityEvent(event)
+                if (remove) {
+                    clickAccessible(button("移除")); idle()
+                    clickAccessible(button("确认移除")); idle()
+                } else {
+                    clickAccessible(button("重新定位")); idle()
+                    tapMarks(220, 260)
+                }
+                assertEquals(expectedFailure, ClickPlayback.state.value.pointFailure)
+                assertEquals(before.digest, savedPlan().digest)
+                assertTrue(ClickPlayback.state.value.overlayVisible)
+                assertTrue("Rejected edit must keep the original selection", button("2").isSelected)
+                assertMarksPassThrough()
+                clickAccessible(button("返回")); idle()
+                service.onAccessibilityEvent(windowFixture())
+            }
+        }
+        clickAccessible(button("修改点位")); idle()
+        clickAccessible(button("2")); idle()
+        clickAccessible(button("重新定位")); idle()
+        val external = before.copy(revision = before.revision + 1,
+            actions = before.actions.mapIndexed { index, action -> if (index == 0) action.copy(waitAfterMs = 777) else action })
+        store.savePlan(external, before.revision)
+        tapMarks(220, 260)
+        assertEquals(ClickPointFailure.SaveUnconfirmed, ClickPlayback.state.value.pointFailure)
+        assertEquals(external.digest, savedPlan().digest)
+        assertFalse(ClickPlayback.state.value.overlayVisible)
+        assertTrue(overlayRoots().isEmpty())
+
+        ClickPlayback.openEditor(app, external); idle()
+        service.onAccessibilityEvent(windowFixture())
+        clickAccessible(button("修改点位")); idle()
+        clickAccessible(button("2")); idle()
+        clickAccessible(button("移除")); idle()
+        val oldConfirm = button("确认移除")
+        FailNextOverlayWindowManager.failNextOverlay = true
+        clickAccessible(oldConfirm); idle()
+        before = savedPlan()
+        assertEquals(external.actions.filterIndexed { index, _ -> index != 1 }, before.actions)
+        assertEquals(external.revision + 1, before.revision)
+        assertEquals(ClickPointFailure.OverlayRefresh, ClickPlayback.state.value.pointFailure)
+        assertFalse(ClickPlayback.state.value.overlayVisible)
+        assertTrue(overlayRoots().isEmpty())
+        oldConfirm.performClick()
+        shadowOf(Looper.getMainLooper()).idleFor(1, TimeUnit.SECONDS)
+        assertEquals(before.digest, savedPlan().digest)
+        assertFalse(ClickPlayback.observing)
+        assertNoOwnWindowAnnouncements("edit guards and failures")
+        println("HOST_OVERLAY_EDIT_FAILURES guards=unknown-foreign-both-mutations revision-conflict=closed committed-remove-refresh-failure=closed-no-retry androidRouting=not-modeled")
+    }
+
+    private fun fortyPointsKeepTheSelectedNumberReachableAndMarksUntouchable() {
+        startFreshEditorPlan()
+        val original = openPlanWithPoints(40)
+        clickAccessible(button("修改点位")); idle()
+        scrollNumberListToLastPoint()
+        clickNumberThroughRoot("40")
+        assertTrue(button("40").isSelected)
+        assertTrue(button("40").getGlobalVisibleRect(android.graphics.Rect()))
+        assertMarksPassThrough()
+        captureOverlay("07-forty-points")
+        clickAccessible(button("重新定位")); idle()
+        tapMarks(220, 260)
+        assertEquals(40, savedPlan().actions.size)
+        assertEquals(original.actions[39].copy(x = 220, y = 260), savedPlan().actions[39])
+        assertEquals(original.actions.take(39), savedPlan().actions.take(39))
+        assertTrue(button("40").isSelected)
+        assertTrue(button("40").getGlobalVisibleRect(android.graphics.Rect()))
+    }
+
+    private fun narrowLargeTextNumberListAndRelocationControlsRemainReachable() {
+        ClickPlayback.closeEditor(app); controller.destroy(); idle()
+        RuntimeEnvironment.setQualifiers("w320dp-h640dp-mdpi")
+        RuntimeEnvironment.setFontScale(2f)
+        controller = Robolectric.buildService(ClickAccessibilityService::class.java).create()
+        service = controller.get()
+        ClickPlayback.connected(service)
+        startFreshEditorPlan()
+        openPlanWithPoints(40)
+        assertEquals(2f, button("添加点位").resources.configuration.fontScale, 0f)
+        assertUnclippedText(button("添加点位"))
+        assertUnclippedText(button("修改点位"))
+        captureOverlay("08-narrow-large-text-home")
+        clickAccessible(button("修改点位")); idle()
+        scrollNumberListToLastPoint()
+        clickNumberThroughRoot("40")
+        assertUnclippedText(button("40"))
+        assertUnclippedText(button("重新定位"))
+        assertUnclippedText(button("移除"))
+        captureOverlay("09-narrow-large-text-selection")
+        clickAccessible(button("重新定位")); idle()
+        assertUnclippedText(button("重定位第 40 点 · 取消"))
+        captureOverlay("10-narrow-large-text-relocating")
+        clickAccessible(button("重定位第 40 点 · 取消")); idle()
+        assertEquals(40, savedPlan().actions.size)
+        assertTrue(button("40").isSelected)
+        assertMarksPassThrough()
+    }
+
+    private fun assertUnclippedText(control: Button) {
+        val layout = requireNotNull(control.layout)
+        assertTrue("${control.text} text height exceeds its measured button", layout.height <=
+            control.height - control.compoundPaddingTop - control.compoundPaddingBottom)
+        for (line in 0 until layout.lineCount) assertEquals("${control.text} is ellipsized", 0, layout.getEllipsisCount(line))
+        val visible = android.graphics.Rect()
+        assertTrue(control.getGlobalVisibleRect(visible))
+        assertEquals("${control.text} is vertically clipped", control.height, visible.height())
+        assertTrue("${control.text} touch target is too short", control.height >= 48)
+    }
+
+    private fun scrollNumberListToLastPoint() {
+        val root = overlayRoots().filterIsInstance<ScrollView>().single()
+        val list = descendants(root).filterIsInstance<ScrollView>().single { it !== root }
+        assertEquals(0, list.scrollY)
+        val location = IntArray(2).also(list::getLocationOnScreen)
+        val rootLocation = IntArray(2).also(root::getLocationOnScreen)
+        val x = location[0] - rootLocation[0] + list.width / 2f
+        val startY = location[1] - rootLocation[1] + list.height - 12f
+        val finishY = location[1] - rootLocation[1] + 12f
+        // Route real MotionEvents from the outer panel root through hit testing and interception.
+        repeat(24) {
+            val down = SystemClock.uptimeMillis()
+            for (step in 0..9) {
+                val action = when (step) { 0 -> MotionEvent.ACTION_DOWN; 9 -> MotionEvent.ACTION_UP; else -> MotionEvent.ACTION_MOVE }
+                val event = MotionEvent.obtain(down, down + step * 10L, action, x,
+                    startY + (finishY - startY) * step / 9, 0)
+                try { assertTrue(root.dispatchTouchEvent(event)) } finally { event.recycle() }
+            }
+            idle()
+        }
+        shadowOf(Looper.getMainLooper()).idleFor(2, TimeUnit.SECONDS)
+        assertTrue("Actual drags must scroll the inner number list", list.scrollY > 0)
+        assertEquals("Number-list drags must not move the outer panel", 0, root.scrollY)
+        val visible = android.graphics.Rect()
+        assertTrue("Point 40 must be reachable by scrolling", button("40").getGlobalVisibleRect(visible))
+        assertEquals(button("40").height, visible.height())
+    }
+
+    private fun clickNumberThroughRoot(label: String) {
+        val target = button(label)
+        val root = overlayRoots().filterIsInstance<ScrollView>().single()
+        val visible = android.graphics.Rect()
+        assertTrue(target.getGlobalVisibleRect(visible))
+        val location = IntArray(2).also(root::getLocationOnScreen)
+        val targetLocation = IntArray(2).also(target::getLocationOnScreen)
+        val down = SystemClock.uptimeMillis()
+        for ((action, at) in listOf(MotionEvent.ACTION_DOWN to down, MotionEvent.ACTION_UP to down + 80)) {
+            val event = MotionEvent.obtain(down, at, action,
+                targetLocation[0] - location[0] + target.width / 2f,
+                targetLocation[1] - location[1] + target.height / 2f, 0)
+            try { assertTrue(root.dispatchTouchEvent(event)) } finally { event.recycle() }
+        }
+        idle()
+    }
+
+    private fun startFreshEditorPlan() {
+        ClickPlayback.closeEditor(app); idle()
+        val geometry = ClickDevice.geometry(app)
+        initial = ClickPlan.create(UUID.randomUUID().toString(), TARGET_PACKAGE,
+            geometry.width, geometry.height, geometry.rotation, emptyList())
+        store.savePlan(initial, null)
+        ClickPlayback.openEditor(app, initial); idle()
+        assertTrue("Fresh host editor failed: ${ClickPlayback.state.value}", ClickPlayback.state.value.overlayVisible)
+    }
+
+    private fun savedPlan(): ClickPlan = requireNotNull(store.getPlan(initial.projectId))
+
+    private fun openPlanWithPoints(count: Int): ClickPlan {
+        val plan = initial.copy(revision = initial.revision + 1, actions = (0 until count).map { index ->
+            ClickAction(x = if (index % 2 == 0) 126 else 290, y = if (index % 2 == 0) 181 else 300,
+                pressDurationMs = 60L + index, waitAfterMs = 300L + index * 7)
+        })
+        store.savePlan(plan, initial.revision)
+        ClickPlayback.updatePlan(app, plan); idle()
+        service.onAccessibilityEvent(windowFixture())
+        return plan
+    }
+
+    private fun marks(): View = overlayRoots().single { it !is Button && it !is ViewGroup }
+
+    private fun assertMarksPassThrough() {
+        assertEquals(2, overlayRoots().size)
+        assertTrue((marks().layoutParams as WindowManager.LayoutParams).flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE != 0)
+        assertFalse(sendTouch(marks(), 126, 181))
+    }
+
+    private fun sendTouch(view: View, x: Int, y: Int): Boolean {
+        val origin = IntArray(2).also(view::getLocationOnScreen)
+        val down = SystemClock.uptimeMillis()
+        var accepted = false
+        for ((action, at) in listOf(MotionEvent.ACTION_DOWN to down, MotionEvent.ACTION_UP to down + 80)) {
+            val event = MotionEvent.obtain(down, at, action, x.toFloat(), y.toFloat(), 0)
+            event.offsetLocation(-origin[0].toFloat(), -origin[1].toFloat())
+            try { accepted = view.dispatchTouchEvent(event) || accepted } finally { event.recycle() }
+        }
+        return accepted
+    }
+
+    /** Production Views rendered by native host graphics on a plain backdrop; not a device screenshot. */
+    private fun captureOverlay(name: String) {
+        val directory = System.getenv("TAPSCENE_OVERLAY_EVIDENCE_DIR")?.let(::File) ?: return
+        require(directory.isAbsolute)
+        check(directory.mkdirs() || directory.isDirectory)
+        val geometry = requireNotNull(service.currentViewport()).geometry
+        val bitmap = Bitmap.createBitmap(geometry.width, geometry.height, Bitmap.Config.ARGB_8888)
+        try {
+            val canvas = Canvas(bitmap)
+            canvas.drawColor(Color.rgb(228, 233, 236))
+            overlayRoots().forEach { root ->
+                val origin = IntArray(2).also(root::getLocationOnScreen)
+                canvas.save(); canvas.translate(origin[0].toFloat(), origin[1].toFloat()); root.draw(canvas); canvas.restore()
+            }
+            File(directory, "$name.png").outputStream().use { check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) }
+        } finally { bitmap.recycle() }
     }
 
     private fun savePointWithTargetFixture() {

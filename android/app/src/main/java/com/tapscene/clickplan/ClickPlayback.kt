@@ -41,8 +41,8 @@ enum class ClickPointFailure(val message: String, val requiresReopen: Boolean = 
     TargetWindowBlocked("点位未保存：当前窗口未通过安全核对，请回到目标 App 的全屏页面后重试。"),
     InvalidPlan("点位未保存：最多 40 个点，且总计划不能超过 120 秒。"),
     InvalidViewport("点位未保存：请在 App 内容区定位，避开系统栏。"),
-    SaveUnconfirmed("点位保存结果未能确认，请返回 TapScene 重新打开定位并核对点数，勿重复添加。", true),
-    OverlayRefresh("点位已保存，但定位面板未能刷新。请返回 TapScene 重新打开定位并核对点数。", true),
+    SaveUnconfirmed("点位保存结果未能确认，请返回 TapScene 重新打开定位并核对点位，勿重复操作。", true),
+    OverlayRefresh("点位更改已保存，但定位面板未能刷新。请返回 TapScene 重新打开定位并核对点位。", true),
 }
 internal data class ClickConsentRequest(val nonce: String, val plan: ClickPlan, val resume: Boolean, val viewport: ClickViewport)
 
@@ -178,32 +178,62 @@ object ClickPlayback {
         } catch (_: Exception) { failEditor("无法打开目标 App 或定位点，请返回编辑重试。") }
     }
 
-    internal fun addPoint(x: Int, y: Int) {
+    internal fun addPoint(expected: ClickPlan, x: Int, y: Int) = changePoints(expected,
+        successMessage = "已保存第 ${expected.actions.size + 1} 个点。") { plan ->
+        plan.copy(revision = plan.revision + 1, actions = plan.actions + ClickAction(x = x, y = y))
+    }
+
+    internal fun relocatePoint(expected: ClickPlan, actionId: String, x: Int, y: Int) = changePoints(expected,
+        selectedActionId = actionId, successMessage = "点位已更新。") { plan ->
+        check(plan.actions.any { it.actionId == actionId })
+        plan.copy(revision = plan.revision + 1, actions = plan.actions.map {
+            if (it.actionId == actionId) it.copy(x = x, y = y) else it
+        })
+    }
+
+    internal fun removePoint(expected: ClickPlan, actionId: String) {
+        val index = expected.actions.indexOfFirst { it.actionId == actionId }
+        if (index < 0) return
+        val remaining = expected.actions.filterNot { it.actionId == actionId }
+        changePoints(expected, selectedActionId = actionId,
+            savedSelectionId = remaining.getOrNull(index.coerceAtMost(remaining.lastIndex))?.actionId,
+            successMessage = "已移除第 ${index + 1} 个点。") { plan ->
+            plan.copy(revision = plan.revision + 1, actions = remaining)
+        }
+    }
+
+    private fun changePoints(expected: ClickPlan, selectedActionId: String? = null,
+        savedSelectionId: String? = selectedActionId, successMessage: String,
+        update: (ClickPlan) -> ClickPlan) {
         val plan = editorPlan ?: return
-        if (mutable.value.busy) return
+        // Reject older plan revisions; the service generation separately rejects controls from a reopened session.
+        if (mutable.value.busy || plan != expected) return
         var failure = ClickPointFailure.SessionUnavailable
         try {
             val context = requireNotNull(app)
+            val connected = requireNotNull(service)
             failure = ClickPointFailure.DisplayChanged
             check(ClickDevice.matches(context, plan))
             failure = if (guard == ClickGuard.Blocked) ClickPointFailure.TargetWindowBlocked else ClickPointFailure.TargetWindowUnknown
             check(guard == ClickGuard.Allowed)
             failure = ClickPointFailure.InvalidPlan
-            val updated = plan.copy(revision = plan.revision + 1, actions = plan.actions + ClickAction(x = x, y = y))
+            val updated = update(plan)
             failure = ClickPointFailure.InvalidViewport
-            require(service?.currentViewport()?.contains(updated) == true)
+            require(connected.currentViewport()?.contains(updated) == true)
             failure = ClickPointFailure.SaveUnconfirmed
             ClickPlanStore(context).savePlan(updated, plan.revision)
             editorPlan = updated
             failure = ClickPointFailure.OverlayRefresh
-            service?.showEditor(updated)
-            mutable.value = mutable.value.copy(pointFailure = null, message = "已保存第 ${updated.actions.size} 个点。")
+            connected.showEditor(updated, savedSelectionId)
+            mutable.value = mutable.value.copy(pointFailure = null, message = successMessage)
         } catch (_: Exception) {
             mutable.value = mutable.value.copy(message = failure.message, pointFailure = failure)
             // Atomic replacement can precede a durability failure. Never retry or redraw an old
-            // plan after an uncertain save, and never describe a committed point as unsaved.
+            // plan after an uncertain save, and never describe a committed change as unsaved.
             if (failure.requiresReopen) failEditor(failure.message)
-            else runCatching { service?.showEditor(plan) }
+            else runCatching { service?.showEditor(plan,
+                selectedActionId?.takeIf { id -> plan.actions.any { it.actionId == id } }) }
+                .onFailure { failEditor("定位面板无法显示，请返回编辑。") }
             service?.notice(failure.message)
         }
     }

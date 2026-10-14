@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.ComponentName
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -24,6 +25,7 @@ import android.view.accessibility.AccessibilityManager
 import android.view.inspector.WindowInspector
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 
 /** No node, text, key, notification, clipboard or content retrieval. Events are never logged. */
@@ -99,14 +101,21 @@ class ClickAccessibilityService : AccessibilityService() {
         config.scale == 1f && if (Build.VERSION.SDK_INT >= 34) !config.isActivated else controller.currentMagnificationRegion.isEmpty
     }.getOrDefault(false)
 
-    fun showEditor(value: ClickPlan) {
-        editor = editor.open()
+    fun showEditor(value: ClickPlan, selectedActionId: String? = null) {
+        require(selectedActionId == null || value.actions.any { it.actionId == selectedActionId })
+        editor = editor.open(selectedActionId)
         plan = value
         renderEditor()
     }
 
-    private fun changeEditor(event: ClickEditorEvent, generation: Long) {
-        val next = editor.change(event, generation)
+    private fun changeEditor(event: ClickEditorEvent, generation: Long) = updateEditor(editor.change(event, generation))
+
+    private fun selectPoint(actionId: String, generation: Long) {
+        if (plan?.actions?.any { it.actionId == actionId } != true) return
+        updateEditor(editor.select(actionId, generation))
+    }
+
+    private fun updateEditor(next: ClickEditorState) {
         if (next == editor || plan == null || ClickPlayback.state.value.busy) return
         editor = next
         try { renderEditor() }
@@ -124,6 +133,8 @@ class ClickAccessibilityService : AccessibilityService() {
         check(viewport.matches(value))
         val generation = editor.generation
         val picking = editor.mode == ClickEditorMode.Picking
+        val selectedId = editor.selectedActionId
+        val selectedIndex = value.actions.indexOfFirst { it.actionId == selectedId }
         if (editor.mode == ClickEditorMode.Browsing) {
             addMoveableControl("继续定位", viewport, generation, compact = true) { changeEditor(ClickEditorEvent.Resume, generation) }
         } else {
@@ -143,9 +154,15 @@ class ClickAccessibilityService : AccessibilityService() {
                     if (generation != editor.generation) return
                     locatorFrame = actual.takeIf { current != null && current.matches(value) && current.acceptsFrame(it) }
                     if (locatorFrame == null) return
-                    value.actions.forEachIndexed { index, point ->
+                    value.actions.indices.sortedBy { value.actions[it].actionId == selectedId }.forEach { index ->
+                        val point = value.actions[index]
+                        val selected = point.actionId == selectedId
                         val x = (point.x - actual.x).toFloat(); val y = (point.y - actual.y).toFloat()
-                        paint.color = Color.rgb(30, 125, 103); paint.alpha = 220
+                        if (selected) {
+                            paint.color = Color.WHITE; paint.alpha = 255
+                            canvas.drawCircle(x, y, 24 * resources.displayMetrics.density, paint)
+                        }
+                        paint.color = Color.rgb(30, 125, 103); paint.alpha = if (selected) 255 else 220
                         canvas.drawCircle(x, y, 20 * resources.displayMetrics.density, paint)
                         paint.color = Color.WHITE; paint.alpha = 255; paint.textSize = 16 * resources.displayMetrics.scaledDensity
                         paint.textAlign = Paint.Align.CENTER
@@ -167,9 +184,10 @@ class ClickAccessibilityService : AccessibilityService() {
                             if (down != null && point != null && !moved &&
                                 kotlin.math.abs(point.x - requireNotNull(down).x) <= slop &&
                                 kotlin.math.abs(point.y - requireNotNull(down).y) <= slop) {
-                                ClickPlayback.addPoint(point.x, point.y)
+                                if (selectedId == null) ClickPlayback.addPoint(value, point.x, point.y)
+                                else ClickPlayback.relocatePoint(value, selectedId, point.x, point.y)
                                 performClick()
-                            } else notice("未添加点位：请在 App 内容区短点一次，避开系统栏。")
+                            } else notice("未保存点位：请在 App 内容区短点一次，避开系统栏。")
                             down = null
                         }
                     }
@@ -182,41 +200,121 @@ class ClickAccessibilityService : AccessibilityService() {
                     (if (picking) 0 else WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE), Gravity.TOP or Gravity.LEFT,
                 fullDisplay = true)
             if (picking) {
-                addMoveableControl("点一下定位 · 取消", viewport, generation) { changeEditor(ClickEditorEvent.CancelPick, generation) }
+                val label = if (selectedId == null) "点一下定位 · 取消" else "重定位第 ${selectedIndex + 1} 点 · 取消"
+                addMoveableControl(label, viewport, generation) { changeEditor(ClickEditorEvent.CancelPick, generation) }
             } else {
-                val panel = LinearLayout(overlayContext).apply {
-                    orientation = LinearLayout.VERTICAL; setPadding(12, 8, 12, 8); setBackgroundColor(Color.rgb(240, 248, 245))
-                    addView(TextView(overlayContext).apply {
-                        text = "TapScene · ${value.actions.size} 个点\n浏览页面后可继续添加；播放前回到起始页"; setTextColor(Color.BLACK)
-                    })
-                    fun button(label: String, action: () -> Unit) { addView(Button(overlayContext).apply {
-                        text = label; minHeight = (48 * resources.displayMetrics.density).toInt()
-                        setOnClickListener { if (generation == editor.generation) action() }
-                    }) }
-                    button("添加点位") { changeEditor(ClickEditorEvent.AddPoint, generation) }
-                    button("浏览页面 · 暂藏点位") { changeEditor(ClickEditorEvent.Browse, generation) }
-                    button("隐藏点位并准备播放") { ClickPlayback.prepareConsent(this@ClickAccessibilityService) }
-                    button("返回编辑 / 取消") { ClickPlayback.closeEditor(this@ClickAccessibilityService) }
-                }
-                addOverlay(panel, (292 * overlayContext.resources.displayMetrics.density).toInt(), WindowManager.LayoutParams.WRAP_CONTENT,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
+                addEditorPanel(value, viewport, generation, selectedIndex)
             }
         }
         ClickPlayback.overlayChanged(true)
     }
 
+    private fun addEditorPanel(value: ClickPlan, viewport: ClickViewport, generation: Long, selectedIndex: Int) {
+        val context = overlayContext
+        fun dp(value: Int) = (value * context.resources.displayMetrics.density).toInt()
+        val accent = Color.rgb(30, 125, 103)
+        fun button(label: String, enabled: Boolean = true, action: () -> Unit) = Button(context).apply {
+            text = label; minHeight = dp(48); minimumWidth = 0; minWidth = 0
+            isEnabled = enabled
+            setOnClickListener { if (generation == editor.generation) action() }
+        }
+        val panel = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(8), dp(12), dp(8)); setBackgroundColor(Color.rgb(240, 248, 245))
+        }
+        fun title(label: String) { panel.addView(TextView(context).apply {
+            text = label; textSize = 16f; setTextColor(Color.BLACK); setPadding(dp(4), dp(4), dp(4), dp(8))
+        }) }
+        fun action(label: String, event: ClickEditorEvent, enabled: Boolean = true) {
+            panel.addView(button(label, enabled) { changeEditor(event, generation) })
+        }
+        when (editor.mode) {
+            ClickEditorMode.Removing -> {
+                val selected = value.actions.getOrNull(selectedIndex) ?: error("Selected point is unavailable")
+                title("移除第 ${selectedIndex + 1} 点？")
+                panel.addView(TextView(context).apply {
+                    text = "后续点位会重新编号"; setTextColor(Color.DKGRAY); setPadding(dp(4), 0, dp(4), dp(8))
+                })
+                panel.addView(button("确认移除") { ClickPlayback.removePoint(value, selected.actionId) })
+                action("取消", ClickEditorEvent.CancelRemove)
+            }
+            ClickEditorMode.Editing -> {
+                title(if (selectedIndex < 0) "选择要修改的点位" else "第 ${selectedIndex + 1} 点")
+                val grid = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+                value.actions.withIndex().chunked(4).forEach { row ->
+                    grid.addView(LinearLayout(context).apply {
+                        row.forEach { (index, point) ->
+                            addView(button((index + 1).toString()) { selectPoint(point.actionId, generation) }.apply {
+                                contentDescription = "第 ${index + 1} 点"
+                                isSelected = index == selectedIndex
+                                if (isSelected) {
+                                    backgroundTintList = ColorStateList.valueOf(accent); setTextColor(Color.WHITE)
+                                }
+                            }, LinearLayout.LayoutParams(0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                        }
+                        repeat(4 - row.size) { addView(View(context), LinearLayout.LayoutParams(0, 1, 1f)) }
+                    })
+                }
+                val pointList = object : ScrollView(context) {
+                    // A drag that starts in the number list belongs to it, not the short-screen panel.
+                    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+                        if (event.actionMasked == MotionEvent.ACTION_DOWN) parent.requestDisallowInterceptTouchEvent(true)
+                        val handled = super.dispatchTouchEvent(event)
+                        if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
+                            parent.requestDisallowInterceptTouchEvent(false)
+                        }
+                        return handled
+                    }
+                }.apply { isFillViewport = false; addView(grid) }
+                panel.addView(pointList, LinearLayout.LayoutParams(android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                    dp(56 * ((value.actions.size + 3) / 4).coerceAtMost(2))))
+                if (selectedIndex >= 0) pointList.post {
+                    if (generation == editor.generation) pointList.scrollTo(0, grid.getChildAt(selectedIndex / 4).top)
+                }
+                action("重新定位", ClickEditorEvent.Relocate, selectedIndex >= 0)
+                action("移除", ClickEditorEvent.Remove, selectedIndex >= 0)
+                action("返回", ClickEditorEvent.Back)
+            }
+            ClickEditorMode.Locating -> {
+                title("TapScene · ${value.actions.size} 个点")
+                panel.addView(LinearLayout(context).apply {
+                    addView(button("添加点位") { changeEditor(ClickEditorEvent.AddPoint, generation) },
+                        LinearLayout.LayoutParams(0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                    addView(button("修改点位", value.actions.isNotEmpty()) { changeEditor(ClickEditorEvent.EditPoints, generation) },
+                        LinearLayout.LayoutParams(0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                })
+                action("浏览页面 · 暂藏点位", ClickEditorEvent.Browse)
+                panel.addView(button("隐藏点位并准备播放", value.actions.isNotEmpty()) {
+                    ClickPlayback.prepareConsent(this@ClickAccessibilityService)
+                })
+                panel.addView(button("返回编辑 / 取消") { ClickPlayback.closeEditor(this@ClickAccessibilityService) })
+            }
+            else -> error("Unexpected editor panel mode")
+        }
+        // Short screens keep every action reachable without creating another overlay window.
+        val width = minOf(dp(292), viewport.geometry.width - viewport.left - viewport.right)
+        val scroll = ScrollView(context).apply { addView(panel) }
+        scroll.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+        val height = minOf(scroll.measuredHeight, viewport.geometry.height - viewport.top - viewport.bottom)
+        addOverlay(scroll, width, height, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
+    }
+
     /** Dragging only moves this control window. No touch is replayed to the underlying application. */
     private fun addMoveableControl(label: String, viewport: ClickViewport, generation: Long, compact: Boolean = false, onClick: () -> Unit) {
         val width = ((if (compact) 76 else 160) * overlayContext.resources.displayMetrics.density).toInt()
-        val height = (52 * overlayContext.resources.displayMetrics.density).toInt()
-        val position = checkNotNull(viewport.clampControl(controlPosition?.x ?: viewport.left,
-            controlPosition?.y ?: (viewport.top + height), width, height))
-        controlPosition = position
         val button = Button(overlayContext).apply {
             text = label; contentDescription = "$label，可拖动以避开页面内容"
             minWidth = 0; minimumWidth = 0; setPadding(4, 0, 4, 0)
             setOnClickListener { if (generation == editor.generation) onClick() }
         }
+        button.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+        val height = maxOf((52 * overlayContext.resources.displayMetrics.density).toInt(), button.measuredHeight)
+        val position = checkNotNull(viewport.clampControl(controlPosition?.x ?: viewport.left,
+            controlPosition?.y ?: (viewport.top + height), width, height))
+        controlPosition = position
         val params = addOverlay(button, width, height, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             Gravity.TOP or Gravity.LEFT, fullDisplay = true, x = position.x, y = position.y)
         val slop = ViewConfiguration.get(overlayContext).scaledTouchSlop
