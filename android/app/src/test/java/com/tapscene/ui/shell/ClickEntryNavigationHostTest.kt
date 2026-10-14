@@ -33,6 +33,7 @@ import java.util.concurrent.TimeUnit
 import java.util.UUID
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.ExternalResource
@@ -57,6 +58,7 @@ class ClickEntryNavigationHostTest {
     private var previousRequestedSize: String? = null
     @get:Rule(order = 0) val database = object : ExternalResource() {
         override fun before() {
+            resetApplicationViewModelFactory()
             HostSqlite.configure()
             val app = RuntimeEnvironment.getApplication()
             // Only discard synthetic files inside this Robolectric test's own private sandbox.
@@ -85,6 +87,7 @@ class ClickEntryNavigationHostTest {
         }
         override fun after() {
             try { HostFileSyncShadow.reset() } finally {
+                resetApplicationViewModelFactory()
                 val key = "robolectric.windowManager.useRequestedSize"
                 previousRequestedSize?.let { System.setProperty(key, it) } ?: System.clearProperty(key)
             }
@@ -352,11 +355,23 @@ class ClickEntryNavigationHostTest {
         println("HOST_CLICK_ENTRY dirty manual fallback cancel/discard/save PASS; no recording permission requested")
     }
 
+    private fun resetApplicationViewModelFactory() {
+        // Robolectric replaces Application between methods; Lifecycle 2.9.4 retains its first
+        // AndroidViewModelFactory. Without resetting this host-only cache, later real activities
+        // open the previous test's private database through their AndroidViewModels.
+        ViewModelProvider.AndroidViewModelFactory::class.java.getDeclaredField("_instance")
+            .apply { isAccessible = true }.set(null, null)
+    }
+
     private fun waitFor(text: String) {
         compose.waitUntil(30_000) { compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty() }
         compose.waitForIdle()
-        assertEquals(RuntimeEnvironment.getApplication().noBackupFilesDir.canonicalFile,
-            compose.activity.noBackupFilesDir.canonicalFile)
+        val app = RuntimeEnvironment.getApplication()
+        assertEquals(app.noBackupFilesDir.canonicalFile, compose.activity.noBackupFilesDir.canonicalFile)
+        assertSame("Project workspace must use this test's Application", app,
+            ViewModelProvider(compose.activity)[ProjectWorkspace::class.java].getApplication<android.app.Application>())
+        assertSame("Media workspace must use this test's Application", app,
+            ViewModelProvider(compose.activity)[MediaWorkspace::class.java].getApplication<android.app.Application>())
     }
 
 }
