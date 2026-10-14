@@ -833,7 +833,7 @@ HTTP 映射：400 输入错误；401 会话失效；404 不存在或无权；409
 
 ### 点击链锚点复核与独立项目生成
 
-`ClickChainWorkspace` 仅从终结运行及所属素材的 `FrameEvidenceStore` 读取 before/after/Missing。使用真实登记源访问器核对 MP4、编码样本和 PNG，按 `(sessionId, sourceFrameId)` 识别捕获帧；ticket、呈现 PTS 或重复显示样本不另造步骤。原始像素只在 `withDecodedFrameSuspending` 内交给既有安全输出器，不向页面传原始路径或将原 PNG 登记为正式资产。
+`ClickChainWorkspace` 仅从终结运行及所属素材的 `FrameEvidenceStore` 读取 before/after/Missing。首次 before 可带明确的准入快照元数据：只表示准备期间选定的真实画面，复核页显示该语义，不声明派发瞬间像素。外发仍只包含已复核的 recorded 画面与 authored 连线，不输出原始派发时序。使用真实登记源访问器核对 MP4、编码样本和 PNG，按 `(sessionId, sourceFrameId)` 识别捕获帧；ticket、呈现 PTS 或重复显示样本不另造步骤。原始像素只在 `withDecodedFrameSuspending` 内交给既有安全输出器，不向页面传原始路径或将原 PNG 登记为正式资产。
 
 连续已完成动作的中间阶段允许作者选择前一 after 或紧邻后一 before；首尾分别为首动作 before 与末动作 after。缺图、非完成、跨 epoch、观测顺序或几何异常阻断整段路线；可另选完整范围或仅加入画面。点击区域由真实配置派发点经所选阶段图的 scale/offset 预填小范围，作者拖改并确认区域与后继；不读取手指、不推断按钮框或业务结果。区域确认绑定实际选中图和前后安全 PNG 摘要，换图/换输出立即失效。
 

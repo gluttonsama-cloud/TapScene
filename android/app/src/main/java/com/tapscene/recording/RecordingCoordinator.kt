@@ -152,6 +152,35 @@ object RecordingCoordinator {
         override fun cancelEpoch(reason: FrameMissingReason) = current().cancelEpoch(reason)
     }
 
+    /** Each capability remains bound to the exact backend that owns and revokes its lease. */
+    fun initialFrameAdmissionPort(sessionId: String): InitialFrameAdmissionPort = object : InitialFrameAdmissionPort {
+        override fun begin(action: FrameAnchorAction, authorization: InitialFrameAuthorization,
+            onChanged: () -> Unit): InitialFrameAdmissionHandle {
+            val recording = active?.takeIf {
+                it.journal.sessionId == sessionId && action.sessionId == sessionId &&
+                    action.sourceId == it.journal.sourceId && !it.stopping &&
+                    canDispatchClicks(sessionId, it.journal.projectId, action.sourceId)
+            } ?: return InitialFrameAdmissionPort.Unavailable.begin(action, authorization, onChanged)
+            val backend = recording.backend
+                ?: return InitialFrameAdmissionPort.Unavailable.begin(action, authorization, onChanged)
+            val owned = backend.initialFrames.begin(action, authorization, onChanged)
+            return object : InitialFrameAdmissionHandle {
+                private fun current(): Boolean = active === recording && recording.backend === backend &&
+                    !recording.stopping && canDispatchClicks(sessionId, recording.journal.projectId, action.sourceId)
+                override val status: InitialFrameAdmissionStatus
+                    get() {
+                        if (!current()) { owned.cancel(); return InitialFrameAdmissionStatus.Unavailable }
+                        return owned.status
+                    }
+                override fun consume(): AnchorResult {
+                    if (!current()) { owned.cancel(); return AnchorResult.Missing(FrameMissingReason.CaptureStopped) }
+                    return owned.consume()
+                }
+                override fun cancel() = owned.cancel()
+            }
+        }
+    }
+
     /** Covers cancellation before the asynchronous start command has published its session ID. */
     fun stopClickSession(context: Context, sessionId: String) {
         clickGate.cancel(sessionId)

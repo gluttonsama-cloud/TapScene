@@ -665,8 +665,10 @@ class ProjectStore(context: Context) {
     private fun clickChainId(operationId: String, domain: String, key: String): String =
         UUID.nameUUIDFromBytes("tapscene-click-chain:$operationId:$domain:$key".toByteArray(Charsets.UTF_8)).toString()
 
-    /** Versioned fields, not data-class toString: future diagnostic fields cannot break retries. */
+    /** Versioned fields, not data-class toString; legacy inputs retain their exact v1 retry identity. */
     private fun clickChainDigest(input: ClickChainImportInput): String {
+        val includesAdmission = input.frames.any { it.evidence.ticket.admission != null } ||
+            input.actions.any { it.before.ticket.admission != null || it.after.ticket.admission != null }
         val bytes = java.io.ByteArrayOutputStream()
         java.io.DataOutputStream(bytes).use { out ->
             fun item(value: Any?) {
@@ -685,12 +687,20 @@ class ProjectStore(context: Context) {
                     with(geometry) { item(geometryId); item(displayWidth); item(displayHeight); item(frameWidth); item(frameHeight)
                         item(scale); item(offsetX); item(offsetY) }
                     item(freshness.name)
+                    if (includesAdmission) {
+                        item(admission?.let { "AdmissionTimeSnapshot" })
+                        admission?.let {
+                            item(it.confirmedAtUptimeMs); item(it.deadlineUptimeMs); item(it.selectedAtUptimeMs)
+                            item(it.selectionPresentationSampleId); item(it.selectionPresentationPtsUs); item(it.consumedAtUptimeMs)
+                        }
+                    }
                 }
                 item(value.pngSha256); item(value.width); item(value.height); item(value.encoderPtsUs)
                 item(value.muxSampleOrdinal); item(value.containerPtsUs); item(value.sourceSha256)
             }
             fun rect(value: OpaqueMask) { item(value.left); item(value.top); item(value.right); item(value.bottom) }
-            item("tapscene-reviewed-click-chain-v1"); item(input.operationId); item(input.title)
+            item(if (includesAdmission) "tapscene-reviewed-click-chain-v2" else "tapscene-reviewed-click-chain-v1")
+            item(input.operationId); item(input.title)
             with(input.run) {
                 item(runId); item(plan.digest); item(recordingSessionId); item(sourceId); item(generation); item(createdAtMs)
                 item(phase.name); item(nextActionIndex); item(stopReason?.name); item(journalRevision); item(mapping.name)

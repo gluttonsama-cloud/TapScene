@@ -266,7 +266,7 @@ object ClickPlayback {
             check(service != null && !mutable.value.overlayVisible && ClickDevice.matches(context, request.plan))
             check(service?.currentViewport() == request.viewport && request.viewport.contains(request.plan) && ClickDevice.shortPressesAllowed(request.plan))
             guard = ClickGuard.Unknown; freshTarget = false; requiredWindowAfter = SystemClock.uptimeMillis()
-            val nextArm = ClickTargetArm(requiredWindowAfter)
+            val nextArm = ClickTargetArm(requiredWindowAfter, confirmationId = request.nonce)
             arm = nextArm
             check(main.postDelayed({
                 if (arm === nextArm) invalidateArm()
@@ -283,13 +283,23 @@ object ClickPlayback {
                 store.beginRun(run)
                 runViewport = request.viewport
                 engine = ClickRunEngine(run, persist = store::saveRun,
-                    dispatch = { token, action, callback -> service?.dispatch(token, action, callback) ?: false },
+                    dispatch = { token, action, callback ->
+                        val dispatchArm = arm
+                        // Keep the confirmation available to dispatchAllowed through the platform call.
+                        try { service?.dispatch(token, action, callback) ?: false }
+                        finally { if (arm === dispatchArm) arm = null }
+                    },
                     schedule = { delay, action -> check(main.postDelayed({ action() }, delay)) },
                     uptimeMs = SystemClock::uptimeMillis,
                     guard = { guardFor(it) },
                     recordingReady = { recordingReady(it) },
                     onState = ::onRun,
-                    frames = RecordingCoordinator.frameAnchorPort(run.recordingSessionId))
+                    frames = RecordingCoordinator.frameAnchorPort(run.recordingSessionId),
+                    initialFrames = RecordingCoordinator.initialFrameAdmissionPort(run.recordingSessionId),
+                    initialAuthorization = { arm?.authorizationAt(SystemClock.uptimeMillis()) },
+                    onPreparingInitialFrame = {
+                        mutable.value = mutable.value.copy(message = "正在准备初始画面，尚未开始点击")
+                    })
                 mutable.value = mutable.value.copy(run = run)
                 RecordingCoordinator.start(context, run.projectId, requireNotNull(resultCode), requireNotNull(grant),
                     RecordingClickSession(run.recordingSessionId, run.sourceId, run.plan.width, run.plan.height))
@@ -360,8 +370,10 @@ object ClickPlayback {
     }
     internal fun dispatchAllowed(): Boolean {
         val run = engine?.state ?: return false
-        return run.phase == ClickRunPhase.Running && guardFor(run.plan) == ClickGuard.Allowed &&
-            recordingReady(run)
+        val firstDispatch = run.nextActionIndex == 0 && run.outcomes.first().status == ClickActionStatus.Intent
+        return run.phase == ClickRunPhase.Running && guardFor(run.plan) == ClickGuard.Allowed && recordingReady(run) &&
+            engine?.state === run && (!firstDispatch || arm?.authorizationAt(SystemClock.uptimeMillis()) != null) &&
+            arm?.expired(SystemClock.uptimeMillis()) != true
     }
     private fun recordingReady(run: ClickRun): Boolean = RecordingCoordinator.canDispatchClicks(
         run.recordingSessionId, run.projectId, run.sourceId)
@@ -371,15 +383,21 @@ object ClickPlayback {
         if (current.state.terminal || guardFor(current.state.plan) != ClickGuard.Allowed ||
             !recordingReady(current.state)) return
         if (arm?.expired(SystemClock.uptimeMillis()) == true) { invalidateArm(); return }
-        if (current.state.phase == ClickRunPhase.Ready && arm != null) { arm = null; current.start() }
+        if (current.state.phase == ClickRunPhase.Ready && arm != null) { current.start() }
         else if (current.state.phase == ClickRunPhase.Paused && resumeConfirmed) {
-            resumeConfirmed = false; arm = null; current.resume(true)
+            resumeConfirmed = false
+            // Later resumes retain the existing timing and guard semantics; only the first call
+            // needs to retain its confirmation through initial-frame preparation.
+            if (current.state.nextActionIndex > 0 || current.state.outcomes.first().status == ClickActionStatus.Accepted) arm = null
+            current.resume(true)
         }
     }
     private fun onRun(run: ClickRun) {
         mutable.value = mutable.value.copy(run = run, busy = !run.terminal || (RecordingCoordinator.state.value.sessionId == run.recordingSessionId && RecordingCoordinator.state.value.isBusy), message = when (run.phase) {
             ClickRunPhase.Ready -> "等待目标窗口与录屏就绪"
-            ClickRunPhase.Running -> "依次播放中，系统回调只表示手势完成"
+            ClickRunPhase.Running -> if (run.nextActionIndex == 0 && run.outcomes.first().status in
+                setOf(ClickActionStatus.Pending, ClickActionStatus.Intent)) "正在准备初始画面，尚未开始点击"
+                else "依次播放中，系统回调只表示手势完成"
             ClickRunPhase.Paused -> "后续点击已暂停；已派发的短按可能完成。请核对当前页面后明确恢复。"
             ClickRunPhase.Completed -> "点击链已播放一次，正在保存录屏；完成后可整理画面与点击区域。"
             else -> "本轮已中断或停止；未知点击不会自动重试，日志保存在本机。"

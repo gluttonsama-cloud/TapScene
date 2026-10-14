@@ -211,6 +211,98 @@ class FrameEvidenceStoreHostTest {
         assertTrue(manifest().exists())
     }
 
+    @Test fun admissionProvenanceUpgradesOnlyItsPrivateSidecarAndSurvivesValidatedRoundTrip() {
+        val store = newSession()
+        assertEquals(1, JSONObject(manifest().readText()).getInt("version"))
+        val metadata = InitialFrameAdmissionMetadata(1_000, 16_000, 1_100, 4, 120_000, 1_300)
+        val ticket = ticket().copy(admission = metadata)
+        store.persistTicket(ticket)
+        val json = JSONObject(manifest().readText())
+        // The legacy reader's explicit version == 1 gate rejects this new meaning.
+        assertEquals(2, json.getInt("version"))
+        assertEquals("AdmissionTimeSnapshot", json.getJSONArray("frames").getJSONObject(0)
+            .getJSONObject("admission").getString("kind"))
+        val before = persistedTicket().toString()
+        bitmap().let { image -> try { store.recordPng(ticket, image) } finally { image.recycle() } }
+        store.markEncoder(sessionId, ticket.sourceFrameId, ticket.submittedPtsUs, 1)
+        store.seal(sessionId, listOf(0, 7_000, 50_000), sourceSha)
+        store.registered(sessionId, sourceId, sourceSha)
+        val reopened = FrameEvidenceStore(context)
+        val candidate = (reopened.readCandidate(sessionId, ticket.ticketId, source()) as FrameCandidateResult.Available).candidate
+        assertEquals(ticket, candidate.ticket)
+        assertEquals(40_000L, candidate.encoderPtsUs)
+        assertEquals(120_000L, candidate.ticket.admission!!.selectionPresentationPtsUs)
+        assertEquals(7_000L, candidate.containerPtsUs)
+        assertEquals(before, persistedTicket().toString())
+        expectFailure { reopened.persistTicket(ticket.copy(admission = metadata.copy(consumedAtUptimeMs = 1_301))) }
+        HostFileSyncShadow.assertDirectorySyncEvidence()
+    }
+
+    @Test fun v1CannotSilentlyCarryAdmissionAndV2RequiresTheNewSemantic() {
+        val store = newSession()
+        val ordinary = ticket()
+        store.persistTicket(ordinary)
+        val original = manifest().readText()
+        assertEquals(1, JSONObject(original).getInt("version"))
+        assertFalse(JSONObject(original).getJSONArray("frames").getJSONObject(0).has("admission"))
+        for (injected in listOf(JSONObject.NULL, JSONObject().put("kind", "AdmissionTimeSnapshot"))) {
+            val json = JSONObject(original)
+            json.getJSONArray("frames").getJSONObject(0).put("admission", injected)
+            manifest().writeText(json.toString())
+            expectFailure { FrameEvidenceStore(context).listBoundaries(sessionId) }
+        }
+        for (version in listOf(0, 2, 3)) {
+            manifest().writeText(JSONObject(original).put("version", version).toString())
+            expectFailure { FrameEvidenceStore(context).listBoundaries(sessionId) }
+        }
+        manifest().writeText(original)
+        assertEquals(ordinary.ticketId, FrameEvidenceStore(context).listBoundaries(sessionId).single().ticketId)
+    }
+
+    @Test fun admissionMetadataRejectsInvalidBoundariesChronologyKindsAndPartialRecords() {
+        val store = newSession()
+        val ticket = ticket().copy(admission = InitialFrameAdmissionMetadata(1_000, 16_000, 1_100, 4, 120_000, 1_300))
+        store.persistTicket(ticket)
+        expectFailure { store.persistTicket(ticket(actionId = id()).copy(admission = ticket.admission)) }
+        // A normal later boundary remains v2 without acquiring admission semantics.
+        val ordinary = ticket(actionId = id(), sourceFrameId = 2)
+        store.persistTicket(ordinary)
+        val original = manifest().readText()
+        val frameMutations: List<(JSONObject) -> Unit> = listOf(
+            { it.put("boundary", "After") },
+            { it.put("submittedPtsUs", 120_001) },
+            { it.put("admission", JSONObject.NULL) },
+            { it.remove("admission") },
+        )
+        for (mutate in frameMutations) {
+            val json = JSONObject(original)
+            mutate(json.getJSONArray("frames").getJSONObject(0))
+            manifest().writeText(json.toString())
+            expectFailure { FrameEvidenceStore(context).listBoundaries(sessionId) }
+        }
+        val metadataMutations: List<(JSONObject) -> Unit> = listOf(
+            { it.put("kind", "LatestAtDispatch") },
+            { it.put("selectedAtUptimeMs", 999) },
+            { it.put("consumedAtUptimeMs", 1_099) },
+            { it.put("consumedAtUptimeMs", 16_001) },
+            { it.put("deadlineUptimeMs", 16_001) },
+            { it.put("selectionPresentationSampleId", 0) },
+            { it.put("selectionPresentationPtsUs", -1) },
+            { it.put("selectedAtUptimeMs", 1_100.5) },
+            { it.put("selectedAtUptimeMs", "1100") },
+            { it.remove("selectionPresentationSampleId") },
+            { it.put("futureMeaning", true) },
+        )
+        for (mutate in metadataMutations) {
+            val json = JSONObject(original)
+            mutate(json.getJSONArray("frames").getJSONObject(0).getJSONObject("admission"))
+            manifest().writeText(json.toString())
+            expectFailure { FrameEvidenceStore(context).listBoundaries(sessionId) }
+        }
+        manifest().writeText(original)
+        assertEquals(2, FrameEvidenceStore(context).listBoundaries(sessionId).size)
+    }
+
     private fun newSession(): FrameEvidenceStore = FrameEvidenceStore(context).also { it.createSession(projectId, sessionId, sourceId) }
     private fun manifest() = File(root, "frame-evidence/$sessionId/evidence.json")
     private fun persistedTicket(): JSONObject = JSONObject(manifest().readText()).getJSONArray("frames").getJSONObject(0).let { frame ->
@@ -218,6 +310,7 @@ class FrameEvidenceStoreHostTest {
         JSONObject().also { ticket ->
             listOf("ticketId", "action", "boundary", "epoch", "sourceFrameId", "captureSequence", "sourceTimestampNs",
                 "submittedPtsUs", "geometry", "freshness").forEach { ticket.put(it, frame.get(it)) }
+            if (frame.has("admission")) ticket.put("admission", frame.getJSONObject("admission"))
         }
     }
     private fun ticket(actionId: String = id(), sourceFrameId: Long = 1) = FrameTicket(id(),

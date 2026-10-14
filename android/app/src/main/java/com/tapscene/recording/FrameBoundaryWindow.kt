@@ -12,6 +12,9 @@ internal class FrameBoundaryWindow(private val sessionId: String, private val so
     fun accepts(action: FrameAnchorAction): Boolean = action.sessionId == sessionId && action.sourceId == sourceId &&
         (runIdentity == null || runIdentity == (action.runId to action.generation))
 
+    /** Read-only admission guard; reserving an FBO must not open or finalize an action boundary. */
+    fun hasSelection(action: FrameAnchorAction, boundary: FrameBoundary): Boolean = (action to boundary) in selections
+
     /** Null means this boundary may select once now; non-null is final and must never be retried. */
     fun begin(action: FrameAnchorAction, boundary: FrameBoundary): AnchorResult? {
         if (!accepts(action)) return AnchorResult.Missing(FrameMissingReason.ClosedEpoch)

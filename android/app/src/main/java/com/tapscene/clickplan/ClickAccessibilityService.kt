@@ -83,7 +83,11 @@ class ClickAccessibilityService : AccessibilityService() {
         val path = Path().apply { moveTo(action.x.toFloat(), action.y.toFloat()) }
         val builder = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, action.pressDurationMs))
         if (Build.VERSION.SDK_INT >= 30) builder.setDisplayId(android.view.Display.DEFAULT_DISPLAY)
-        return dispatchGesture(builder.build(), object : GestureResultCallback() {
+        val gesture = builder.build()
+        // Platform/window checks above may take time. The original first-call confirmation
+        // must still be valid at the actual platform boundary, including after admission.
+        if (!ClickPlayback.dispatchAllowed()) return false
+        return dispatchGesture(gesture, object : GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) { callback(token, ClickGestureResult.Completed) }
             override fun onCancelled(gestureDescription: GestureDescription?) { callback(token, ClickGestureResult.Cancelled) }
         }, main)

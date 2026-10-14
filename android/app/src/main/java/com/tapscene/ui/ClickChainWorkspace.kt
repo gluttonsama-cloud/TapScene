@@ -234,7 +234,8 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
             ClickChainActionRow(action.action.actionId,action.index + 1,actionStatus(action.status),
                 from?.let(::titleForFrame) ?: "前图待补",to?.let(::titleForFrame) ?: "后图待补",confirmed,
                 path.issue == null && from != null && to != null && frameReviewed(from) && frameReviewed(to),
-                if (!action.complete) "前后画面或完成结果待补" else null)
+                if (!action.complete) "前后画面或完成结果待补" else null,
+                selectionNotice = action.before?.selectionNotice)
         }
         val allFrames = path.actions.flatMap { listOfNotNull(it.before?.key,it.after?.key) }.distinct()
         val issue = when {
@@ -254,7 +255,8 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
             stages = path.stages.map { stage -> ClickChainStageRow(stage.index,stage.selectedKey?.let(::titleForFrame) ?: "画面待补",
                 stage.choices,stage.selectedKey,stage.selectedKey?.let(::frameReviewed) == true) },actions = actions,
             frames = allFrames.map { key -> ClickChainFrameRow(key,titleForFrame(key),frameReviewed(key),saved.selectedFrameKeys?.contains(key) != false,
-                thumbnailDigest = saved.frames[key]?.takeIf { it.reviewed && it.originalPngSha256 == current.frames[key]?.pngSha256 }?.output?.sha256) },
+                thumbnailDigest = saved.frames[key]?.takeIf { it.reviewed && it.originalPngSha256 == current.frames[key]?.pngSha256 }?.output?.sha256,
+                selectionNotice = current.frames[key]?.selectionNotice) },
             frameCount = keys.size,reviewedFrameCount = reviewedCount,confirmedActionCount = confirmedCount,
             markLastTerminal = saved.markLastTerminal,issue = issue,
             editingLocked = resultStatus == "committed" || saved.operationId != null && resultStatus !in setOf("aborted","unstarted"),
@@ -262,13 +264,13 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
             canCreate = issue == null && saved.title.isNotBlank() && reviewedCount == keys.size &&
                 (saved.framesOnly || confirmedCount == actions.size) && !previous.busy && !previous.loading && resultStatus != "committed",
             frameEditor = selectedFrame?.let { key -> frameDraft(key).let { frame -> ClickChainFrameEditor(key,frame.title,editorBitmap,frame.masks,
-                outputBitmap,frame.output?.sha256,frame.reviewed) } },
+                outputBitmap,frame.output?.sha256,frame.reviewed,current.frames[key]?.selectionNotice) } },
             actionEditor = selectedAction?.let { id ->
                 val action = path.actions.firstOrNull { it.action.actionId == id }; val edit = saved.actions[id]
                 val frame = edit?.fromKey?.let(current.frames::get)
                 if (action == null || edit == null || frame == null) null else ClickChainActionEditor(id,edit.label,edit.rect,actionBitmap,targetBitmap,
                     titleForFrame(edit.toKey),ClickChainRoutePolicy.point(action.action,frame),edit.fromKey == edit.toKey,
-                    actions.count { saved.actions[it.actionId]?.fromKey == edit.fromKey })
+                    actions.count { saved.actions[it.actionId]?.fromKey == edit.fromKey },action.before?.selectionNotice)
             }) }
     }
 

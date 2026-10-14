@@ -12,6 +12,7 @@ internal interface RecordingBackend {
     val captureWidth: Int
     val captureHeight: Int
     val anchors: FrameAnchorPort get() = FrameAnchorPort.None
+    val initialFrames: InitialFrameAdmissionPort get() = InitialFrameAdmissionPort.Unavailable
     val hasEncodedSample: Boolean get() = false
     fun start()
     /** Synchronously fences new submissions, without waiting for a driver or PNG writer. */

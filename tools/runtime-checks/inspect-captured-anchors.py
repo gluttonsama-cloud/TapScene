@@ -137,6 +137,16 @@ def inspect(directory):
                 assert states[ordinal] == expected, "Actual bound MP4 sample has a different fixture state"
                 result.update(muxSampleOrdinal=ordinal, containerPtsUs=pts_us[ordinal],
                               decodedVideoState=states[ordinal], sourceFrameId=row["sourceFrameId"])
+                if "selection" in row:
+                    selected = row["selection"]
+                    assert index == 0 and boundary == "Before"
+                    assert selected["kind"] == "AdmissionTimeSnapshot"
+                    confirmed, deadline = selected["confirmedAtUptimeMs"], selected["deadlineUptimeMs"]
+                    assert 0 <= confirmed < deadline and deadline - confirmed <= 15000
+                    assert confirmed <= selected["selectedAtUptimeMs"] <= selected["consumedAtUptimeMs"] <= deadline
+                    assert selected["selectionPresentationSampleId"] > 0
+                    assert row["submittedPtsUs"] <= selected["selectionPresentationPtsUs"]
+                    result["selection"] = selected
             checks.append(result)
     return {"sourceSha256": digest, "decodedSamples": len(states), "boundaries": checks,
             "allBoundaryBindingsPresent": not any("missing" in row for row in anchors),

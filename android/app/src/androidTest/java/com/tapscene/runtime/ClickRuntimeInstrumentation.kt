@@ -385,6 +385,15 @@ class ClickRuntimeInstrumentation : Instrumentation() {
                         .put("encoderPtsUs", candidate.encoderPtsUs).put("muxSampleOrdinal", candidate.muxSampleOrdinal)
                         .put("containerPtsUs", candidate.containerPtsUs).put("freshness", candidate.ticket.freshness.name)
                         .put("pngSha256", candidate.pngSha256)
+                    candidate.ticket.admission?.let { selected ->
+                        json.put("selection", JSONObject().put("kind", "AdmissionTimeSnapshot")
+                            .put("confirmedAtUptimeMs", selected.confirmedAtUptimeMs)
+                            .put("deadlineUptimeMs", selected.deadlineUptimeMs)
+                            .put("selectedAtUptimeMs", selected.selectedAtUptimeMs)
+                            .put("selectionPresentationSampleId", selected.selectionPresentationSampleId)
+                            .put("selectionPresentationPtsUs", selected.selectionPresentationPtsUs)
+                            .put("consumedAtUptimeMs", selected.consumedAtUptimeMs))
+                    }
                 }
                 resultRows.put(json)
                 return candidate
@@ -400,6 +409,15 @@ class ClickRuntimeInstrumentation : Instrumentation() {
         report.put("chainRoute", JSONObject().put("issue", route.issue ?: JSONObject.NULL)
             .put("stages", route.stages.size).put("distinctSourceFrames", capture.frames.size))
         check(route.issue == null) { "Real dynamic target did not yield a complete reviewable route: ${route.issue}; Missing is never synthesized" }
+        val firstBefore = checkNotNull(actions.first().before)
+        val initial = checkNotNull(firstBefore.ticket.admission) { "First Before lacks explicit admission-time selection provenance" }
+        val firstActionId = run.plan.actions.first().actionId
+        val firstIntent = run.events.single { it.type == ClickRunEventType.DispatchIntent && it.actionId == firstActionId }
+        val firstAccepted = run.events.single { it.type == ClickRunEventType.DispatchAccepted && it.actionId == firstActionId }
+        check(initial.selectedAtUptimeMs <= firstIntent.diagnosticUptimeMs)
+        check(initial.consumedAtUptimeMs in firstIntent.diagnosticUptimeMs..firstAccepted.diagnosticUptimeMs)
+        check(firstBefore.ticket.submittedPtsUs <= initial.selectionPresentationPtsUs)
+        check(actions.drop(1).all { it.before?.ticket?.admission == null } && actions.all { it.after?.ticket?.admission == null })
         for (frame in capture.frames.values) {
             evidence.withDecodedFrameSuspending(frame, accessor) { bitmap ->
                 for (point in run.plan.actions.distinctBy { it.x to it.y }) {

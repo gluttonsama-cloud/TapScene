@@ -58,6 +58,7 @@ data class FrameGeometry(
 /**
  * Immutable selection made at the action boundary. sourceTimestampNs comes from SurfaceTexture;
  * submittedPtsUs is the exact presentation timestamp submitted to the encoder. Neither is uptime.
+ * A non-null admission identifies an earlier admission-time snapshot, not the latest dispatch frame.
  * sourceFrameId is session scoped; captureSequence is monotonically increasing in that session.
  */
 data class FrameTicket(
@@ -71,11 +72,16 @@ data class FrameTicket(
     val submittedPtsUs: Long,
     val geometry: FrameGeometry,
     val freshness: FrameFreshness,
+    val admission: InitialFrameAdmissionMetadata? = null,
 ) {
     init {
         requireFrameUuid(ticketId)
         require(epoch >= 0 && sourceFrameId >= 0 && captureSequence >= 0)
         require(sourceTimestampNs >= 0 && submittedPtsUs >= 0)
+        admission?.let {
+            require(boundary == FrameBoundary.Before)
+            require(submittedPtsUs <= it.selectionPresentationPtsUs)
+        }
     }
 }
 

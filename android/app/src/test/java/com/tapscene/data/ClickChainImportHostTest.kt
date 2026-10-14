@@ -11,8 +11,11 @@ import com.tapscene.media.OpaqueMask
 import com.tapscene.media.SafeMediaWriter
 import com.tapscene.media.SourceMetadata
 import com.tapscene.packageformat.ViewerPackageCodec
+import com.tapscene.packageformat.AiPackageCodec
+import com.tapscene.packageformat.RenderPlan
 import com.tapscene.recording.*
 import java.io.File
+import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
@@ -46,6 +49,94 @@ class ClickChainImportHostTest {
         HostFileSyncShadow.begin(RuntimeEnvironment.getApplication().noBackupFilesDir)
     }
     @After fun end() = HostFileSyncShadow.reset()
+
+    @Test fun admittedRouteExportsRecordedImagesAndAuthoredLinksWithoutGestureTimingClaims() = runBlocking(Dispatchers.IO) {
+        fixture(initialAdmission = true) { f ->
+            val original = f.input.frames.first().evidence
+            val admission = checkNotNull(original.ticket.admission)
+            val receipt = f.store.importReviewedClickChain(f.input, f.accessor)
+            val saved = checkNotNull(f.store.readProject(receipt.projectId))
+            check(saved.steps.size == 3 && saved.steps.sumOf { it.hotspots.size } == 2)
+            check(saved.steps.all { it.evidenceKind == "recorded" && it.videoOrigin != null })
+            check(saved.steps.first().frameTimeUs == original.containerPtsUs)
+            check(f.store.importReviewedClickChain(f.input, f.accessor) == receipt)
+            check(ProjectStore.withTemporary(f.context) { it.readProject(receipt.projectId) } == saved)
+
+            val scene = ReleaseCompiler.scene(saved, id(), 1234)
+            val json = org.json.JSONObject(ViewerPackageCodec.writeScene(scene).toString(Charsets.UTF_8))
+            check(scene.states.all { it.sourceKind == "recorded" } && scene.edges.all { it.sourceKind == "authored" })
+            fun keys(value: org.json.JSONObject) = value.keys().asSequence().toSet()
+            check(keys(json) == setOf("schemaVersion","policyVersion","compilerVersion","releaseId","title","goal",
+                "createdAt","startStateId","states","edges","hotspots","regions","assets"))
+            val states = json.getJSONArray("states")
+            repeat(states.length()) { check(keys(states.getJSONObject(it)) ==
+                setOf("id","imageAssetId","width","height","title","description","sourceKind","terminal")) }
+            val edges = json.getJSONArray("edges")
+            repeat(edges.length()) { check(keys(edges.getJSONObject(it)) ==
+                setOf("id","fromStateId","to","hotspotId","label","trigger","transitionAssetId","sourceKind")) }
+            val visits = scene.states.map { state ->
+                RenderPlan.Visit(id(),state.id,scene.edges.singleOrNull { it.fromStateId == state.id }?.id,30)
+            }
+            val plan = RenderPlan.build(scene,1080,1920,visits,emptyList())
+            val planJson = org.json.JSONObject(plan.toBytes().toString(Charsets.UTF_8))
+            check(keys(planJson) == setOf("schemaVersion","adapterVersion","compositionId","releaseId","contentDigest",
+                "fps","canvas","visits","effects","timeline","totalFrames"))
+            repeat(visits.size) {
+                check(keys(planJson.getJSONArray("visits").getJSONObject(it)) == setOf("visitId","stateId","selectedEdgeId","holdFrames"))
+                check(keys(planJson.getJSONArray("timeline").getJSONObject(it)) ==
+                    setOf("visitId","startFrame","durationFrames","transitionFrames","overlapFrames"))
+            }
+            val payload = File(f.root,"admission-export-${id()}").apply { mkdirs() }
+            File(payload,"assets").mkdir()
+            saved.steps.forEach { step -> File(f.root,step.asset.privateRelativePath)
+                .copyTo(File(payload,scene.assets.single { it.id == step.asset.id }.path)) }
+            val output = File(f.root,"admission-${id()}.tapscene-ai")
+            AiPackageCodec.writePackage(scene,plan,payload,output,{ },null)
+            val destination = File(f.root,"admission-read-${id()}").apply { mkdirs() }
+            val reloaded = AiPackageCodec.readPackage(output,destination,{ },null)
+            check(ViewerPackageCodec.writeScene(reloaded.scene).contentEquals(ViewerPackageCodec.writeScene(scene)))
+            check(reloaded.renderPlan.toBytes().contentEquals(plan.toBytes()))
+            check(reloaded.scene.states.all { it.sourceKind == "recorded" } && reloaded.scene.edges.all { it.sourceKind == "authored" })
+            val publicBytes = ViewerPackageCodec.writeScene(reloaded.scene).toString(Charsets.UTF_8) +
+                reloaded.renderPlan.toBytes().toString(Charsets.UTF_8)
+            listOf("admission","selectedAtUptimeMs","consumedAtUptimeMs","selectionPresentationSampleId",
+                "selectionPresentationPtsUs","confirmedAtUptimeMs","deadlineUptimeMs","beforeFrameId","afterFrameId","diagnosticUptimeMs",
+                original.ticket.ticketId,f.run.runId,f.run.recordingSessionId,f.source.privateRelativePath).forEach { check(it !in publicBytes) }
+
+            // A known committed receipt must still reject a different private temporal selection.
+            val changed = original.copy(ticket = original.ticket.copy(admission = admission.copy(consumedAtUptimeMs = admission.consumedAtUptimeMs + 1)))
+            val changedFrame = f.input.copy(frames = listOf(f.input.frames.first().copy(evidence = changed)) + f.input.frames.drop(1))
+            val changedAction = f.input.copy(actions = listOf(f.input.actions.first().copy(before = changed)) + f.input.actions.drop(1))
+            check(runCatching { f.store.importReviewedClickChain(changedFrame,f.accessor) }.isFailure)
+            check(runCatching { f.store.importReviewedClickChain(changedAction,f.accessor) }.isFailure)
+            check(f.store.readProject(receipt.projectId) == saved)
+            println("HOST_CLICK_CHAIN admission: complete reviewed route, recorded images/authored links, actual AI archive roundtrip, no original gesture timing claim, changed-admission retry rejected")
+        }
+    }
+
+    @Test fun reusedSelectedPixelsDoNotRemoveActionAdmissionFromRetryIdentity() = runBlocking(Dispatchers.IO) {
+        fixture(static = true,initialAdmission = true) { f ->
+            val original = f.input.actions.first().before
+            val reused = f.input.actions.first().after
+            check(reused.ticket.admission == null && reused.ticket.sourceFrameId == original.ticket.sourceFrameId)
+            val input = f.input.copy(frames = listOf(f.input.frames.single().copy(evidence = reused)))
+            val receipt = f.store.importReviewedClickChain(input,f.accessor)
+            check(f.store.importReviewedClickChain(input,f.accessor) == receipt)
+            val changed = original.copy(ticket = original.ticket.copy(admission = original.ticket.admission!!.copy(consumedAtUptimeMs = 251)))
+            val changedInput = input.copy(actions = listOf(input.actions.first().copy(before = changed)) + input.actions.drop(1))
+            check(runCatching { f.store.importReviewedClickChain(changedInput,f.accessor) }.isFailure)
+        }
+    }
+
+    @Test fun legacyNullAdmissionKeepsExactV1ImportDigest() = runBlocking(Dispatchers.IO) {
+        fixture { f ->
+            val receipt = f.store.importReviewedClickChain(f.input,f.accessor)
+            f.db { rawQuery("SELECT input_sha FROM click_chain_imports WHERE operation_id=?",arrayOf(receipt.operationId)).use {
+                check(it.moveToFirst() && it.getString(0) == legacyV1Digest(f.input))
+            } }
+            check(f.store.importReviewedClickChain(f.input,f.accessor) == receipt)
+        }
+    }
 
     @Test fun reviewedRouteCreatesIndependentProjectAndReceiptOutlivesBothOwners() = runBlocking(Dispatchers.IO) {
         fixture { f ->
@@ -240,6 +331,57 @@ class ClickChainImportHostTest {
         println("HOST_CLICK_CHAIN identity: session+captured-frame-only dedup; two real self-loops retained; seven-hotspot batch rejected without truncation")
     }
 
+    /** Frozen pre-admission wire format oracle. Do not add new production fields here. */
+    private fun legacyV1Digest(input: ClickChainImportInput): String {
+        val bytes = java.io.ByteArrayOutputStream()
+        java.io.DataOutputStream(bytes).use { out ->
+            fun item(value: Any?) {
+                out.writeBoolean(value != null)
+                if (value != null) { val data = value.toString().toByteArray(Charsets.UTF_8); out.writeInt(data.size); out.write(data) }
+            }
+            fun source(value: ImportedSource) {
+                item(value.sourceId); item(value.privateRelativePath); item(value.displayName)
+                with(value.metadata) { item(mime); item(byteLength); item(sha256); item(width); item(height)
+                    item(rotationDeg); item(durationUs); item(pixelWidthHeightRatio) }
+            }
+            fun frame(value: FrameEvidenceCandidate) {
+                with(value.ticket) {
+                    item(ticketId); with(action) { item(runId); item(actionId); item(sessionId); item(sourceId); item(generation) }
+                    item(boundary.name); item(epoch); item(sourceFrameId); item(captureSequence); item(sourceTimestampNs); item(submittedPtsUs)
+                    with(geometry) { item(geometryId); item(displayWidth); item(displayHeight); item(frameWidth); item(frameHeight)
+                        item(scale); item(offsetX); item(offsetY) }
+                    item(freshness.name)
+                }
+                item(value.pngSha256); item(value.width); item(value.height); item(value.encoderPtsUs)
+                item(value.muxSampleOrdinal); item(value.containerPtsUs); item(value.sourceSha256)
+            }
+            fun rect(value: OpaqueMask) { item(value.left); item(value.top); item(value.right); item(value.bottom) }
+            item("tapscene-reviewed-click-chain-v1"); item(input.operationId); item(input.title)
+            with(input.run) {
+                item(runId); item(plan.digest); item(recordingSessionId); item(sourceId); item(generation); item(createdAtMs)
+                item(phase.name); item(nextActionIndex); item(stopReason?.name); item(journalRevision); item(mapping.name)
+                item(outcomes.size); outcomes.forEach { item(it.actionId); item(it.status.name); item(it.beforeFrameId); item(it.afterFrameId); item(it.mapping.name) }
+                item(events.size); events.forEach { item(it.type.name); item(it.actionId); item(it.diagnosticUptimeMs) }
+            }
+            source(input.source); item(input.startFrameKey); item(input.terminalFrameKey); item(input.frames.size)
+            input.frames.forEach { selected ->
+                frame(selected.evidence); item(selected.title); item(selected.reviewed.file.absolutePath)
+                with(selected.reviewed) {
+                    item(sha256); item(width); item(height)
+                    val video = requireNotNull(videoOrigin) { "复核输出必须绑定实际录屏帧。" }
+                    source(video.source); item(video.frameTimeUs); item(video.timePrecisionUs)
+                    item(masks.size); masks.forEach(::rect); item(captureId)
+                }
+            }
+            item(input.actions.size); input.actions.forEach {
+                item(it.actionId); item(it.fromFrameKey); item(it.toFrameKey); item(it.label); rect(it.rect); frame(it.before); frame(it.after)
+            }
+        }
+        return MessageDigest.getInstance("SHA-256").digest(bytes.toByteArray()).joinToString("") {
+            (it.toInt() and 0xff).toString(16).padStart(2, '0')
+        }
+    }
+
     private suspend fun rejected(f: Fixture, block: suspend () -> Unit) {
         val before = f.media()
         check(runCatching { block() }.isFailure)
@@ -247,7 +389,7 @@ class ClickChainImportHostTest {
         f.assertClean()
     }
 
-    private suspend fun fixture(count: Int = 2, static: Boolean = false, block: suspend (Fixture) -> Unit) =
+    private suspend fun fixture(count: Int = 2, static: Boolean = false, initialAdmission: Boolean = false, block: suspend (Fixture) -> Unit) =
         AiDraftImportFixtures.isolated(RuntimeEnvironment.getApplication(), "click-chain") { context ->
             val root = context.noBackupFilesDir
             val store = AiDraftImportFixtures.projectStore(context)
@@ -280,7 +422,9 @@ class ClickChainImportHostTest {
                 val frame = if (static) 0L else (index * 2 + boundary.ordinal).toLong()
                 FrameTicket(id(), FrameAnchorAction(run.runId, action.actionId, run.recordingSessionId, source.sourceId, run.generation),
                     boundary, 0, frame, frame, frame * 1_000_000, frame * 10_000, geometry,
-                    if (static && (index > 0 || boundary == FrameBoundary.After)) FrameFreshness.StaticReuse else FrameFreshness.Fresh)
+                    if (static && (index > 0 || boundary == FrameBoundary.After)) FrameFreshness.StaticReuse else FrameFreshness.Fresh,
+                    admission = if (initialAdmission && index == 0 && boundary == FrameBoundary.Before)
+                        InitialFrameAdmissionMetadata(100,15_100,120,1,0,250) else null)
             } }
             tickets.forEach { ticket ->
                 evidence.persistTicket(ticket)

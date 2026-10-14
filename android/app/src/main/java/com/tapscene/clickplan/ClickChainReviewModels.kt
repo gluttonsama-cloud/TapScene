@@ -24,13 +24,20 @@ internal data class ClickChainCapture(val run: ClickRun, val source: ImportedSou
         actions.flatMap { listOfNotNull(it.before, it.after) }.forEach { frame ->
             val key = frame.key
             val previous = get(key)
+            val previousAdmission = previous?.ticket?.admission
             require(previous == null || sameCapturedFrame(previous, frame)) { "同一采集画面记录不一致，请重新读取。" }
-            if (previous == null) put(key, frame)
+            require(previousAdmission == null || frame.ticket.admission == null ||
+                previousAdmission == frame.ticket.admission) { "初始快照记录不一致，请重新读取。" }
+            // Boundary dedup still means identical captured pixels, not identical selection time.
+            if (previous == null || previous.ticket.admission == null && frame.ticket.admission != null) put(key, frame)
         }
     }
 }
 
 internal val FrameEvidenceCandidate.key: String get() = "${ticket.action.sessionId}:${ticket.sourceFrameId}"
+internal const val INITIAL_SNAPSHOT_NOTICE = "首次点击前的初始快照。画面在准备点击时已固定，实际点击前仍可能变化。"
+internal val FrameEvidenceCandidate.selectionNotice: String? get() =
+    INITIAL_SNAPSHOT_NOTICE.takeIf { ticket.admission != null }
 internal fun sameCapturedFrame(a: FrameEvidenceCandidate, b: FrameEvidenceCandidate): Boolean =
     a.key == b.key && a.pngSha256 == b.pngSha256 && a.width == b.width && a.height == b.height &&
         a.sourceSha256 == b.sourceSha256 && a.ticket.captureSequence == b.ticket.captureSequence && a.ticket.sourceTimestampNs == b.ticket.sourceTimestampNs &&
@@ -55,7 +62,11 @@ internal object ClickChainRoutePolicy {
             val next = selected.getOrNull(position)
             val candidates = buildList {
                 previous?.after?.let { add(ClickChainStageChoice(it.key, "上一动作后")) }
-                next?.before?.let { add(ClickChainStageChoice(it.key, if (position == 0) "起始画面" else "下一动作前")) }
+                next?.before?.let { add(ClickChainStageChoice(it.key, when {
+                    it.ticket.admission != null -> "首次点击前的初始快照"
+                    position == 0 -> "起始画面"
+                    else -> "下一动作前"
+                })) }
             }.distinctBy { it.frameKey }
             val index = first - 1 + position
             val requested = choices[index]
@@ -94,17 +105,20 @@ internal object ClickChainRoutePolicy {
 }
 
 internal data class ClickChainFrameRow(val key: String, val title: String, val reviewed: Boolean,
-    val selected: Boolean = true, val thumbnail: Bitmap? = null, val thumbnailDigest: String? = null)
+    val selected: Boolean = true, val thumbnail: Bitmap? = null, val thumbnailDigest: String? = null,
+    val selectionNotice: String? = null)
 internal data class ClickChainStageRow(val index: Int, val title: String, val choices: List<ClickChainStageChoice>,
     val selectedKey: String?, val reviewed: Boolean)
 internal data class ClickChainActionRow(val actionId: String, val number: Int, val status: String,
     val fromTitle: String, val toTitle: String, val confirmed: Boolean, val enabled: Boolean,
-    val detail: String? = null)
+    val detail: String? = null, val selectionNotice: String? = null)
 internal data class ClickChainFrameEditor(val key: String, val title: String, val bitmap: Bitmap?,
-    val masks: List<OpaqueMask>, val output: Bitmap?, val outputDigest: String?, val reviewed: Boolean)
+    val masks: List<OpaqueMask>, val output: Bitmap?, val outputDigest: String?, val reviewed: Boolean,
+    val selectionNotice: String? = null)
 internal data class ClickChainActionEditor(val actionId: String, val label: String, val rect: OpaqueMask,
     val bitmap: Bitmap?, val targetThumbnail: Bitmap?, val targetTitle: String,
-    val point: Pair<Float, Float>, val selfLoop: Boolean, val samePageActionCount: Int)
+    val point: Pair<Float, Float>, val selfLoop: Boolean, val samePageActionCount: Int,
+    val selectionNotice: String? = null)
 internal data class ClickChainReviewUiState(val runId: String? = null, val title: String = "点击链演示",
     val runLabel: String = "", val firstAction: String = "1", val lastAction: String = "1",
     val totalActions: Int = 0, val framesOnly: Boolean = false,
