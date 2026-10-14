@@ -52,7 +52,7 @@ object ClickDevice {
 /** Metadata heuristic, not a claim of comprehensive in-app payment/authentication protection. */
 internal object ClickWindowPolicy {
     private val tapScenePackages = setOf(
-        "com.tapscene", "com.tapscene.preview", "com.tapscene.preview.hevc", "com.tapscene.hosted.dev",
+        "com.tapscene", "com.tapscene.preview", "com.tapscene.preview.r33", "com.tapscene.preview.hevc", "com.tapscene.hosted.dev",
     )
 
     fun protectedPackage(value: String): Boolean = value in tapScenePackages || value == "android" ||

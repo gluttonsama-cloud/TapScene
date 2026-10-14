@@ -13,6 +13,7 @@ import tempfile
 APPROVED_CERTIFICATES = {
     "legacy": "0929d62a4336760a8c0395cea92c6e9b272c897f02b126f84f5f0a4e0a4fefc2",
     "preview": "662acdf3f4b7f2027c3394fd31408c44f35992cabea4bdeaab1ed85e80d338b0",
+    "preview-r33": "bda5105dacc64b0fcb8d49bc699842a93d53d39df4cdc9579872c063c647c824",
 }
 REPOSITORY = Path(__file__).resolve().parents[2]
 CERT_DIGEST = re.compile(
@@ -53,7 +54,7 @@ def main():
         help="explicit repository-external directory containing existing development.p12 and store.pass",
     )
     parser.add_argument("--certificate-profile", choices=sorted(APPROVED_CERTIFICATES), default="legacy",
-                        help="independently recorded approved certificate; preview is only for the new co-installable package")
+                        help="independently recorded approved certificate; preview-r33 is only for the separately approved r33 package")
     args = parser.parse_args()
     expected_cert_sha256 = APPROVED_CERTIFICATES[args.certificate_profile]
     try:

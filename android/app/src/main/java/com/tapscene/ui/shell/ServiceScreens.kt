@@ -33,6 +33,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -303,25 +305,49 @@ fun DeliveryOptionsScreen(
     busy: Boolean = false,
     onHosting: (() -> Unit)? = null,
 ) {
+    var showVersionDetails by rememberSaveable(sealedSummary?.id) { mutableStateOf(false) }
     ServicePage("交付方式", onBack) {
         WorkflowLine(2, listOf("检查", "成品复核", "交付"))
-        Column {
-            ShellLabelValue("固定版本", sealedSummary?.title ?: "尚未生成")
-            if (sealedSummary != null) {
-                ShellLabelValue("版本标识", sealedSummary.id.take(12))
-                ShellLabelValue("${if (sealedSummary.origin == "local") "封存" else "导入"}时间", formatReleaseDate(sealedSummary.sealedAt))
-                ShellLabelValue("包内文件", "${sealedSummary.stepCount} 个步骤 · ${formatShellBytes(sealedSummary.byteLength)}")
-            } else ShellLabelValue("封存时间 / 体积", "等待完成复核")
-        }
-        DetailSection("离线观看包", "接收方用 TapScene 导入。") {
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(shape = RoundedCornerShape(8.dp), onClick = { onExport?.invoke() }, enabled = sealedSummary != null && onExport != null && !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text(if (busy) "正在准备" else "保存到文件") }
-                OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = { onShare?.invoke() }, enabled = sealedSummary?.origin == "local" && onShare != null && !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("系统分享") }
+        if (sealedSummary != null) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(sealedSummary.title, style = MaterialTheme.typography.headlineMedium,
+                    modifier = Modifier.semantics { heading() })
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("${sealedSummary.stepCount} 个步骤 · ${formatShellBytes(sealedSummary.byteLength)}",
+                        style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    Text("${if (sealedSummary.origin == "local") "封存" else "导入"}于 ${formatReleaseDate(sealedSummary.sealedAt)}",
+                        style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                }
+                ShellActionRow("版本详情", value = if (showVersionDetails) "收起" else "展开",
+                    onClick = { showVersionDetails = !showVersionDetails })
+                if (showVersionDetails) {
+                    Text("版本标识", style = MaterialTheme.typography.labelMedium, color = ShellColors.Muted)
+                    Text(sealedSummary.id, style = MaterialTheme.typography.bodyMedium)
+                }
             }
-            Text("临时分享入口 24 小时有效，已发送副本无法收回。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+            DetailSection("离线观看包", "接收方用 TapScene 导入。") {
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Button(shape = RoundedCornerShape(8.dp), onClick = { onExport?.invoke() }, enabled = onExport != null && !busy,
+                        modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text(if (busy) "正在准备" else "保存到文件") }
+                    OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = { onShare?.invoke() }, enabled = sealedSummary.origin == "local" && onShare != null && !busy,
+                        modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text("系统分享") }
+                }
+                Text("临时分享入口 24 小时有效，已发送副本无法收回。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+            }
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                SectionHeader("当前未选择封存版本", "完成成品复核并封存后，可保存离线观看包。")
+                Button(shape = RoundedCornerShape(8.dp), onClick = onReview, enabled = !busy,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("继续成品复核") }
+            }
         }
-        DetailSection("AI 数据包", "导出完整图与有限渲染计划，在独立环境中制作动画。") {
-            ShellActionRow("查看数据包配置", "路径、画布、停留时间与可见区域。", onClick = onAi)
+        Column {
+            ShellDivider()
+            ShellActionRow("AI 数据包",
+                if (sealedSummary == null) "选择其他固定版本，配置路径与画布；在独立环境中渲染动画。"
+                else "配置路径与画布；在独立环境中渲染动画。",
+                value = "配置", onClick = onAi)
+            ShellDivider()
         }
         if (onHosting != null) {
             DetailSection("本机开发托管", "仅连接本机合成开发服务，不是公网链接。") {
@@ -334,10 +360,9 @@ fun DeliveryOptionsScreen(
                 Text("选择固定版本、登录合成账号并再次确认后才会上传。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
             }
         } else {
-            ShellLabelValue("托管链接", "尚未接入")
+            Text("托管链接尚未接入。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
         }
-        if (sealedSummary == null) StatusNote("先完成成品复核与封存，再保存离线观看包。")
-        ShellActionRow("返回成品复核", onClick = onReview)
+        if (sealedSummary != null) ShellActionRow("返回成品复核", onClick = onReview)
     }
 }
 
@@ -666,8 +691,6 @@ fun SettingsStorageScreen(
             }
             Text("以上仅统计当前读取到的原素材，不代表应用全部占用。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
             ShellActionRow("管理本机保留素材", "查看现有素材；删除前会单独确认。", onClick = onManageSources)
-            ShellDivider()
-            ShellActionRow("临时缓存", "完整占用统计与安全清理尚未接入。", value = "待统计", enabled = false)
         }
         DetailSection("使用与隐私") {
             ShellActionRow("支持格式与导入说明", value = if (showFormats) "收起" else "展开", onClick = { showFormats = !showFormats })
@@ -677,19 +700,18 @@ fun SettingsStorageScreen(
             ShellDivider()
             ShellActionRow("本机内容与设备丢失", value = if (showPrivacy) "收起" else "展开", onClick = { showPrivacy = !showPrivacy })
             if (showPrivacy) {
-                Text("原素材和草稿不随账号同步，也不进入系统云备份。卸载应用或设备丢失可能造成丢失。可保存已封存的离线观看包和 AI 数据包，也可单独保存复核后的 PNG 或短片。观看包不包含原片或可继续编辑的草稿；托管尚未接入。", style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
+                Text("原素材和草稿不随账号同步，也不进入系统云备份。卸载应用或设备丢失可能造成丢失。可保存已封存的离线观看包和 AI 数据包，也可单独保存复核后的 PNG 或短片。观看包不包含原片或可继续编辑的草稿。", style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
             }
         }
         DetailSection("关于 TapScene") {
             ShellLabelValue("应用", when {
                 BuildConfig.HOSTED_ENABLED -> "TapScene · 本机托管开发"
-                BuildConfig.BUILD_TYPE == "preview" -> "点演测试版"
+                BuildConfig.BUILD_TYPE == "preview" -> "点演预览33"
                 BuildConfig.DEBUG -> "TapScene · 开发版"
                 else -> "TapScene 点演"
             })
             ShellLabelValue("版本", "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
             ShellLabelValue("源码许可", "Apache-2.0")
-            ShellLabelValue("交付协议", "生成数据包时记录版本")
             if (!hostingAvailable) ShellLabelValue("托管链接", "尚未接入")
         }
     }

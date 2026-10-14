@@ -265,7 +265,7 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 83, f"Expected eighty-three Compose review images, found {len(images)}"
+          assert len(images) == 86, f"Expected eighty-six Compose review images, found {len(images)}"
           delivery_images = [image for image in images if "DeliveryAvailabilityScreenshotPreviewsKt" in str(image)]
           assert len(delivery_images) == 3, f"Expected three delivery availability images, found {len(delivery_images)}"
           click_review_images = [image for image in images if "ClickChainReviewScreenshotPreviewsKt" in str(image)]
@@ -406,6 +406,8 @@ jobs:
             --tests com.tapscene.ui.CopyWorkspaceHostTest \
             --tests com.tapscene.sharing.OfflineShareHostTest \
             --tests com.tapscene.ui.OfflineShareWorkspaceHostTest \
+            --tests com.tapscene.ui.shell.DeliveryProductPagesHostTest \
+            --tests com.tapscene.ui.shell.HomeMaterialPagesHostTest \
             --tests com.tapscene.ui.HostingWorkspaceHostTest \
             --tests com.tapscene.ocr.TextRegionPolicyTest \
             --tests com.tapscene.data.TextRegionDraftHostTest \
@@ -589,6 +591,7 @@ jobs:
               ("com.tapscene.ui.TextRegionWorkspaceHostTest", "exactPixelsLateResultsAndRecoveredFormsKeepTheirSourceAndAuthorIntent"): 1,
               ("com.tapscene.ui.HostingWorkspaceHostTest", "cancellingAfterInstallCannotReopenAccountWhenRetirementIsOffline"): 1,
               ("com.tapscene.ui.HostingWorkspaceHostTest", "repeatedConfirmPreparesOnceAndBusyObservationCanCancel"): 1,
+              ("com.tapscene.ui.HostingWorkspaceHostTest", "cancellationWithoutConfirmedResultCanBeRetried"): 1,
               ("com.tapscene.ui.HostingWorkspaceHostTest", "confirmedCancelIntentSurvivesImmediateLeave"): 1,
               ("com.tapscene.ui.HostingWorkspaceHostTest", "cancelledLoginDrainsAndRevokesLateSessionWithoutResurrectingRoute"): 1,
               ("com.tapscene.ui.HostingWorkspaceHostTest", "unauthorizedManagementAllowsNewLoginWithoutLogout"): 1,
@@ -615,6 +618,14 @@ jobs:
               ("com.tapscene.sharing.OfflineShareHostTest", "exactReadOnlyUrisRejectTraversalTamperingAndExpiry"): 2,
               ("com.tapscene.sharing.OfflineShareHostTest", "cacheLimitsAndCancelledPreparationPreserveExistingSnapshots"): 2,
               ("com.tapscene.ui.OfflineShareWorkspaceHostTest", "chooserRequestIsConsumedOnceAndNeverRestoredAfterExit"): 1,
+              ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "noSelectionKeepsReviewAndOtherVersionAiReachableWithoutDeadExportButtons"): 1,
+              ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "selectedVersionDetailsAndBusyStatePreserveExportAndShareCallbacks"): 1,
+              ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "importedVersionCannotShareAndDeveloperHostingRetainsAllDestinations"): 1,
+              ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "settingsOnlyShowsRealStorageAndExpandableAccurateHelp"): 1,
+              ("com.tapscene.ui.shell.HomeMaterialPagesHostTest", "healthyHomeEmptyStateDoesNotReplaceLoadingOrFailure"): 1,
+              ("com.tapscene.ui.shell.HomeMaterialPagesHostTest", "acquisitionSheetDismissesAndKeepsEachCallbackSeparate"): 1,
+              ("com.tapscene.ui.shell.HomeMaterialPagesHostTest", "quotaLoadFailureAndBusyKeepExistingActionGates"): 1,
+              ("com.tapscene.ui.shell.HomeMaterialPagesHostTest", "sourceSelectionAndGlobalCandidatesStayDistinctAcrossFailure"): 1,
           }
           actual = Counter()
           failures = errors = skipped = 0

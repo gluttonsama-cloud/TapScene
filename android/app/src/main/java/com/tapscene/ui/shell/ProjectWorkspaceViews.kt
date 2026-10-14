@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -24,6 +26,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -44,6 +48,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -111,7 +116,10 @@ fun ProjectHomeContent(
             item(key = "loading") { WorkspaceEmpty("正在读取本机项目", "读取完成后，项目会显示在这里。") }
         } else if (state.projects.isEmpty()) {
             item(key = "empty") {
-                WorkspaceEmpty("从一段操作开始", "录下一段操作，或导入已有录屏。")
+                Column {
+                    EmptyProjectFrames()
+                    WorkspaceEmpty("还没有项目", "创建的项目会在这里保留，方便继续编辑。")
+                }
             }
         } else if (visibleProjects.isEmpty()) {
             item(key = "no_matches") { WorkspaceEmpty("没有找到匹配项目", "换个关键词，或清除搜索查看全部项目。") }
@@ -453,6 +461,7 @@ internal fun SavedStepActionsMenuContent(
 
 /** Source metadata is real; recording preparation is navigation, never a permission request. */
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 fun ProjectSourcesContent(
     drafts: List<SourceDraft>,
     busy: Boolean,
@@ -467,68 +476,41 @@ fun ProjectSourcesContent(
     modifier: Modifier = Modifier,
 ) {
     val enabled = !busy && !loadFailed
+    var showAddOptions by rememberSaveable { mutableStateOf(false) }
+    val largeText = LocalDensity.current.fontScale > 1.2f
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(24.dp),
     ) {
-        item(key = "record") {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                WorkspaceSectionTitle("录制操作")
-                Text("放置悬浮点位，按顺序播放并录屏；也可以手动操作录屏。",
-                    style = MaterialTheme.typography.bodyMedium)
-                Button(onClick = onClickPlan, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                    Text("悬浮编排")
-                }
-                OutlinedButton(onClick = onRecord, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                    Text("手动录屏")
-                }
-                Text("按画面变化整理候选，点击与热点由你校正。",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        item(key = "add_source") {
+            val actions: @Composable (Modifier) -> Unit = { actionModifier ->
+                Button(onClick = onClickPlan, enabled = enabled, shape = RoundedCornerShape(8.dp),
+                    modifier = actionModifier.heightIn(min = 56.dp)) { Text("悬浮编排") }
+                OutlinedButton(onClick = { showAddOptions = true }, enabled = !busy, shape = RoundedCornerShape(8.dp),
+                    modifier = actionModifier.heightIn(min = 56.dp)) { Text("其他方式") }
             }
-        }
-        item(key = "import") {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("已有录屏", style = MaterialTheme.typography.titleMedium)
-                        Text("从系统文件选择，作为补充素材。", style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    OutlinedButton(onClick = onImportVideo, enabled = enabled && drafts.size < 3,
-                        modifier = Modifier.heightIn(min = 48.dp)) { Text("导入录屏") }
-                }
-            }
-        }
-        item(key = "screenshot") {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("补充截图", style = MaterialTheme.typography.titleMedium)
-                    Text("每次一张，复核后加入步骤。", style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                OutlinedButton(onClick = onImportScreenshot, enabled = !busy,
-                    modifier = Modifier.heightIn(min = 48.dp)) { Text("导入截图") }
+            if (largeText) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { actions(Modifier.fillMaxWidth()) }
+            } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { actions(Modifier.weight(1f)) }
             }
         }
         item(key = "source_summary") {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                WorkspaceSectionTitle("本机素材", "${drafts.size} / 3 段")
+                WorkspaceSectionTitle("本机原录屏", "${drafts.size} / 3 段")
                 if (drafts.isNotEmpty()) Text(
                     "合计 ${formatSourceDuration(drafts.sumOf { it.source.metadata.durationUs })} · ${formatSourceBytes(drafts.sumOf { it.source.metadata.byteLength })}",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("原录屏仅保存在本机。进入单条素材后可手动校正画面与遮挡。",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
         if (drafts.isEmpty()) {
             item(key = "source_empty") {
                 WorkspaceEmpty(
-                    if (loadFailed) "暂时无法读取素材" else if (busy) "正在读取素材" else "还没有素材",
+                    if (loadFailed) "暂时无法读取素材" else if (busy) "正在读取素材" else "还没有原录屏",
                     if (loadFailed) "读取失败不代表素材已删除，请重试后继续。"
                     else if (busy) "读取完成后会显示实际时长和大小。"
-                    else "录制或导入的素材会列在这里，候选确认后再加入分镜。",
+                    else "可录制或导入录屏；截图复核后直接加入步骤。",
                 )
             }
         }
@@ -537,14 +519,41 @@ fun ProjectSourcesContent(
                 onAnalyze = { onAnalyzeSource(draft.source.sourceId) })
         }
         item(key = "candidates") {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                WorkspaceSectionTitle("整理与确认")
-                Text("按画面变化整理候选；批量选择后，在同一校正页调帧、遮挡和确认。",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                OutlinedButton(onClick = onOpenCandidates, enabled = !busy,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("整理候选步骤") }
-            }
+            OutlinedButton(onClick = onOpenCandidates, enabled = !busy, shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("打开候选步骤") }
         }
+    }
+    if (showAddOptions) ModalBottomSheet(onDismissRequest = { showAddOptions = false }) {
+        SourceAddOptionsContent(
+            busy = busy, loadFailed = loadFailed, sourceCount = drafts.size,
+            onRecord = { showAddOptions = false; onRecord() },
+            onImportVideo = { showAddOptions = false; onImportVideo() },
+            onImportScreenshot = { showAddOptions = false; onImportScreenshot() },
+        )
+    }
+}
+
+/** Shared by the actual sheet and focused host layout checks; each action keeps its own gate. */
+@Composable
+internal fun SourceAddOptionsContent(
+    busy: Boolean,
+    loadFailed: Boolean,
+    sourceCount: Int,
+    onRecord: () -> Unit,
+    onImportVideo: () -> Unit,
+    onImportScreenshot: () -> Unit,
+) {
+    val enabled = !busy && !loadFailed
+    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 12.dp)) {
+        Text("添加素材", style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
+        TextButton(onClick = onRecord, enabled = enabled,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("手动录屏") }
+        TextButton(onClick = onImportVideo, enabled = enabled && sourceCount < 3,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("导入录屏") }
+        if (sourceCount >= 3) Text("原录屏已达 3 段上限。", style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 8.dp))
+        TextButton(onClick = onImportScreenshot, enabled = !busy,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("导入截图") }
     }
 }
 
@@ -596,6 +605,31 @@ private fun DerivedStepThumbnail(
                     size = Size(width * .7f, height * .54f), style = Stroke(stroke))
                 drawLine(placeholderInk, Offset(width * .25f, height * .65f),
                     Offset(width * .7f, height * .35f), stroke)
+            }
+        }
+    }
+}
+
+/** Decorative empty state only: no media, progress, or example projects. */
+@Composable
+private fun EmptyProjectFrames() {
+    val frameColor = MaterialTheme.colorScheme.outlineVariant
+    val connectionColor = MaterialTheme.colorScheme.onSurfaceVariant
+    Canvas(Modifier.size(width = 120.dp, height = 64.dp)) {
+        val stroke = 1.dp.toPx()
+        val frameWidth = 28.dp.toPx()
+        val frameHeight = 40.dp.toPx()
+        val top = 12.dp.toPx()
+        repeat(3) { index ->
+            val left = (2 + index * 44).dp.toPx()
+            drawRect(frameColor, Offset(left, top), Size(frameWidth, frameHeight), style = Stroke(stroke))
+            if (index < 2) {
+                val start = left + frameWidth + 4.dp.toPx()
+                val end = left + 40.dp.toPx()
+                val center = size.height / 2
+                drawLine(connectionColor, Offset(start, center), Offset(end, center), stroke)
+                drawLine(connectionColor, Offset(end - 3.dp.toPx(), center - 3.dp.toPx()), Offset(end, center), stroke)
+                drawLine(connectionColor, Offset(end - 3.dp.toPx(), center + 3.dp.toPx()), Offset(end, center), stroke)
             }
         }
     }

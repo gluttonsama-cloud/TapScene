@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 
 root = Path("android/app/build/intermediates/merged_manifests")
 ns = "{http://schemas.android.com/apk/res/android}"
-for variant, package in (("preview", "com.tapscene.preview"), ("release", "com.tapscene")):
+for variant, package in (("preview", "com.tapscene.preview.r33"), ("release", "com.tapscene")):
     candidates = list(root.glob(f"{variant}/**/AndroidManifest.xml"))
     assert len(candidates) == 1, candidates
     manifest = ET.parse(candidates[0]).getroot()
@@ -27,5 +27,5 @@ for variant, package in (("preview", "com.tapscene.preview"), ("release", "com.t
     clicks = [p for p in app.findall("service") if p.get(ns + "name") == "com.tapscene.clickplan.ClickAccessibilityService"]
     assert len(clicks) == 1 and clicks[0].get(ns + "permission") == "android.permission.BIND_ACCESSIBILITY_SERVICE"
     if variant == "preview":
-        assert app.get(ns + "label") == "点演测试版"
+        assert app.get(ns + "label") == "点演预览33"
 print("PREVIEW_MANIFEST_ISOLATION_OK: distinct preview and unchanged production applicationId/provider; offline product services")

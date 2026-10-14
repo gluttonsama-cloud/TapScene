@@ -19,14 +19,15 @@ import org.robolectric.annotation.Config
 class PreviewIsolationHostTest {
     @Test fun previewUsesItsOwnIdentityAuthoritiesAndExplicitServiceTargets() {
         val app = RuntimeEnvironment.getApplication()
-        check(app.packageName == "com.tapscene.preview")
+        check(app.packageName == "com.tapscene.preview.r33")
         check(BuildConfig.APPLICATION_ID == app.packageName && !BuildConfig.HOSTED_ENABLED)
-        check(app.applicationInfo.loadLabel(app.packageManager).toString() == "点演测试版")
-        check(OfflineShareStore.authority(app) == "com.tapscene.preview.offline-share")
+        check(BuildConfig.VERSION_CODE == 33 && BuildConfig.VERSION_NAME == "0.28.0-preview-integration-dev-preview")
+        check(app.applicationInfo.loadLabel(app.packageManager).toString() == "点演预览33")
+        check(OfflineShareStore.authority(app) == "com.tapscene.preview.r33.offline-share")
         val provider = requireNotNull(app.packageManager.resolveContentProvider(
             OfflineShareStore.authority(app), PackageManager.GET_META_DATA))
         check(provider.packageName == app.packageName && !provider.exported && provider.grantUriPermissions)
-        for (legacy in listOf("com.tapscene", "com.tapscene.preview.hevc", "com.tapscene.hosted.dev")) {
+        for (legacy in listOf("com.tapscene", "com.tapscene.preview", "com.tapscene.preview.hevc", "com.tapscene.hosted.dev")) {
             check(app.packageManager.resolveContentProvider("$legacy.offline-share", 0) == null)
         }
         val ownData = java.io.File(app.applicationInfo.dataDir).canonicalPath + "/"
@@ -38,7 +39,7 @@ class PreviewIsolationHostTest {
             check(component.packageName == app.packageName && component.className == type.name)
         }
         check(app.packageManager.checkPermission("android.permission.INTERNET", app.packageName) == PackageManager.PERMISSION_DENIED)
-        check(app.getString(com.tapscene.R.string.click_service_label).startsWith("点演测试版"))
+        check(app.getString(com.tapscene.R.string.click_service_label).startsWith("点演预览33"))
         println("PREVIEW_ISOLATION actual preview context/manifest/provider/explicit components PASS; device co-install NOT_RUN")
     }
 }
