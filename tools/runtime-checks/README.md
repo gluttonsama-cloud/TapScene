@@ -2,7 +2,7 @@
 
 本入口只在一次性 GitHub `ubuntu-24.04` runner 的合成 Android 设备运行。它执行真实 Android OS、生产无障碍点击与 MediaProjection/EGL/MediaCodec 管线；不是实体手机、OEM 或性能验收。本轮使用 PR35 的版本 32 生产源码，产品代码、权限和超时不因测试修改。
 
-本轮只有一次经批准的硬件加速检查。维护者审核精确提交后，仅创建 `test/approved-kvm-once-20261013-1312` 分支一次作为手动触发。workflow 只接收 `create`，唯一 job 同时核对仓库、事件、branch 类型、精确 ref 和首次 attempt；其他 ref 创建只跳过 job，分支更新和 PR 不触发。不得删除后重建该分支或重新运行；后续权限变更检查须另行授权。它不是发布分支，不生成 release，也不合并任何 PR。
+本轮只有一次经批准的硬件加速检查。维护者审核精确提交后，仅创建 `test/approved-kvm-once-20261014-0325` 分支一次作为手动触发。workflow 只接收 `create`，唯一 job 同时核对仓库、事件、branch 类型、精确 ref 和首次 attempt；其他 ref 创建只跳过 job，分支更新和 PR 不触发。不得删除后重建该分支或重新运行；后续权限变更检查须另行授权。它不是发布分支，不生成 release，也不合并任何 PR。
 
 旧软件模拟多轮系统 ANR/Watchdog 已阻挡完整场景；两次生产静态探针的局部通过不能证明三点击、隐藏定位点或长链通过。本轮禁用软件回退。只有新的完整 runtime 产物可以证明本轮通过。
 

@@ -107,7 +107,9 @@ internal class RuntimeSystemUi(private val instrumentation: Instrumentation) {
                 try {
                     // Read labels only inside our app. Never scrape target-app nodes or text.
                     if (root.packageName?.toString() != instrumentation.targetContext.packageName) continue
-                    val node = find(root) { it.isEnabled && it.isVisibleToUser && it.text?.toString() == text } ?: continue
+                    // A search field can contain the same text as a result row. A setup
+                    // button/row action must never resolve to an editable field.
+                    val node = find(root) { !it.isEditable && it.isEnabled && it.isVisibleToUser && it.text?.toString() == text } ?: continue
                     try { check(action(node)) { "Own control rejected action: $text" }; return }
                     finally { node.recycle() }
                 } finally { root.recycle() }

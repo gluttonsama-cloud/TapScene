@@ -25,12 +25,12 @@ import json, os
 with open(os.environ['GITHUB_EVENT_PATH']) as source:
     event = json.load(source)
 assert event.get('ref_type') == 'branch'
-assert event.get('ref') == 'test/approved-kvm-once-20261013-1312'
+assert event.get('ref') == 'test/approved-kvm-once-20261014-0325'
 assert event.get('repository', {}).get('full_name') == 'gluttonsama-cloud/TapScene'
 PYTHON
   test "${GITHUB_RUN_ATTEMPT:-}" = 1
   test "${GITHUB_REPOSITORY:-}" = gluttonsama-cloud/TapScene
-  test "${GITHUB_REF:-}" = refs/heads/test/approved-kvm-once-20261013-1312
+  test "${GITHUB_REF:-}" = refs/heads/test/approved-kvm-once-20261014-0325
   test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 }
 
