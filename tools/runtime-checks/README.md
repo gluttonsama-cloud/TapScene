@@ -1,8 +1,8 @@
 # 有限云端 Android 运行检查
 
-本入口只在一次性 GitHub `ubuntu-24.04` runner 的合成 Android 设备运行。它执行真实 Android OS、生产无障碍点击与 MediaProjection/EGL/MediaCodec 管线；不是实体手机、OEM 或性能验收。本轮固定使用已审查并完成局部编译/回归的 PR43 生产源码（`0d5c179453870cb0e16e5825e99a6d40395afadf` / tree `54b9b633d1b38b912649c6910285f59112638d51`）。本次固定云端结果见文末，不能外推实体设备；每次批准独立使用，不能沿用此前已消耗的批准。
+本入口只在一次性 GitHub `ubuntu-24.04` runner 的合成 Android 设备运行。它执行真实 Android OS、生产无障碍点击与 MediaProjection/EGL/MediaCodec 管线；不是实体手机、OEM 或性能验收。本轮固定使用已审查并完成局部编译/回归的 PR46 生产源码（`e6b27e35e6efb8298385e7cf4fde5c1c638b3e02` / tree `f83208a021b9bb26a401397e692e4e9e7c3412cd`）。此前固定云端结果见文末，本次结果以新 run 产物为准，不能外推实体设备；每次批准独立使用，不能沿用此前已消耗的批准。
 
-本轮为第四次单独批准的一次硬件加速检查。维护者审核精确提交后，已仅创建 `test/approved-kvm-once-20261014-0928` 分支一次作为手动触发。workflow 只接收 `create`，唯一 job 同时核对仓库、事件、branch 类型、精确 ref 和首次 attempt；其他 ref 创建只跳过 job，分支更新和 PR 不触发。不得删除后重建该分支或重新运行；后续权限变更检查须另行授权。它不是发布分支，不生成 release，也不合并任何 PR。
+本轮为第五次单独批准的一次硬件加速检查。维护者审核精确提交后，仅可创建 `test/approved-kvm-once-20261014-1122` 分支一次作为手动触发。workflow 只接收 `create`，唯一 job 同时核对仓库、事件、branch 类型、精确 ref 和首次 attempt；其他 ref 创建只跳过 job，分支更新和 PR 不触发。不得删除后重建该分支或重新运行；后续权限变更检查须另行授权。它不是发布分支，不生成 release，也不合并任何 PR。
 
 旧软件模拟多轮系统 ANR/Watchdog 已阻挡完整场景；两次生产静态探针的局部通过不能证明三点击、隐藏定位点或长链通过。本轮禁用软件回退。只有新的完整 runtime 产物可以证明本轮通过。
 
@@ -70,6 +70,8 @@
 
 [第四次单独批准的检查](https://github.com/gluttonsama-cloud/TapScene/actions/runs/38543050905) 已结束，精确提交 `6af82b010148fecc1ef5c0afb7f07f47234eb75c` / tree `a66604f5c3c11193390e4e9a9a02b20fef1dc1e0`。十二项中十一项通过：真实入口、三次浮层加点、小控制器拖动、三次目标 DOWN/UP、等待时长、定位层移除、生产 MP4 封口登记及全部 600 样本解码/无定位点残留均通过。最终完整点击链关联失败，首个 Before 为 `EncoderUnmatched`。其余五个边界可由生产 `readCandidate` 解析；最终逐 PNG 的目标状态/定位点检查在完整路线断言后，故本次没有执行，不能追认通过。模拟器进程组停止、AVD 删除与原 ACL 精确恢复均已核实。第四次批准已消耗，不覆盖之后的运行。
 
-本次 `anchors.json` 未导出缺失边界的 ticketId，不能区分“选边界时最新 FBO 尚未成功呈现”和“已有 ticket 的原始编码样本最后未精确匹配”。这两条可能路径由独立主机交错回归保留；当前没有据此修改生产时序或映射。后续专用 harness 仅补出已有 `ticketId` / `storedMissing`，不导出私有路径、节点内容或全量证据清单。
+本次 `anchors.json` 未导出缺失边界的 ticketId，不能区分“选边界时最新 FBO 尚未成功呈现”和“已有 ticket 的原始编码样本最后未精确匹配”。这两条可能路径由独立主机交错回归保留；该诊断增量没有据此修改生产时序或映射。专用 harness 补出已有 `ticketId` / `storedMissing`，不导出私有路径、节点内容或全量证据清单。
+
+第五次检查加入已审首次派发准入：原确认的 15 秒内，在下一次正常呈现 tick 固定当时真实初始快照，核对其原始提交和精确编码样本后才派发第一手势；后续动作及末尾等待不变。私有 `selection` 诊断保留选择、消费与确认截止时间，并验证其与首个 Intent/Accepted 的顺序；不会用后来样本补绑旧帧，也不追认第四次 Missing。业务断言仍要求完整点击链、实际 PNG 及真实 MP4；本次具体系统行为待该唯一 run 验证。
 
 可离线运行 `python3 tools/runtime-checks/inspect-captured-anchors.py <解包后的 app/files/runtime-smoke>`。它按原视频 SHA、完整解码顺序、实际容器 tick 与明确样本序号核对导出数据，并读取已有锚点对应的合成状态，不使用最近 PTS 或 uptime 换算。本次五个已有边界准确落在样本 10 / 249 / 495，状态分别为 1 / 2 / 3；600 个样本全部解码。输出始终保留首个 Missing、`allBoundaryBindingsPresent=false` 与 `privateSameFboPngsVerified=false`。这些是有损 MP4 的离线一致性检查，不是原 FBO PNG 的替代，更不能补出首个源身份或给 runtime 改判通过。
