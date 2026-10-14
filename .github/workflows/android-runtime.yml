@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: android-runtime-approved-20261014-0928
+  group: android-runtime-approved-20261014-1122
   cancel-in-progress: false
 
 defaults:
@@ -20,8 +20,8 @@ jobs:
     if: >-
       github.repository == 'gluttonsama-cloud/TapScene' &&
       github.event_name == 'create' && github.event.ref_type == 'branch' &&
-      github.event.ref == 'test/approved-kvm-once-20261014-0928' &&
-      github.ref == 'refs/heads/test/approved-kvm-once-20261014-0928' &&
+      github.event.ref == 'test/approved-kvm-once-20261014-1122' &&
+      github.ref == 'refs/heads/test/approved-kvm-once-20261014-1122' &&
       github.run_attempt == '1'
     name: ci/android-runtime-smoke
     runs-on: ubuntu-24.04
