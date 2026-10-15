@@ -127,6 +127,10 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     var reviewIndex by rememberSaveable { mutableStateOf(0) }
     var preparedCandidate by remember { mutableStateOf<String?>(null) }
     var reviewCandidateId by rememberSaveable { mutableStateOf<String?>(null) }
+    var reviewSourceStepId by rememberSaveable { mutableStateOf<String?>(null) }
+    var reviewSourceCandidateId by rememberSaveable { mutableStateOf<String?>(null) }
+    var reviewSourceOpened by rememberSaveable { mutableStateOf(false) }
+    var reviewSourceFromLibrary by rememberSaveable { mutableStateOf(false) }
     var pendingSealId by rememberSaveable { mutableStateOf<String?>(null) }
     var replacingCandidate by remember { mutableStateOf<ReleaseCandidate?>(null) }
     var deletingRelease by remember { mutableStateOf<ReleaseSummary?>(null) }
@@ -173,9 +177,53 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
         }
     }
     LaunchedEffect(page, projectId, reviewCandidateId) {
-        if (page == "review" && !releaseState.busy) {
-            if (reviewCandidateId != null) releases.openReviewById(requireNotNull(reviewCandidateId))
-            else if (projectId != null) releases.openReview(requireNotNull(projectId))
+        if (page == "review" && reviewSourceStepId == null && !releaseState.busy) {
+            if (reviewCandidateId != null && releaseState.candidate?.id != reviewCandidateId)
+                releases.openReviewById(requireNotNull(reviewCandidateId))
+            else if (reviewCandidateId == null && projectId != null && releaseState.candidate?.projectId != projectId)
+                releases.openReview(requireNotNull(projectId))
+        }
+    }
+    // Resolve the immutable candidate's own source, even when a different project is open.
+    val reviewSourceInfo by produceState<Pair<ProjectSnapshot, Boolean>?>(null, releaseState.candidate?.id, state.project, state.projects, state.dirtyStepIds) {
+        value = null
+        val sourceId = releaseState.candidate?.projectId
+        if (sourceId != null) value = withContext(Dispatchers.IO) {
+            runCatching { ProjectStore.withTemporary(context) { store ->
+                store.readProject(sourceId)?.let { it to store.readEditorDrafts(sourceId).isNotEmpty() }
+            } }.getOrNull()
+        }
+    }
+    val reviewSource = reviewSourceInfo?.first
+    LaunchedEffect(page, releaseState.candidate?.id, reviewSourceStepId, reviewSourceCandidateId, state.busy,
+        state.route, state.selectedStepId, projectId, mediaState.busy) {
+        val stepId = reviewSourceStepId ?: return@LaunchedEffect
+        val candidate = releaseState.candidate
+        if (candidate == null || candidate.id != reviewSourceCandidateId) {
+            reviewSourceStepId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+        } else if (page == "review" && !state.busy) {
+            if (state.loadFailed || projectId != candidate.projectId || state.project?.steps?.none { it.id == stepId } != false) {
+                reviewSourceStepId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+                releases.message("来源项目或步骤已不可用，固定候选仍保留。")
+            } else if (state.route == ProjectRoute.EDIT && state.selectedStepId == stepId) {
+                reviewSourceOpened = true
+            } else if (reviewSourceOpened) {
+                // leaveEditor has already applied its conflict/staging barrier. Keep this exact review selection.
+                reviewSourceStepId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+                if (stepId in state.dirtyStepIds) releases.message("本步修改已暂存。保存本步并重新生成后，才会进入新成品。")
+            } else if (!mediaState.busy) {
+                if (media.projectId == candidate.projectId) projects.openStep(stepId)
+                else if (!media.activateProject(candidate.projectId)) {
+                    reviewSourceStepId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+                    releases.message("请先处理尚未保存的画面修改，再打开来源步骤。")
+                }
+            }
+        }
+    }
+    LaunchedEffect(reviewSourceFromLibrary, reviewSourceStepId, state.busy, state.route) {
+        if (reviewSourceFromLibrary && reviewSourceStepId == null && !state.busy) {
+            reviewSourceFromLibrary = false
+            if (state.route == ProjectRoute.STEPS) projects.back()
         }
     }
     LaunchedEffect(pendingSealId, releaseState.lastSealedId, releaseState.busy) {
@@ -470,6 +518,9 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     }
     BackHandler(enabled = page != null && !retainedMedia) { pop() }
     BackHandler(enabled = page in setOf("review", "delivery", "import") && releaseState.busy) { releases.cancel() }
+    BackHandler(enabled = page == "review" && reviewSourceStepId != null && state.route != ProjectRoute.EDIT) {
+        projects.cancel(); reviewSourceStepId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+    }
     BackHandler(enabled = hostingVisit) { closeHosting() }
     BackHandler(enabled = page == "player") { closeReleasePlayer() }
     BackHandler(enabled = page == "step-correction") { closeStepCorrection() }
@@ -515,7 +566,12 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                         Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                             Text(if (state.busy) state.stage.orEmpty() else mediaState.stage.orEmpty(), Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
                             TextButton(onClick = { push("task") }) { Text("详情") }
-                            TextButton(onClick = { if (state.busy) projects.cancel() else media.cancel() }) { Text("取消") }
+                            TextButton(onClick = {
+                                if (state.busy) projects.cancel() else media.cancel()
+                                if (page == "review" && reviewSourceStepId != null && !reviewSourceOpened) {
+                                    reviewSourceStepId = null; reviewSourceCandidateId = null
+                                }
+                            }) { Text("取消") }
                         }
                     }
                     val message = state.message ?: mediaState.message.takeIf { scopeReady && tab == ProjectTab.SOURCES }
@@ -679,7 +735,33 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                     initialMarkLastTerminal = pathMarkLastTerminal,
                                     onDraftChanged = { ids, terminal -> pathStepIds = ArrayList(ids); pathMarkLastTerminal = terminal })
                             }
-                            "review" -> ReleaseReviewContent(releaseState,
+                            "review" -> {
+                                val sourceStep = reviewSourceStepId
+                                val snapshot = state.project
+                                val draft = state.stepDraft
+                                if (sourceStep != null) {
+                                    if (snapshot != null && draft != null && state.route == ProjectRoute.EDIT && state.selectedStepId == sourceStep &&
+                                        snapshot.project.id == releaseState.candidate?.projectId && draft.stepId == sourceStep) {
+                                        EditorWorkspaceContent(snapshot, draft, state.bitmap, unavailable, EditorCallbacks(
+                                            closeEditor, projects::editTitle, projects::editDescription, projects::editTerminal,
+                                            projects::putHotspot, projects::removeHotspot, projects::saveStepDraft, projects::discardStepDraft,
+                                            {}, { id -> projects.saveBeforeTransition { transitionEdgeId = id; push("transition") } },
+                                            projects::putNextAction, projects::removeNextAction,
+                                            onOpenRegions = { if (state.dirtyStepIds.isEmpty()) push("regions") }, onCorrectImage = openStepCorrection,
+                                                    onPendingFormChange = { form -> projects.editPendingForm(snapshot.project.id, draft.stepId, form) }, onRetryStaging = projects::retryDraftStaging,
+                                                    onResolveConflict = projects::resolveDraftConflict,
+                                                    onSavePendingForm = { projects.savePendingStepForm(snapshot.project.id, draft.stepId) }, onResolveUnsavedSteps = { showUnsavedSteps = true },
+                                                    onUndo = projects::undoEditorEdit, onTextEditEnd = projects::endEditorTextEdit,
+                                                    onRecognizeTextRegions = projects::recognizeTextRegions, onCancelTextRegions = projects::cancelTextRegions,
+                                                    onSelectTextRegion = projects::selectTextRegion),
+                                            previewEnabled = false, regionsEnabled = state.dirtyStepIds.isEmpty(),
+                                            correctionEnabled = scopeReady && !mediaState.busy,
+                                            dirtyStepCount = state.dirtyStepIds.size, formMessage = state.message, canUndoEdit = state.canUndoEdit, textRegions = state.textRegions)
+                                    } else Column(Modifier.fillMaxSize()) {
+                                        ShellTopBar("打开来源步骤", { projects.cancel(); reviewSourceStepId = null; reviewSourceCandidateId = null; reviewSourceOpened = false })
+                                        LinearProgressIndicator(Modifier.fillMaxWidth())
+                                    }
+                                } else ReleaseReviewContent(releaseState,
                                 releaseState.candidate?.projectId?.let { id ->
                                     state.project?.project?.takeIf { it.id == id }?.revision
                                         ?: state.projects.firstOrNull { it.id == id }?.revision
@@ -692,14 +774,29 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 onReviewVideo = releases::selectReviewTransition, onVideoCompleted = releases::completeReviewTransition,
                                 onVideoInterrupted = releases::interruptReviewTransition, onVideoReplay = releases::replayReviewTransition,
                                 onConfirmVideo = releases::confirmReviewTransition, onCloseVideo = releases::closeReviewVideo,
-                                onReviewRegion = releases::selectReviewRegion, onConfirmRegion = releases::confirmReviewRegion)
+                                onReviewRegion = releases::selectReviewRegion, onConfirmRegion = releases::confirmReviewRegion,
+                                editableSourceStepIds = reviewSource?.steps?.map { it.id }?.toSet().orEmpty(),
+                                sourceHasPendingEdits = reviewSourceInfo?.second == true,
+                                onEditSourceStep = { stepId ->
+                                    val candidate = releases.state.value.candidate
+                                    if (candidate != null && !unavailable && !mediaState.busy &&
+                                        reviewSource?.project?.id == candidate.projectId && reviewSource?.steps?.any { it.id == stepId } == true) {
+                                        reviewCandidateId = candidate.id
+                                        reviewSourceFromLibrary = library && state.route == ProjectRoute.PROJECTS
+                                        reviewSourceCandidateId = candidate.id; reviewSourceStepId = stepId; reviewSourceOpened = false
+                                        releases.closeReviewVideo(); projects.openProject(candidate.projectId)
+                                    }
+                                },
+                                onBackToChecks = if (state.route == ProjectRoute.STEPS) ({ pages.clear(); library = false; tab = ProjectTab.CHECKS }) else null)
+                            }
                             "delivery" -> {
                                 val sealed = releaseState.releases.firstOrNull { it.id == releaseState.lastSealedId }
                                 DeliveryOptionsScreen(pop, openReleaseReview, { if (sealed != null) releases.openAiPackage(sealed.id) else releases.clearAiConfiguration(); push("ai") }, { push("account") }, { push("versions") },
                                     sealedSummary = sealed, onExport = sealed?.let { item -> { releases.prepareExport(item.id) } },
                                     onShare = sealed?.takeIf { it.origin == "local" }?.let { item -> { releases.prepareOfflineShare(item.id) } },
                                     busy = releaseState.busy || releaseState.shareChooserOpen || releaseState.pendingShare != null || releaseState.exportFile != null || exportPickerPending,
-                                    onHosting = if (BuildConfig.HOSTED_ENABLED) ({ push("hosted") }) else null)
+                                    onHosting = if (BuildConfig.HOSTED_ENABLED) ({ push("hosted") }) else null,
+                                    onOpenSealed = sealed?.let { item -> { releases.openRelease(item.id); push("player") } })
                             }
                             "ai-import" -> AiDraftImportContent(aiImportState,
                                 onBack = { if (!aiImportState.busy) { aiPickerRequested = false; pop(); projects.reload() } },
@@ -863,10 +960,14 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
             replacingCandidate?.let { item ->
                 val latest = state.project?.project?.takeIf { it.id == item.projectId }
                     ?: state.projects.firstOrNull { it.id == item.projectId }
+                val sourceReady = item.id != releaseState.candidate?.id ||
+                    (reviewSource?.project?.id == item.projectId && reviewSourceInfo?.second == false)
                 AlertDialog(onDismissRequest = { replacingCandidate = null }, title = { Text("重新生成固定成品？") },
                     text = { Text(if (latest == null) "原项目已不可用；现有固定候选仍可继续复核。"
+                        else if (!sourceReady && reviewSourceInfo?.second == true) "请先保存或放弃来源步骤的暂存修改，再重新生成。固定候选仍保留。"
+                        else if (!sourceReady) "来源修改状态尚未确认，请稍后重试；固定候选仍保留。"
                         else "用草稿修订 ${latest.revision} 替换未封存的修订 ${item.projectRevision}，需要重新复核。已封存版本保持不变。") },
-                    confirmButton = { TextButton(enabled = latest != null && !releaseState.busy && state.dirtyStepIds.isEmpty(), onClick = {
+                    confirmButton = { TextButton(enabled = latest != null && sourceReady && !releaseState.busy && state.dirtyStepIds.isEmpty(), onClick = {
                         latest?.let { source ->
                             replacingCandidate = null; reviewCandidateId = null
                             releases.createCandidate(source.id, source.revision, replaceExisting = true); push("review")
@@ -896,7 +997,11 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                         Text("逐步核对后保存。未完成的输入与冲突不会自动提交。", style = MaterialTheme.typography.bodySmall)
                         state.project?.steps?.forEachIndexed { index, step ->
                             if (step.id in state.dirtyStepIds) ShellActionRow("${index + 1}  ${step.title}", "打开并处理", enabled = !state.busy,
-                                onClick = { showUnsavedSteps = false; projects.openStep(step.id) })
+                                onClick = {
+                                    showUnsavedSteps = false
+                                    if (reviewSourceStepId != null) reviewSourceStepId = step.id
+                                    projects.openStep(step.id)
+                                })
                         }
                     }
                 }, confirmButton = { TextButton(onClick = { showUnsavedSteps = false }) { Text("关闭") } })

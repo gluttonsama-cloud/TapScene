@@ -168,7 +168,8 @@ fun AuthoredTraversalSamplePreview() {
 fun ReleaseReviewSamplePreview() {
     val state = remember { ReleasePreviewFixture.reviewState }
     ReviewSurface(sample = true) {
-        ReleaseReviewContent(state, 3L, {}, {}, {}, {}, {}, {}, {}, {})
+        ReleaseReviewContent(state, 3L, {}, {}, {}, {}, {}, {}, {}, {},
+            editableSourceStepIds = state.candidate?.scene?.states?.map { it.id }?.toSet().orEmpty(), onEditSourceStep = {})
     }
 }
 

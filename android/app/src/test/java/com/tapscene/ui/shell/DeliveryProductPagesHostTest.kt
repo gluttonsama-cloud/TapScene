@@ -59,13 +59,18 @@ class DeliveryProductPagesHostTest {
         val busy = mutableStateOf(false)
         val exported = mutableListOf<String>()
         val shared = mutableListOf<String>()
+        val viewed = mutableListOf<String>()
         content {
             val item = selected.value
             DeliveryOptionsScreen({}, {}, {}, {}, {}, sealedSummary = item,
                 onExport = { exported += item.id; busy.value = true },
-                onShare = { shared += item.id; busy.value = true }, busy = busy.value)
+                onShare = { shared += item.id; busy.value = true }, busy = busy.value,
+                onOpenSealed = { viewed += item.id })
         }
         compose.onNodeWithText(release.title).assertIsDisplayed()
+        compose.onNodeWithText("返回成品复核").assertDoesNotExist()
+        compose.onNodeWithText("查看封存成品").performScrollTo().performClick()
+        assertEquals(listOf(release.id), viewed)
         compose.onNodeWithText(release.id).assertDoesNotExist()
         compose.onNodeWithText("版本详情").performClick()
         compose.onNodeWithText(release.id).assertIsDisplayed()

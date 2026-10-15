@@ -533,7 +533,7 @@ private fun ClickChainEditorFooter(busy: Boolean, onCancel: () -> Unit, onClose:
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         if (busy) OutlinedButton(onCancel, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("取消处理") }
         else {
-            OutlinedButton(onClose, Modifier.heightIn(min = 48.dp)) { Text("取消") }
+            OutlinedButton(onClose, Modifier.heightIn(min = 48.dp)) { Text("返回整理") }
             Button(onConfirm, Modifier.weight(1f).heightIn(min = 48.dp), enabled = enabled) { Text(label) }
         }
     }
