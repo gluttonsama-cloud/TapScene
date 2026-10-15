@@ -7,6 +7,7 @@ import android.content.pm.ResolveInfo
 import android.provider.Settings
 import android.view.inspector.WindowInspector
 import androidx.compose.ui.test.*
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import com.tapscene.MainActivity
 import com.tapscene.clickplan.ClickPlayback
@@ -15,6 +16,13 @@ import com.tapscene.clickplan.ClickPlanStore
 import org.robolectric.Robolectric
 import com.tapscene.data.HostSqlite
 import com.tapscene.data.HostFileSyncShadow
+import com.tapscene.data.AiDraftImportFixtures
+import com.tapscene.data.AiDraftImportStore
+import com.tapscene.data.ReleaseCandidate
+import com.tapscene.packageformat.ViewerPackageCodec
+import com.tapscene.data.ReleaseStore
+import com.tapscene.ui.ReleaseWorkspace
+import kotlinx.coroutines.Dispatchers
 import com.tapscene.data.ProjectStore
 import com.tapscene.ui.ProjectWorkspace
 import com.tapscene.clickplan.ClickAction
@@ -31,8 +39,10 @@ import kotlinx.coroutines.sync.Mutex
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.UUID
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertSame
 import org.junit.Rule
 import org.junit.Test
@@ -353,6 +363,143 @@ class ClickEntryNavigationHostTest {
         waitFor("录制操作")
         assertEquals(1200L, ClickPlanStore(app).getPlan(saved.projectId)?.actions?.single()?.waitAfterMs)
         println("HOST_CLICK_ENTRY dirty manual fallback cancel/discard/save PASS; no recording permission requested")
+    }
+
+    @Config(qualifiers = "w320dp-h568dp-xhdpi")
+    @Test fun fixedReviewEditsItsExactSourceAndReturnsWithoutChangingTheCandidate() {
+        waitFor("悬浮编排")
+        val app = RuntimeEnvironment.getApplication()
+        val projects = ViewModelProvider(compose.activity)[ProjectWorkspace::class.java]
+        val releases = ViewModelProvider(compose.activity)[ReleaseWorkspace::class.java]
+        val media = ViewModelProvider(compose.activity)[MediaWorkspace::class.java]
+        val store = ProjectStore(app)
+        val candidates = ReleaseStore(app)
+        var fixed = runBlocking(Dispatchers.IO) {
+            val fixture = AiDraftImportFixtures.complete(app)
+            val imports = AiDraftImportStore(app)
+            val input = fixture.zip.inputStream().use { imports.prepare(it) }
+            val id = checkNotNull(imports.commit(input.sessionId, input.previewDigest).projectId)
+            AiDraftImportFixtures.reviewDraftRegions(store, id)
+            candidates.createCandidate(id, checkNotNull(store.readProject(id)).project.revision)
+        }
+        compose.runOnIdle { projects.reload(); releases.reloadLibrary() }
+        compose.onNodeWithText("演示库").performClick()
+        waitFor("继续复核")
+        compose.waitUntil(30_000) { compose.waitForIdle(); !projects.state.value.busy && !releases.state.value.busy }
+        compose.onNodeWithText("继续复核").assertIsEnabled().performClick()
+        waitFor("2 待复核")
+        compose.onNodeWithText("2 待复核").performScrollTo().assertIsDisplayed().performClick()
+        val stepId = fixed.scene.states[1].id
+        compose.waitUntil(30_000) { compose.waitForIdle(); releases.state.value.reviewStateId == stepId && !releases.state.value.busy }
+        waitFor("修改这一步")
+        compose.onNodeWithText("修改这一步").performScrollTo().assertIsDisplayed().performClick()
+        waitFor("名称与讲解")
+        compose.waitUntil(30_000) { compose.waitForIdle(); media.projectId == fixed.projectId && !media.state.value.busy && !projects.state.value.busy }
+        assertEquals(fixed.projectId, projects.state.value.project?.project?.id)
+        assertEquals(stepId, projects.state.value.selectedStepId)
+        compose.onNode(isToggleable()).performScrollTo().assertIsOn().performClick()
+        compose.onNodeWithText("返回").performClick()
+        waitFor("修改这一步")
+        waitFor("来源步骤有暂存修改；请先保存或放弃，再重新生成。")
+        compose.onNodeWithContentDescription("候选实际输出：", substring = true)
+            .performScrollTo().assertIsDisplayed().assertHeightIsAtLeast(120.dp)
+        assertFixedCandidate(fixed, runBlocking(Dispatchers.IO) { candidates.readCandidateById(fixed.id) })
+        compose.onNodeWithText("从当前草稿重新生成").performScrollTo().assertIsDisplayed().performClick()
+        compose.onNodeWithText("重新生成").assertIsNotEnabled()
+        compose.onNodeWithText("保留现有候选").performClick()
+        compose.onNodeWithText("修改这一步").performScrollTo().assertIsDisplayed().performClick()
+        waitFor("名称与讲解")
+        compose.waitUntil(30_000) { compose.waitForIdle(); !projects.state.value.busy }
+        compose.onNode(isToggleable()).assertIsOff()
+        compose.onNodeWithText("放弃本步修改").performScrollTo().performClick()
+        compose.onNodeWithText("放弃修改").performClick()
+        compose.waitUntil(30_000) { compose.waitForIdle(); !projects.state.value.busy && projects.state.value.dirtyStepIds.isEmpty() }
+        compose.onNodeWithText("名称与讲解").assertIsEnabled().performClick()
+        waitFor("步骤名称")
+        compose.onNodeWithText("步骤名称").performTextReplacement("修改后的来源步骤")
+        compose.onNodeWithText("保存本步").performClick()
+        compose.waitUntil(30_000) { compose.waitForIdle(); !projects.state.value.busy && projects.state.value.stepDraft?.pendingForm == null }
+        compose.onNodeWithText("返回").performClick()
+        waitFor("修改这一步")
+        assertEquals(stepId, releases.state.value.reviewStateId)
+        assertEquals(fixed.contentDigest, releases.state.value.candidate?.contentDigest)
+        assertEquals(fixed.reviewedStateIds, releases.state.value.candidate?.reviewedStateIds)
+        compose.onNodeWithText("草稿已有修改；重新生成并复核后才会进入成品。").performScrollTo().assertIsDisplayed()
+        assertFixedCandidate(fixed, runBlocking(Dispatchers.IO) { candidates.readCandidateById(fixed.id) })
+        check(store.readProject(fixed.projectId)!!.steps.single { it.id == stepId }.title == "修改后的来源步骤")
+        // This imported synthetic fixture also owns an animation plan. Reconfirm its unchanged path
+        // through the existing store API; source edits must not bypass that separate production gate.
+        runBlocking(Dispatchers.IO) {
+            val source = checkNotNull(store.readProject(fixed.projectId))
+            val plan = checkNotNull(store.readDraftAiConfig(fixed.projectId))
+            check(store.draftAiIssues(fixed.projectId, plan).isEmpty())
+            store.saveDraftAiConfig(fixed.projectId, source.project.revision, plan)
+        }
+        compose.runOnIdle { projects.reload() }
+        compose.waitUntil(30_000) { compose.waitForIdle(); !projects.state.value.busy }
+        compose.onNodeWithText("从当前草稿重新生成").performScrollTo().assertIsDisplayed().performClick()
+        compose.waitUntil(30_000) { compose.onAllNodes(hasText("重新生成") and isEnabled()).fetchSemanticsNodes().size == 1 }
+        compose.onNodeWithText("重新生成").assertIsEnabled().performClick()
+        val previousId = fixed.id
+        compose.waitUntil(30_000) { compose.waitForIdle(); !releases.state.value.busy }
+        assertTrue("Rebuild failed: ${releases.state.value.message}", releases.state.value.candidate?.id != previousId)
+        fixed = checkNotNull(releases.state.value.candidate)
+        assertEquals(store.readProject(fixed.projectId)!!.project.revision, fixed.projectRevision)
+        assertTrue(fixed.reviewedStateIds.isEmpty())
+        // First reveal the horizontal step list inside the compact screen's vertical scroller.
+        compose.onNodeWithText("2 待复核").onParent().performScrollTo()
+        compose.onNodeWithText("2 待复核").performScrollTo().assertIsDisplayed().performClick()
+        compose.waitUntil(30_000) { compose.waitForIdle(); releases.state.value.reviewStateId == stepId && !releases.state.value.busy }
+        // Delete only the synthetic source step: the fixed review stays usable and loses its edit shortcut.
+        store.deleteStep(fixed.projectId, stepId)
+        compose.runOnIdle { projects.reload() }
+        compose.waitUntil(30_000) { compose.waitForIdle(); !projects.state.value.busy }
+        compose.waitUntil(30_000) { compose.onAllNodesWithText("修改这一步").fetchSemanticsNodes().isEmpty() }
+        assertEquals(stepId, releases.state.value.reviewStateId)
+        assertFixedCandidate(fixed, runBlocking(Dispatchers.IO) { candidates.readCandidateById(fixed.id) })
+        store.deleteProject(fixed.projectId)
+        compose.runOnIdle { projects.reload() }
+        compose.waitUntil(30_000) { compose.waitForIdle(); !projects.state.value.busy }
+        compose.onNodeWithText("修改这一步").assertDoesNotExist()
+        assertEquals(fixed.contentDigest, releases.state.value.candidate?.contentDigest)
+        // Synthetic confirmations prepare the existing fixed candidate; the UI still performs sealing and playback navigation.
+        runBlocking(Dispatchers.IO) {
+            fixed.scene.states.forEach { candidates.reviewState(fixed.id, fixed.contentDigest, it.id) }
+            fixed.scene.regions.forEach { candidates.reviewRegion(fixed.id, fixed.contentDigest, it.id) }
+            candidates.reviewSummary(fixed.id, fixed.contentDigest)
+            candidates.reviewFileList(fixed.id, fixed.contentDigest)
+            candidates.recordTraversal(fixed.id, fixed.contentDigest, null, false)
+            val loop = fixed.scene.edges.single { it.toStateId == it.fromStateId }
+            val next = fixed.scene.edges.single { it.trigger == "continue" }
+            val branch = fixed.scene.edges.single { it.trigger == "tap" && it.toStateId != it.fromStateId }
+            candidates.recordTraversal(fixed.id, fixed.contentDigest, loop.id, false)
+            candidates.recordTraversal(fixed.id, fixed.contentDigest, next.id, false)
+            candidates.rewindTraversal(fixed.id, fixed.contentDigest)
+            candidates.recordTraversal(fixed.id, fixed.contentDigest, branch.id, false)
+        }
+        compose.runOnIdle { releases.openReviewById(fixed.id) }
+        waitFor("查看封存检查")
+        compose.waitUntil(30_000) { compose.waitForIdle(); !releases.state.value.busy }
+        compose.onNodeWithText("查看封存检查").assertIsEnabled().performClick()
+        compose.onNodeWithText("封存修订 ${fixed.projectRevision}").performClick()
+        compose.onNodeWithText("确认封存").performClick()
+        waitFor("交付方式")
+        compose.onNodeWithText("返回成品复核").assertDoesNotExist()
+        compose.onNodeWithText("查看封存成品").performScrollTo().performClick()
+        compose.waitUntil(30_000) { compose.waitForIdle(); !releases.state.value.busy && releases.state.value.player != null }
+        assertEquals(fixed.scene.releaseId, releases.state.value.player?.scene?.releaseId)
+        compose.onNodeWithText("还没有待复核成品").assertDoesNotExist()
+        compose.onNodeWithText("退出").performClick()
+        waitFor("交付方式")
+        assertEquals(fixed.scene.releaseId, releases.state.value.lastSealedId)
+        println("HOST_REVIEW_SOURCE source/edit/return/deletion/fixed-candidate/seal/player-return PASS; device NOT_RUN")
+    }
+
+    private fun assertFixedCandidate(expected: ReleaseCandidate, actual: ReleaseCandidate?) {
+        val restored = checkNotNull(actual)
+        assertArrayEquals(ViewerPackageCodec.manifestBytes(expected.scene), ViewerPackageCodec.manifestBytes(restored.scene))
+        // ViewerScene is a Java value container without equals; compare its bytes and all candidate metadata.
+        assertEquals(expected, restored.copy(scene = expected.scene))
     }
 
     private fun resetApplicationViewModelFactory() {

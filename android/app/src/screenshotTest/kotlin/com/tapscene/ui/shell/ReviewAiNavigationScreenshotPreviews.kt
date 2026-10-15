@@ -61,7 +61,7 @@ private object ReviewAiNavigationFixture {
 @PreviewTest
 @Preview(name = "review_next_region_small", widthDp = 320, heightDp = 568, locale = "zh-rCN", showBackground = true)
 @Composable
-fun ReviewNextRegionSmallPreview() = ReviewAiNavigationSurface { ReviewNextRegionContent() }
+fun ReviewNextRegionSmallPreview() = ReviewAiNavigationSurface { ReviewNextRegionContent(pendingEdits = true) }
 
 @PreviewTest
 @Preview(name = "review_next_region_landscape", widthDp = 740, heightDp = 360, locale = "zh-rCN", showBackground = true)
@@ -69,12 +69,13 @@ fun ReviewNextRegionSmallPreview() = ReviewAiNavigationSurface { ReviewNextRegio
 fun ReviewNextRegionLandscapePreview() = ReviewAiNavigationSurface { ReviewNextRegionContent() }
 
 @Composable
-private fun ReviewNextRegionContent() {
+private fun ReviewNextRegionContent(pendingEdits: Boolean = false) {
     val candidate = ReviewAiNavigationFixture.imagesDone
     val bitmap = remember { ShellPreviewFixture.bitmap(1) }
     check(nextIncompleteReviewCategory(releaseReviewCategories(candidate), 0)?.section == 5)
     ReleaseReviewContent(ReleaseUiState(candidate = candidate, reviewStateId = candidate.scene.states[1].id, reviewBitmap = bitmap),
-        8L, {}, {}, {}, {}, {}, {}, {}, {})
+        9L, {}, {}, {}, {}, {}, {}, {}, {},
+        editableSourceStepIds = candidate.scene.states.map { it.id }.toSet(), onEditSourceStep = {}, sourceHasPendingEdits = pendingEdits)
 }
 
 @PreviewTest

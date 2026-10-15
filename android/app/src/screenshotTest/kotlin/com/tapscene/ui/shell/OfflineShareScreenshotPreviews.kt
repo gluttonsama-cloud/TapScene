@@ -25,7 +25,7 @@ private fun DeliveryShareSurface() {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             DeliveryOptionsScreen({}, {}, {}, {}, {},
                 sealedSummary = ReleasePreviewFixture.summary.copy(title = "活动报名：选择活动并核对报名结果"),
-                onExport = {}, onShare = {})
+                onExport = {}, onShare = {}, onOpenSealed = {})
         }
     }
 }

@@ -123,6 +123,10 @@ fun ReleaseReviewContent(
     initialSection: Int = 0,
     onReviewRegion: (String) -> Unit = {},
     onConfirmRegion: () -> Unit = {},
+    editableSourceStepIds: Set<String> = emptySet(),
+    onEditSourceStep: ((String) -> Unit)? = null,
+    onBackToChecks: (() -> Unit)? = null,
+    sourceHasPendingEdits: Boolean = false,
 ) {
     val candidate = state.candidate
     var section by rememberSaveable(candidate?.id) { mutableStateOf(initialSection.coerceIn(0, 5)) }
@@ -140,7 +144,8 @@ fun ReleaseReviewContent(
     BackHandler(enabled = !state.busy) { onCloseVideo(); onBack() }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val detailMaxHeight = (maxHeight * .24f).coerceIn(96.dp, 190.dp)
-        val scrollMedia = maxHeight < 500.dp && (section == 0 || section == 1)
+        // Source-edit guidance must not squeeze the review image out of a compact screen.
+        val scrollMedia = (section == 0 && maxHeight < 700.dp) || (section == 1 && maxHeight < 500.dp)
         Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
             ShellTopBar(candidate?.let { "复核修订 ${it.projectRevision}" } ?: "成品逐项复核", { if (!state.busy) { onCloseVideo(); onBack() } }, actions = {
                 if (candidate != null) Text(
@@ -154,7 +159,8 @@ fun ReleaseReviewContent(
             if (candidate == null) {
                 Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp)) {
                     ReleaseStatus(state)
-                    ScreenEmpty("还没有待复核成品", "回到交付检查，生成固定修订的图片、文字和点击路径。", "返回交付检查", onBack)
+                    ScreenEmpty("还没有待复核成品", "生成固定修订的图片、文字和点击路径后，再逐项复核。",
+                        if (onBackToChecks != null) "返回交付检查" else "返回", onBackToChecks ?: onBack)
                 }
                 return@Column
             }
@@ -220,6 +226,18 @@ fun ReleaseReviewContent(
                                 }
                                 state.message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = ShellColors.Accent) }
                             }
+                        }
+                        if (step?.id in editableSourceStepIds && onEditSourceStep != null) {
+                            TextButton(onClick = { step?.id?.let(onEditSourceStep) }, enabled = !state.busy,
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("修改这一步") }
+                        }
+                        if (sourceHasPendingEdits) Text("来源步骤有暂存修改；请先保存或放弃，再重新生成。", Modifier.padding(horizontal = 16.dp),
+                            style = MaterialTheme.typography.bodySmall, color = ShellColors.Accent)
+                        if (sourceHasPendingEdits || (currentDraftRevision != null && currentDraftRevision != candidate.projectRevision)) {
+                            if (!sourceHasPendingEdits) Text("草稿已有修改；重新生成并复核后才会进入成品。", Modifier.padding(horizontal = 16.dp),
+                                style = MaterialTheme.typography.bodySmall, color = ShellColors.Accent)
+                            TextButton(onClick = onRebuild, enabled = !state.busy,
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("从当前草稿重新生成") }
                         }
                         if (!currentCategory.complete) Button(onClick = onConfirmState, enabled = !state.busy && step != null && bitmap.isUsable(), shape = RoundedCornerShape(8.dp),
                             modifier = Modifier.fillMaxWidth().padding(16.dp).heightIn(min = 48.dp)) {

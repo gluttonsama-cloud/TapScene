@@ -304,6 +304,7 @@ fun DeliveryOptionsScreen(
     onShare: (() -> Unit)? = null,
     busy: Boolean = false,
     onHosting: (() -> Unit)? = null,
+    onOpenSealed: (() -> Unit)? = null,
 ) {
     var showVersionDetails by rememberSaveable(sealedSummary?.id) { mutableStateOf(false) }
     ServicePage("交付方式", onBack) {
@@ -362,7 +363,7 @@ fun DeliveryOptionsScreen(
         } else {
             Text("托管链接尚未接入。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
         }
-        if (sealedSummary != null) ShellActionRow("返回成品复核", onClick = onReview)
+        if (sealedSummary != null && onOpenSealed != null) ShellActionRow("查看封存成品", enabled = !busy, onClick = onOpenSealed)
     }
 }
 

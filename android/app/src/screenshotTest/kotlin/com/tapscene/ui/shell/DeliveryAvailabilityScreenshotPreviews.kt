@@ -21,7 +21,7 @@ fun DeliveryWithoutSealedVersionPreview() = AvailabilityPreviewSurface {
 @Composable
 fun DeliveryLocalHostingAvailablePreview() = AvailabilityPreviewSurface {
     DeliveryOptionsScreen({}, {}, {}, {}, {}, sealedSummary = ReleasePreviewFixture.summary,
-        onExport = {}, onShare = {}, onHosting = {})
+        onExport = {}, onShare = {}, onOpenSealed = {}, onHosting = {})
 }
 
 @PreviewTest
