@@ -515,7 +515,8 @@ class ClickEntryNavigationHostTest {
         assertNull(releases.state.value.lastSealedId)
         compose.onNodeWithText("演示库").performClick()
         waitFor("交付此版本")
-        compose.onNodeWithText("交付此版本").performScrollTo().performClick()
+        compose.waitUntil(30_000) { compose.waitForIdle(); !releases.state.value.busy && !projects.state.value.busy }
+        compose.onNodeWithText("交付此版本").performScrollTo().assertIsEnabled().performClick()
         waitFor("交付方式")
         compose.waitUntil(30_000) { compose.waitForIdle(); !releases.state.value.busy }
         assertEquals(sealed.id, releases.state.value.deliveryRelease?.id)
@@ -536,7 +537,8 @@ class ClickEntryNavigationHostTest {
         compose.onNodeWithText("保存到文件").assertDoesNotExist()
         compose.onNodeWithText("从演示库选择版本").performScrollTo().performClick()
         waitFor("交付此版本")
-        compose.onNodeWithText("交付此版本").performScrollTo().performClick()
+        compose.waitUntil(30_000) { compose.waitForIdle(); !releases.state.value.busy && !projects.state.value.busy }
+        compose.onNodeWithText("交付此版本").performScrollTo().assertIsEnabled().performClick()
         waitFor("交付方式")
         compose.waitUntil(30_000) { compose.waitForIdle(); !releases.state.value.busy }
         assertEquals(sealed.id, releases.state.value.deliveryRelease?.id)
