@@ -301,7 +301,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
     }
 
     fun reload() {
-        if (state.value.correction != null) return
+        if (state.value.correction != null || !requireSavedEdits()) return
         execute("读取已保存素材") {
             invalidateCandidate()
             val drafts = withContext(Dispatchers.IO) {
@@ -453,9 +453,33 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Explicitly abandon only unconfirmed in-memory masks, never roll stored metadata back. */
+    fun rereadPendingEdits(expectedSourceId: String, expectedProjectId: String? = activeProjectId) {
+        val snapshot = state.value
+        if (snapshot.busy || savePickerPending || !snapshot.unsavedEdits || snapshot.correction != null ||
+            activeProjectId != expectedProjectId || snapshot.selectedId != expectedSourceId) return
+        val selected = snapshot.selected ?: return
+        val selectedStore = store
+        // This operation already reads the complete saved workspace. A second reconciliation
+        // must not silently select a different source if the requested one has been removed.
+        execute("重新读取已保存遮挡", refreshSavedDrafts = false) {
+            val drafts = withContext(Dispatchers.IO) { selectedStore.read() }
+            check(store === selectedStore && activeProjectId == expectedProjectId &&
+                state.value.selectedId == expectedSourceId) { "素材工作区已改变" }
+            val restored = drafts.firstOrNull { it.source.sourceId == expectedSourceId }
+            require(restored == null || restored.source == selected.source) { "素材身份已改变" }
+            invalidateCandidate()
+            mutableState.update { it.copy(drafts = drafts, selectedId = restored?.source?.sourceId,
+                frame = null, frameReviewId = null, candidate = null, candidateImage = null,
+                watchedDigest = null, reviewedDigest = null, unsavedEdits = false, loadFailed = false,
+                message = if (restored == null) "素材记录已移除，当前未确认修改已放弃。"
+                    else "已重新读取实际保存的遮挡，请重新取帧并复核输出。") }
+        }
+    }
+
     private fun requireSavedEdits(): Boolean {
         if (!state.value.unsavedEdits) return true
-        message("遮挡尚未保存，请先重试保存")
+        message("遮挡保存结果未确认，请先重试保存或重新读取已保存遮挡")
         return false
     }
 
@@ -645,7 +669,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
 
     private fun outputDirectory() = File(app.noBackupFilesDir, "candidates/$sessionId")
 
-    private fun execute(label: String, block: suspend () -> Unit) {
+    private fun execute(label: String, refreshSavedDrafts: Boolean = true, block: suspend () -> Unit) {
         if (state.value.busy || savePickerPending) return
         cancellationNote = null
         mutableState.update { it.copy(busy = true, stage = label, message = null) }
@@ -674,7 +698,7 @@ class MediaWorkspace(application: Application) : AndroidViewModel(application) {
                 // Import's final registration is atomic even if cancellation arrives at that boundary.
                 try {
                     if (locked) withContext(NonCancellable + Dispatchers.IO) {
-                        runCatching { store.read() }.getOrNull()?.takeUnless { state.value.unsavedEdits || state.value.correction != null }?.let { drafts ->
+                        if (refreshSavedDrafts) runCatching { store.read() }.getOrNull()?.takeUnless { state.value.unsavedEdits || state.value.correction != null }?.let { drafts ->
                             mutableState.update { old ->
                                 val selectedId = old.selectedId?.takeIf { id -> drafts.any { it.source.sourceId == id } }
                                     ?: drafts.lastOrNull()?.source?.sourceId

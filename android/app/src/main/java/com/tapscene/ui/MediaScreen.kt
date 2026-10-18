@@ -109,6 +109,8 @@ fun MediaScreen(
     var sourceMenu by remember { mutableStateOf(false) }
     var deleteDialog by remember { mutableStateOf(false) }
     var maskDialog by remember { mutableStateOf(false) }
+    val scopeProjectId = workspace.projectId
+    var rereadSourceId by remember(scopeProjectId, state.selectedId) { mutableStateOf<String?>(null) }
     val scrollState = rememberScrollState()
     val idle = !state.busy && !savePending
     val canEdit = idle && !state.unsavedEdits
@@ -139,7 +141,11 @@ fun MediaScreen(
         }
     }
     val leave: () -> Unit = {
-        if (canLeave) onBack?.invoke() else workspace.message("请等待处理完成，或先取消处理并保存修改")
+        when {
+            canLeave -> onBack?.invoke()
+            idle && state.unsavedEdits && state.selectedId != null -> rereadSourceId = state.selectedId
+            else -> workspace.message("请等待处理完成，或先取消处理并保存修改")
+        }
     }
     BackHandler(enabled = onBack != null, onBack = leave)
     val import = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -234,10 +240,8 @@ fun MediaScreen(
             }
             if (savePending) StatusNote("请在系统文件窗口选择保存位置；取消后可继续校正。")
             state.message?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = ShellColors.Accent) }
-            if (state.unsavedEdits) {
-                StatusNote("遮挡尚未保存，修改仍保留在当前画面。保存成功后才能生成成品。")
-                OutlinedButton(onClick = workspace::retryEdits, enabled = idle) { Text("重试保存遮挡") }
-            }
+            if (state.unsavedEdits) PendingMaskEditsActions(idle, workspace::retryEdits,
+                onReread = { rereadSourceId = state.selectedId })
             val selected = state.selected
             if (selected == null && !state.loadFailed) {
                 ScreenEmpty("选择要校正的素材", "手动选取录屏中的画面，按需遮挡，再确认实际输出。原片仅保留在本机私有空间。")
@@ -402,6 +406,17 @@ fun MediaScreen(
             Spacer(Modifier.height(4.dp))
         }
     }
+    if (rereadSourceId != null && state.unsavedEdits) AlertDialog(
+        onDismissRequest = { if (idle) rereadSourceId = null },
+        title = { Text("重新读取遮挡？") },
+        text = { Text("上次保存可能已写入。重新读取会保留实际已保存的遮挡，放弃尚未写入的本轮修改；随后需要重新取帧、生成并复核输出。读取失败会继续保留当前修改。") },
+        confirmButton = { TextButton(onClick = {
+            val sourceId = rereadSourceId
+            rereadSourceId = null
+            if (sourceId != null) workspace.rereadPendingEdits(sourceId, scopeProjectId)
+        }, enabled = idle) { Text("重新读取") } },
+        dismissButton = { TextButton(onClick = { rereadSourceId = null }, enabled = idle) { Text("保留当前修改") } },
+    )
     if (deleteDialog) AlertDialog(onDismissRequest = { deleteDialog = false },
         title = { Text("删除 App 中的素材副本？") },
         text = { Text("只删除 TapScene 私有空间中的这段录屏副本及取帧、遮挡记录、本机文字建议，无法撤销。系统原文件和已导出文件不受影响；仍被项目步骤引用的素材会保留。") },
@@ -461,6 +476,17 @@ internal fun FrameEditor(bitmap: Bitmap, masks: List<OpaqueMask>, enabled: Boole
             if (from != null && to != null) drawRect(Color.Black,
                 Offset(min(from.x, to.x), min(from.y, to.y)), Size(abs(from.x - to.x), abs(from.y - to.y)))
         }
+    }
+}
+
+@Composable
+internal fun PendingMaskEditsActions(enabled: Boolean, onRetry: () -> Unit, onReread: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        StatusNote("遮挡保存结果未确认，当前修改仍保留。可重试保存，或重新读取实际已保存记录；未确认前不能生成成品。")
+        OutlinedButton(onClick = onRetry, enabled = enabled,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("重试保存遮挡") }
+        TextButton(onClick = onReread, enabled = enabled,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("重新读取已保存遮挡") }
     }
 }
 

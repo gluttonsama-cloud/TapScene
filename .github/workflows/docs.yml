@@ -265,7 +265,7 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 95, f"Expected ninety-five Compose review images, found {len(images)}"
+          assert len(images) == 97, f"Expected ninety-seven Compose review images, found {len(images)}"
           delivery_images = [image for image in images if "DeliveryAvailabilityScreenshotPreviewsKt" in str(image)]
           assert len(delivery_images) == 3, f"Expected three delivery availability images, found {len(delivery_images)}"
           click_review_images = [image for image in images if "ClickChainReviewScreenshotPreviewsKt" in str(image)]
@@ -284,6 +284,8 @@ jobs:
           assert len(share_images) == 3, f"Expected three delivery selection/share review images, found {len(share_images)}"
           project_text_images = [image for image in images if "ProjectTextScreenshotPreviewsKt" in str(image)]
           assert len(project_text_images) == 2, f"Expected two project text images, found {len(project_text_images)}"
+          mask_recovery_images = [image for image in images if "MaskRecoveryScreenshotPreviewsKt" in str(image)]
+          assert len(mask_recovery_images) == 2, f"Expected two mask recovery images, found {len(mask_recovery_images)}"
           connection_images = [image for image in images if "ConnectionRepairScreenshotPreviewsKt" in str(image)]
           assert len(connection_images) == 2, f"Expected two connection repair images, found {len(connection_images)}"
           annotation_images = [image for image in images if "AiAnnotationScreenshotPreviewsKt" in str(image)]
@@ -416,6 +418,7 @@ jobs:
             --tests com.tapscene.ui.shell.DeliveryProductPagesHostTest \
             --tests com.tapscene.ui.shell.DraftAiHoldInputHostTest \
             --tests com.tapscene.ui.shell.ManualMediaInputHostTest \
+            --tests com.tapscene.ui.shell.ManualMaskRecoveryHostTest \
             --tests com.tapscene.ui.shell.ProjectTextEditingHostTest \
             --tests com.tapscene.ui.shell.DeliveryIssueNavigationHostTest \
             --tests com.tapscene.ui.shell.AiImportNavigationHostTest \
@@ -642,6 +645,8 @@ jobs:
               ("com.tapscene.ui.shell.DraftAiHoldInputHostTest", "pendingHoldSurvivesCollapseAndTabsAndCannotSilentlySaveOldValue"): 1,
               ("com.tapscene.ui.shell.DraftAiHoldInputHostTest", "pendingInputCanBeExplicitlyDiscardedAndNeverFollowsAnotherProject"): 1,
               ("com.tapscene.ui.shell.DraftAiHoldInputHostTest", "shellTaskViewProtectsRawAndDirtyPlansButAllowsCleanDiscardedAndSavedPlans"): 1,
+              ("com.tapscene.ui.shell.ManualMaskRecoveryHostTest", "failedSaveAndRereadKeepMasksUntilConfirmedRecoveryThenBackWorks"): 1,
+              ("com.tapscene.ui.shell.ManualMaskRecoveryHostTest", "cancellationAfterRealDirectorySyncRereadsCommittedMasksWithoutRollback"): 1,
               ("com.tapscene.ui.shell.ManualMediaInputHostTest", "shellRecordingCoverRetainsRawTimesButSourceSwitchAndFullExitClearThem"): 1,
               ("com.tapscene.ui.shell.DeliveryIssueNavigationHostTest", "unreachableCopiedTerminalRepairsIncomingHotspotOnlyAfterExplicitSave"): 1,
               ("com.tapscene.ui.shell.ProjectTextEditingHostTest", "fixedReviewEditsCurrentSourceTextByIdAndRebuildsOnlyAfterExplicitConfirmation"): 1,

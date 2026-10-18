@@ -378,11 +378,19 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
             closeStepCorrection()
     }
     val openRecordedCandidates: (String, String, Boolean) -> Unit = { id, source, analyze ->
-        pendingCandidateProject = id
-        pendingCandidateSource = source
-        autoAnalyzeSource = source.takeIf { analyze }
-        if (projectId != id) projects.openProject(id)
-        else if (media.projectId == id && !mediaState.busy) media.reload()
+        if (media.state.value.unsavedEdits) {
+            // Recording has completed before this callback. Preserve its durable source and
+            // the earlier correction owner; do not refresh or replace that pending input.
+            pendingCandidateProject = null; pendingCandidateSource = null; autoAnalyzeSource = null
+            media.message("录屏已保存在本机。请先重试保存当前遮挡，或明确重新读取已保存记录，再从项目素材整理新录屏。")
+            if (page == "record") pop()
+        } else {
+            pendingCandidateProject = id
+            pendingCandidateSource = source
+            autoAnalyzeSource = source.takeIf { analyze }
+            if (projectId != id) projects.openProject(id)
+            else if (media.projectId == id && !mediaState.busy) media.reload()
+        }
     }
     LaunchedEffect(pendingCandidateProject, projectId, state.busy, scopeReady, mediaState.busy) {
         val expectedProject = pendingCandidateProject
