@@ -586,7 +586,9 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                     }
                 }
                 if (recording.isBusy && page != "record") Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (recording.phase == RecordingPhase.Recording) "录制中" else "录屏处理中", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = ShellColors.Accent)
+                    Text("${if (recording.projectId != null && state.project?.project?.id != null && recording.projectId != state.project?.project?.id) "其他项目 · " else ""}${if (recording.phase == RecordingPhase.Recording) "录制中" else "录屏处理中"} · ${recordingOwnerTitle(state, recording)}",
+                        Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = ShellColors.Accent,
+                        maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                     TextButton(onClick = { push("record") }, enabled = !draftAiTaskBlocked && mediaState.correction == null && screenshotState.sessionId == null) { Text("查看") }
                     if (recording.phase == RecordingPhase.Recording || recording.phase == RecordingPhase.Starting) TextButton(onClick = { RecordingCoordinator.stop(context) }) { Text("停止") }
                 }
