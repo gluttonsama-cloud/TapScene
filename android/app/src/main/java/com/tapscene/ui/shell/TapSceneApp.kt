@@ -955,7 +955,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                             "player" -> ReleasePlayerContent(releaseState, closeReleasePlayer,
                                 releases::tapPlayer, releases::chooseEdge, releases::previous, releases::restart, releases::dismissMatches,
                                 onVideoCompleted = releases::completePlayerTransition, onVideoFailed = releases::failPlayerTransition,
-                                onVideoRetry = releases::retryPlayerTransition, onVideoSkip = releases::skipPlayerTransition)
+                                onVideoRetry = releases::retryPlayerTransition, onVideoSkip = releases::skipPlayerTransition,
+                                onResume = releases::resumePlayback)
                             "task" -> TaskDetailsScreen(
                                 if (state.busy || mediaState.busy) ShellTaskInfo("本机处理", if (state.busy) state.stage.orEmpty() else mediaState.stage.orEmpty(), state.project?.project?.title) else null,
                                 pop, { if (!retainAiChanges(aiNavigationNote)) pages.clear() }, { push("settings") })

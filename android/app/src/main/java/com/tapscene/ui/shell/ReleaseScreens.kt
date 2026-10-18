@@ -592,6 +592,7 @@ fun ReleasePlayerContent(
     onVideoFailed: (Long) -> Unit = {},
     onVideoRetry: (Long) -> Unit = {},
     onVideoSkip: () -> Unit = {},
+    onResume: (String, Boolean) -> Unit = { _, _ -> },
 ) {
     val player = state.player
     var showExplanation by rememberSaveable(player?.scene?.releaseId, player?.currentStateId) { mutableStateOf(false) }
@@ -600,6 +601,39 @@ fun ReleasePlayerContent(
         if (!state.busy || player?.video != null) {
             if (player?.matchingHotspotIds?.isNotEmpty() == true) onDismissMatches() else onBack()
         }
+    }
+    val resume = state.playbackResume
+    if (resume != null) {
+        var showIdentity by rememberSaveable(resume.session.ownerToken) { mutableStateOf(false) }
+        Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
+            ShellTopBar("离线播放", onBack)
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                ReleaseStatus(state)
+                Text(resume.scene.title, style = MaterialTheme.typography.headlineSmall)
+                Text("固定版本 ${resume.session.releaseId.take(8)} · 摘要 ${resume.session.contentDigest.take(12)}",
+                    style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                val checkpoint = resume.checkpoint
+                if (checkpoint != null) {
+                    val index = resume.scene.states.indexOfFirst { it.id == checkpoint.currentStateId }
+                    Text(if (checkpoint.ended) "上次已观看至结束" else "继续上次观看", style = MaterialTheme.typography.titleMedium)
+                    Text("步骤 ${index + 1} · ${resume.scene.states[index].title}", style = MaterialTheme.typography.bodyLarge)
+                    if (checkpoint.ended) checkpoint.endLabel?.takeIf { it.isNotBlank() }?.let { Text(it) }
+                    Text("保留已访问的返回顺序。未完成的过渡会回到过渡前的画面。",
+                        style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                } else {
+                    Text("观看记录不可用，演示包未受影响。可从头开始。", style = MaterialTheme.typography.bodyLarge)
+                }
+                PlaybackResumeActions(resume.session.ownerToken, checkpoint != null, !state.busy, onResume)
+                Text("从头开始会替换这个版本的本机观看记录。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                TextButton(onClick = { showIdentity = !showIdentity }, modifier = Modifier.heightIn(min = 48.dp)) {
+                    Text(if (showIdentity) "收起版本标识" else "查看完整版本标识")
+                }
+                if (showIdentity) Text("版本 ${resume.session.releaseId}\n摘要 ${resume.session.contentDigest}",
+                    style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+            }
+        }
+        return
     }
     if (player == null) {
         Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
@@ -706,7 +740,7 @@ fun ReleasePlayerContent(
         onDismissRequest = { showIntroduction = false }, title = { Text(scene.title) },
         text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(scene.goal.ifBlank { "此演示未填写开场说明。" })
-            Text("点击只切换演示画面，不操作原 App。上一步沿本次实际访问历史返回。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+            Text("点击只切换演示画面，不操作原 App。上一步沿已访问的实际顺序返回。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
         } },
         confirmButton = { TextButton(onClick = { showIntroduction = false }, modifier = Modifier.heightIn(min = 48.dp)) { Text("继续观看") } },
         shape = RoundedCornerShape(8.dp),
@@ -723,6 +757,29 @@ fun ReleasePlayerContent(
         confirmButton = { TextButton(onClick = onDismissMatches, modifier = Modifier.heightIn(min = 48.dp)) { Text("留在当前画面") } },
         shape = RoundedCornerShape(8.dp),
     )
+}
+
+@Composable
+private fun PlaybackResumeActions(owner: String, canContinue: Boolean, enabled: Boolean,
+    onResume: (String, Boolean) -> Unit) {
+    val continueButton: @Composable (Modifier) -> Unit = { modifier ->
+        Button(onClick = { onResume(owner, false) }, enabled = enabled,
+            modifier = modifier.heightIn(min = 48.dp), shape = RoundedCornerShape(8.dp)) { Text("继续观看") }
+    }
+    val startButton: @Composable (Modifier) -> Unit = { modifier ->
+        if (canContinue) OutlinedButton(onClick = { onResume(owner, true) }, enabled = enabled,
+            modifier = modifier.heightIn(min = 48.dp), shape = RoundedCornerShape(8.dp)) { Text("从头开始") }
+        else Button(onClick = { onResume(owner, true) }, enabled = enabled,
+            modifier = modifier.heightIn(min = 48.dp), shape = RoundedCornerShape(8.dp)) { Text("从头开始") }
+    }
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        if (canContinue && maxWidth >= 480.dp) Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            continueButton(Modifier.weight(1f)); startButton(Modifier.weight(1f))
+        } else Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            if (canContinue) continueButton(Modifier.fillMaxWidth())
+            startButton(Modifier.fillMaxWidth())
+        }
+    }
 }
 
 /** Fitted image and overlay share bounds; gestures never include the letterboxed margins. */

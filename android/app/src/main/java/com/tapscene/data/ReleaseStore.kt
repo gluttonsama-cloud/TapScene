@@ -9,10 +9,12 @@ import com.tapscene.packageformat.ViewerPackageCodec
 import com.tapscene.sharing.OfflineShare
 import com.tapscene.sharing.OfflineShareStore
 import com.tapscene.packageformat.ViewerScene
+import com.tapscene.packageformat.ViewerTraversal
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.UUID
@@ -237,6 +239,49 @@ class ReleaseStore(context: Context) {
         val location = child(releases, releaseId)
         val summary = readReleaseDirectory(location)
         readScene(File(location, "package")).also { check(ViewerPackageCodec.contentDigest(it) == summary.contentDigest) }
+    }
+
+    /** Revalidate the fixed package before reading optional, separately bound local progress. */
+    suspend fun openPlayback(releaseId: String): PlaybackOpen = locked {
+        val location = child(releases, releaseId)
+        val summary = readReleaseDirectory(location)
+        val scene = readScene(File(location, "package"))
+        check(ViewerPackageCodec.contentDigest(scene) == summary.contentDigest)
+        val file = File(location, "playback.json")
+        var unavailable = false
+        val checkpoint = if (!Files.exists(file.toPath(), LinkOption.NOFOLLOW_LINKS)) null else try {
+            PlaybackCheckpoint.read(file, scene, summary.contentDigest)
+        } catch (_: Exception) {
+            // A bad progress file must not damage or hide an otherwise valid package.
+            unavailable = true
+            null
+        }
+        currentCoroutineContext().ensureActive()
+        val session = PlaybackSession(releaseId, summary.contentDigest, newId())
+        playbackOwners[location.path] = PlaybackOwner(session)
+        PlaybackOpen(scene, session, checkpoint, unavailable)
+    }
+
+    /** Recheck after decoding, before publishing pixels that came from a reusable release path. */
+    suspend fun isPlaybackCurrent(session: PlaybackSession): Boolean = locked {
+        val location = child(releases, session.releaseId)
+        if (playbackOwners[location.path]?.session != session || !location.isDirectory) return@locked false
+        readReleaseDirectory(location, verifyAssets = false).contentDigest == session.contentDigest
+    }
+
+    /** Latest open owns progress; its strictly increasing publication sequence rejects delayed saves. */
+    suspend fun savePlayback(session: PlaybackSession, traversal: ViewerTraversal, sequence: Long): Boolean = locked {
+        val location = child(releases, session.releaseId)
+        val owner = playbackOwners[location.path]
+        if (owner == null || owner.session != session || sequence <= 0 || sequence <= owner.sequence || !location.isDirectory) return@locked false
+        val summary = readReleaseDirectory(location, verifyAssets = false)
+        if (summary.contentDigest != session.contentDigest) return@locked false
+        val scene = readScene(File(location, "package"))
+        val json = PlaybackCheckpoint.json(scene, session.contentDigest, traversal)
+        currentCoroutineContext().ensureActive()
+        atomicJson(File(location, "playback.json"), json)
+        owner.sequence = sequence
+        true
     }
 
     /** Only locally sealed, fully bound reviews may enter hosted publication. No current project lookup. */
@@ -476,6 +521,7 @@ class ReleaseStore(context: Context) {
         check(source.isDirectory) { "这个本机版本已不存在。" }
         stage { operation ->
             Files.move(source.toPath(), File(operation, "deleted-release").toPath(), StandardCopyOption.ATOMIC_MOVE)
+            playbackOwners.remove(source.path)
             runCatching { syncDirectory(releases); File(exports, "$releaseId.tapscene").delete(); File(exports, "$releaseId.tapscene-ai").delete(); File(aiConfigs, "$releaseId.json").delete(); syncDirectory(exports); syncDirectory(aiConfigs) }
         }
     }
@@ -747,11 +793,13 @@ class ReleaseStore(context: Context) {
 
     companion object {
         private val mutex = Mutex()
+        private data class PlaybackOwner(val session: PlaybackSession, var sequence: Long = 0)
+        private val playbackOwners = mutableMapOf<String, PlaybackOwner>()
         private const val OWNER = "tapscene-release-v1"
         private const val MAX_BYTES = 50L * 1024 * 1024
         private const val MAX_JSON_BYTES = 2L * 1024 * 1024
         private const val MAX_HISTORY = 10_000
-        private val METADATA_PART = Regex("\\.(review|summary)\\.json-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.part")
+        private val METADATA_PART = Regex("\\.(review|summary|playback)\\.json-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.part")
         private fun newId() = UUID.randomUUID().toString()
         private fun validId(id: String) {
             require(runCatching { UUID.fromString(id).toString() == id }.getOrDefault(false)) { "版本标识无效。" }

@@ -10,6 +10,8 @@ import androidx.lifecycle.viewModelScope
 import com.tapscene.data.ReleaseCandidate
 import com.tapscene.data.ReleaseStore
 import com.tapscene.data.ReleaseSummary
+import com.tapscene.data.PlaybackOpen
+import com.tapscene.data.PlaybackSession
 import com.tapscene.sharing.OfflineShare
 import com.tapscene.packageformat.RenderPlan
 import com.tapscene.packageformat.ViewerPackageCodec
@@ -44,6 +46,7 @@ data class ReleasePlayback(
     val completedFromStart: Boolean = false,
     val traversalState: ViewerTraversal? = null,
     val video: LocalVideoRun? = null,
+    val playbackSession: PlaybackSession? = null,
 ) {
     val canGoBack: Boolean get() = traversalState?.pendingEdgeId != null || history.size > 1 || endEdgeId != null
     val currentState: ViewerScene.State? get() = scene.states.firstOrNull { it.id == currentStateId }
@@ -125,6 +128,7 @@ data class ReleaseUiState(
     val reviewVideo: ReleaseVideoReview? = null,
     val player: ReleasePlayback? = null,
     val playerBitmap: Bitmap? = null,
+    val playbackResume: PlaybackOpen? = null,
     val busy: Boolean = false,
     val stage: String? = null,
     val message: String? = null,
@@ -156,6 +160,8 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     private var task: Job? = null
     private var playerTask: Job? = null
     private var playerGeneration = 0L
+    private var playbackWriteSequence = 0L
+    private var lastPlaybackWrite: Job? = null
     private var reviewVideoTask: Job? = null
     private var reviewRunSequence = 0L
     private var aiConfigurationBaseline: AiPackageConfiguration? = null
@@ -366,7 +372,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         closeReviewVideo()
         val candidate = state.value.candidate ?: return
         execute("读取固定成品起点") {
-            mutableState.update { it.copy(player = null, playerBitmap = null) }
+            mutableState.update { it.copy(player = null, playerBitmap = null, playbackResume = null) }
             val start = candidate.scene.states.first { it.id == candidate.scene.startStateId }
             val bitmap = decode(candidate.scene, start.id, candidate.id)
             val updated = withContext(Dispatchers.IO) { store.recordTraversal(candidate.id, candidate.contentDigest, null, false) }
@@ -376,10 +382,51 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     fun openRelease(id: String) = execute("读取离线演示") {
-        mutableState.update { it.copy(player = null, playerBitmap = null) }
-        val scene = withContext(Dispatchers.IO) { store.loadRelease(id) }
-        val bitmap = decode(scene, scene.startStateId, null)
-        mutableState.update { it.copy(playerBitmap = bitmap, player = initialPlayback(scene, null)) }
+        mutableState.update { it.copy(player = null, playerBitmap = null, playbackResume = null) }
+        // An immediate reopen after Close waits for the already displayed frame's bounded
+        // checkpoint write before taking a new store session. Exit itself stays responsive.
+        lastPlaybackWrite?.takeUnless { it === currentCoroutineContext()[Job] }?.join()
+        val opened = withContext(Dispatchers.IO) { store.openPlayback(id) }
+        if (opened.checkpoint != null || opened.checkpointUnavailable) {
+            mutableState.update { it.copy(playbackResume = opened) }
+        } else showPlayback(opened, fromStart = true, save = false)
+    }
+
+    /** A late button from another version/choice cannot select or reset the current one. */
+    fun resumePlayback(ownerToken: String, fromStart: Boolean) {
+        val opened = state.value.playbackResume ?: return
+        if (opened.session.ownerToken != ownerToken || (!fromStart && opened.checkpoint == null)) return
+        execute(if (fromStart) "从头读取演示" else "读取上次画面") {
+            if (state.value.playbackResume?.session != opened.session) return@execute
+            showPlayback(opened, fromStart, save = true)
+        }
+    }
+
+    private suspend fun showPlayback(opened: PlaybackOpen, fromStart: Boolean, save: Boolean) {
+        val traversal = if (fromStart) ViewerTraversal.start(opened.scene) else checkNotNull(opened.checkpoint)
+        val bitmap = decode(opened.scene, traversal.currentStateId, null, opened.session)
+        currentCoroutineContext().ensureActive()
+        val player = initialPlayback(opened.scene, null).applyTraversal(traversal).copy(playbackSession = opened.session)
+        mutableState.update { it.copy(playerBitmap = bitmap, player = player, playbackResume = null) }
+        if (save) persistPlayback(player)
+    }
+
+    /** Save only a frame already published to the player; close cannot abandon that small write.
+     * Store session ownership prevents this completion from overwriting a newer open/reimport. */
+    private suspend fun persistPlayback(player: ReleasePlayback) {
+        if (player.candidateId != null) return
+        val session = player.playbackSession ?: return
+        val sequence = ++playbackWriteSequence
+        lastPlaybackWrite = currentCoroutineContext()[Job]
+        withContext(NonCancellable + Dispatchers.IO) {
+            val saved = runCatching { store.savePlayback(session, player.traversal(), sequence) }.getOrDefault(false)
+            if (!saved) withContext(NonCancellable + Dispatchers.Main.immediate) {
+                if (sequence == playbackWriteSequence && state.value.player?.playbackSession == session) {
+                    message("观看记录未能保存，当前画面保留；退出后可能需要从头开始。")
+                }
+            }
+        }
+        currentCoroutineContext().ensureActive()
     }
 
     fun tapPlayer(x: Float, y: Float) {
@@ -472,14 +519,16 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     private fun commitPlayerAction(player: ReleasePlayback, next: ViewerTraversal, edgeId: String) = launchPlayerWork {
         var displayed = false
         try {
-            val bitmap = if (next.currentStateId != player.currentStateId) decode(player.scene, next.currentStateId, player.candidateId)
+            val bitmap = if (next.currentStateId != player.currentStateId) decode(player.scene, next.currentStateId, player.candidateId, player.playbackSession)
                 else state.value.playerBitmap
             currentCoroutineContext().ensureActive()
             check(bitmap != null) { "目标画面不可用" }
             // Publish the real visit before writing coverage. A close during disk IO must not
             // record an unseen destination or restore this player from an old completion.
-            mutableState.update { it.copy(playerBitmap = bitmap, player = player.applyTraversal(next).copy(video = null)) }
+            val displayedPlayer = player.applyTraversal(next).copy(video = null)
+            mutableState.update { it.copy(playerBitmap = bitmap, player = displayedPlayer) }
             displayed = true
+            persistPlayback(displayedPlayer)
             val candidate = player.candidateId?.let { candidateId -> withContext(Dispatchers.IO) {
                 store.recordTraversal(candidateId, ViewerPackageCodec.contentDigest(player.scene), edgeId, false)
             } }
@@ -488,9 +537,10 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
                 player = it.player?.copy(visitedEdgeIds = candidate?.visitedEdgeIds ?: next.visitedEdgeIds,
                     completedFromStart = candidate?.completedPath ?: next.completedFromStart)) }
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) {
+        catch (error: Exception) {
             if (player.traversal().pendingEdgeId != null) failPlayerTransition(player.traversal().mediaRunId)
-            message(if (displayed) "试走记录未能保存，请点重来" else "目标画面未能读取，可重试或返回")
+            message(if (error is PlaybackSessionExpiredException) error.message.orEmpty()
+                else if (displayed) "试走记录未能保存，请点重来" else "目标画面未能读取，可重试或返回")
         }
     }
 
@@ -504,13 +554,14 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         if (state.value.busy || !player.canGoBack) return
         launchPlayerWork {
             val previous = player.traversal().previous(player.scene)
-            val bitmap = decode(player.scene, previous.currentStateId, player.candidateId)
+            val bitmap = decode(player.scene, previous.currentStateId, player.candidateId, player.playbackSession)
             val candidate = player.candidateId?.let { id -> withContext(Dispatchers.IO) {
                 store.rewindTraversal(id, ViewerPackageCodec.contentDigest(player.scene))
             } }
             currentCoroutineContext().ensureActive()
             mutableState.update { it.copy(candidate = candidate ?: it.candidate, playerBitmap = bitmap,
                 player = player.applyTraversal(previous).copy(video = null)) }
+            persistPlayback(player.applyTraversal(previous).copy(video = null))
         }
     }
 
@@ -523,7 +574,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         if (state.value.busy) return
         launchPlayerWork {
             val restarted = player.traversal().restart(player.scene)
-            val bitmap = decode(player.scene, restarted.currentStateId, player.candidateId)
+            val bitmap = decode(player.scene, restarted.currentStateId, player.candidateId, player.playbackSession)
             val candidate = player.candidateId?.let { id -> withContext(Dispatchers.IO) {
                 store.recordTraversal(id, ViewerPackageCodec.contentDigest(player.scene), null, false)
             } }
@@ -532,13 +583,14 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
                 player = player.applyTraversal(restarted).copy(video = null,
                     visitedEdgeIds = candidate?.visitedEdgeIds ?: restarted.visitedEdgeIds,
                     completedFromStart = candidate?.completedPath ?: restarted.completedFromStart)) }
+            persistPlayback(player.applyTraversal(restarted).copy(video = null))
         }
     }
 
     fun closePlayer() {
         cancelPlayerWork()
         if (state.value.busy) cancel()
-        mutableState.update { it.copy(player = null, playerBitmap = null) }
+        mutableState.update { it.copy(player = null, playerBitmap = null, playbackResume = null) }
     }
 
     private fun launchPlayerWork(block: suspend () -> Unit) {
@@ -548,7 +600,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         playerTask = viewModelScope.launch {
             try { block() }
             catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { message("播放未完成，请重试") }
+            catch (error: Exception) { message(if (error is PlaybackSessionExpiredException) error.message.orEmpty() else "播放未完成，请重试") }
             finally { if (generation == playerGeneration) mutableState.update { it.copy(busy = false, stage = null) } }
         }
     }
@@ -865,7 +917,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         message(if (removed) reason else "$reason。所选位置可能仍有空文件，请手动删除")
     }
 
-    private suspend fun decode(scene: ViewerScene, stateId: String, candidateId: String?): Bitmap = withContext(Dispatchers.IO) {
+    private suspend fun decode(scene: ViewerScene, stateId: String, candidateId: String?, session: PlaybackSession? = null): Bitmap = withContext(Dispatchers.IO) {
         val item = scene.states.firstOrNull { it.id == stateId } ?: error("观看画面缺失")
         val file = if (candidateId != null) store.candidateAssetFile(candidateId, stateId) else store.releaseAssetFile(scene.releaseId, stateId)
         currentCoroutineContext().ensureActive()
@@ -875,6 +927,12 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         if (bitmap.width != item.width || bitmap.height != item.height) {
             bitmap.recycle()
             error("实际画面尺寸不一致，未切换画面")
+        }
+        // The file path may have been deleted/reimported while decoding. A post-read binding
+        // check prevents replacement pixels from being published under the previous graph.
+        if (session != null && !store.isPlaybackCurrent(session)) {
+            bitmap.recycle()
+            throw PlaybackSessionExpiredException()
         }
         currentCoroutineContext().ensureActive()
         bitmap
@@ -924,10 +982,11 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         task = viewModelScope.launch {
             try { block() }
             catch (cancelled: CancellationException) {
-                mutableState.update { it.copy(player = null, playerBitmap = null, pendingShare = null) }
+                mutableState.update { it.copy(player = null, playerBitmap = null, playbackResume = null, pendingShare = null) }
                 message(cancellationNote ?: "已取消当前处理；完整保存的版本保留")
                 throw cancelled
             } catch (error: Exception) {
+                if (error is PlaybackSessionExpiredException) mutableState.update { it.copy(playbackResume = null) }
                 val detail = when (error) {
                     is DocumentSaveException -> error.message
                     is IllegalArgumentException, is IllegalStateException -> error.message?.takeIf { it.length <= 240 && '/' !in it && '\\' !in it }
@@ -953,5 +1012,6 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     private class DocumentSaveException(message: String) : Exception(message)
+    private class PlaybackSessionExpiredException : IllegalStateException("此观看会话已失效，请返回演示库重新打开。")
     private companion object { const val MAX_VISITS = 256 }
 }
