@@ -64,6 +64,7 @@ fun EditorCanvas(
     onTap: ((Float, Float) -> Unit)? = null,
     objectLabel: String = "热点",
     textRegionRects: List<OpaqueMask> = emptyList(),
+    objectOrdinals: Map<String, Int> = emptyMap(),
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val suggestionTint = MaterialTheme.colorScheme.tertiary
@@ -215,7 +216,7 @@ fun EditorCanvas(
                         (position.y + badgeRadius).coerceAtMost(size.height - badgeRadius))
                     drawCircle(accent, badgeRadius, center)
                     labelPaint.textSize = 11.dp.toPx()
-                    drawContext.canvas.nativeCanvas.drawText("${index + 1}", center.x,
+                    drawContext.canvas.nativeCanvas.drawText("${objectOrdinals[hotspot.id] ?: index + 1}", center.x,
                         center.y - (labelPaint.ascent() + labelPaint.descent()) / 2, labelPaint)
                     if (selected && onChangeRect != null) {
                         val handle = Offset(rect.right * size.width, rect.bottom * size.height)

@@ -19,9 +19,9 @@ fun DeliveryRegionReadinessPreview() {
     val base = first.asset
     val missing = ProjectRegion("layout-region-missing", first.id, base.id, base.sha256,
         "标题区", null, RegionBox(12, 24, 120, 60), base.width, base.height, 0, .5, .5)
-    val unreviewed = missing.copy(id = "layout-region-unreviewed", name = "信息区",
+    val unreviewed = missing.copy(id = "layout-region-unreviewed", name = missing.name, zIndex = 1,
         asset = base.copy(id = "layout-crop", width = 120, height = 60))
-    val stale = missing.copy(id = "layout-region-stale", name = "按钮区", baseAssetId = "previous-base")
+    val stale = missing.copy(id = "layout-region-stale", name = missing.name, zIndex = 2, baseAssetId = "previous-base")
     val snapshot = original.copy(steps = original.steps.map {
         if (it.id == first.id) it.copy(regions = listOf(missing, unreviewed, stale)) else it
     })

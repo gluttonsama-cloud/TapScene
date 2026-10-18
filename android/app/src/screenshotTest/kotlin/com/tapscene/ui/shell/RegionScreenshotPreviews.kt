@@ -30,8 +30,13 @@ private object RegionPreviewFixture {
         val currentRegion = region.copy(baseSha256 = if (outdated) "1".repeat(64) else step.asset.sha256,
             asset = if (crop != null) StepAsset("layout-crop", "screenshot-only/crop.png", "2".repeat(64), 0L,
                 box.width, box.height) else null)
+        // Same-name regions include an earlier stale object; visible canvas badges must not renumber.
+        val previousRegion = region.copy(id = "layout-previous-region", zIndex = 1,
+            baseAssetId = "previous-base", bbox = RegionBox(48, 420, 384, 93))
+        val anotherRegion = region.copy(id = "layout-another-region", zIndex = 3,
+            bbox = RegionBox(48, 180, 384, 93))
         val project = ShellPreviewFixture.project.copy(steps = ShellPreviewFixture.project.steps.map {
-            if (it.id == step.id) it.copy(regions = listOf(currentRegion)) else it
+            if (it.id == step.id) it.copy(regions = listOf(previousRegion, currentRegion, anotherRegion)) else it
         })
         return RegionUiState(projectId = project.project.id, stepId = step.id, snapshot = project, bitmap = bitmap,
             selectedId = region.id, cropBitmap = crop, cropSha256 = currentRegion.asset?.sha256,
@@ -40,7 +45,7 @@ private object RegionPreviewFixture {
 }
 
 @PreviewTest
-@Preview(name = "16_region_editor_sample", widthDp = 412, heightDp = 915, locale = "zh-rCN", showBackground = true)
+@Preview(name = "16_region_editor_sample", widthDp = 320, heightDp = 640, fontScale = 1.3f, locale = "zh-rCN", showBackground = true)
 @Composable
 fun RegionEditorSamplePreview() {
     val bitmap = remember { ShellPreviewFixture.bitmap(1) }
@@ -48,7 +53,7 @@ fun RegionEditorSamplePreview() {
 }
 
 @PreviewTest
-@Preview(name = "17_region_actual_crop_sample", widthDp = 412, heightDp = 915, locale = "zh-rCN", showBackground = true)
+@Preview(name = "17_region_actual_crop_sample", widthDp = 320, heightDp = 640, fontScale = 1.3f, locale = "zh-rCN", showBackground = true)
 @Composable
 fun RegionActualCropSamplePreview() {
     val bitmap = remember { ShellPreviewFixture.bitmap(1) }
@@ -57,7 +62,7 @@ fun RegionActualCropSamplePreview() {
 }
 
 @PreviewTest
-@Preview(name = "18_region_stale_landscape_sample", widthDp = 915, heightDp = 412, locale = "zh-rCN", showBackground = true)
+@Preview(name = "18_region_stale_landscape_sample", widthDp = 740, heightDp = 480, locale = "zh-rCN", showBackground = true)
 @Composable
 fun RegionStaleLandscapeSamplePreview() {
     val bitmap = remember { ShellPreviewFixture.bitmap(1) }

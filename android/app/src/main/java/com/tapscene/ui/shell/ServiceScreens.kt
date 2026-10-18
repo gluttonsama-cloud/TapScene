@@ -219,11 +219,16 @@ fun DeliveryCheckScreen(
                     Button(shape = RoundedCornerShape(8.dp), onClick = { onIssue(firstIssue) }, modifier = Modifier.heightIn(min = 48.dp)) { Text("去修正") }
                 }
                 issues.forEach { issue ->
-                    val stepTitle = project?.steps?.firstOrNull { it.id == issue.stepId }?.title
+                    val stepIndex = project?.steps?.indexOfFirst { it.id == issue.stepId } ?: -1
+                    val step = project?.steps?.getOrNull(stepIndex)
+                    val regionIndex = step?.regions?.sortedWith(compareBy({ it.zIndex }, { it.id }))
+                        ?.indexOfFirst { it.id == issue.regionId } ?: -1
+                    val targetLabel = step?.let { "步骤 ${(stepIndex + 1).toString().padStart(2, '0')} · ${it.title}" +
+                        if (regionIndex >= 0) " · 区域 ${regionIndex + 1}" else "" }
                     ShellDivider()
                     ShellActionRow(
                         title = issue.message,
-                        subtitle = stepTitle?.let { "步骤：$it" } ?: "项目结构",
+                        subtitle = targetLabel ?: "项目结构",
                         onClick = { onIssue(issue) },
                     )
                 }

@@ -14,7 +14,7 @@ import com.tapscene.ui.ProjectWorkspace
 fun DeliveryEndingRoutePreview() {
     val original = ShellPreviewFixture.authoredProject
     val first = original.steps[0].copy(hotspots = emptyList())
-    val second = original.steps[1].copy(nextAction = null,
+    val second = original.steps[1].copy(title = first.title, nextAction = null,
         hotspots = original.steps[1].hotspots.map { it.copy(targetStepId = first.id) })
     val snapshot = original.copy(project = original.project.copy(stepCount = 2), steps = listOf(first, second))
     TapSceneTheme {

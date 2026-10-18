@@ -293,8 +293,10 @@ class DeliveryIssueNavigationHostTest {
         compose.onAllNodesWithText(endingIssue(target.title)).assertCountEquals(2)
         compose.onNodeWithText("去修正").assertIsEnabled()
         compose.onNodeWithText("生成待复核成品").performScrollTo().assertIsNotEnabled()
-        // Choose the second same-title issue, not the first matching title or the start step.
-        compose.onAllNodesWithText(endingIssue(target.title))[1].performScrollTo().assertIsDisplayed().performClick()
+        // Use the visible storyboard number, not a duplicate-message position or hidden ID.
+        val targetNumber = (before.steps.indexOfFirst { it.id == target.id } + 1).toString().padStart(2, '0')
+        compose.onNode(hasText(endingIssue(target.title)) and hasText("步骤 $targetNumber · ${target.title}"))
+            .performScrollTo().assertIsDisplayed().performClick()
         waitFor("名称与讲解")
         awaitIdle()
         assertEquals(ProjectRoute.EDIT, projects.state.value.route)
@@ -501,14 +503,20 @@ class DeliveryIssueNavigationHostTest {
         // A fresh issue click must apply its own ID rather than reuse that selection.
         compose.runOnIdle { regionState.value = com.tapscene.ui.RegionUiState(
             projectId = projectId, stepId = target.id, snapshot = before, selectedId = target.regions[0].id) }
-        // Choose the second identical issue, not the first matching title or region name.
-        compose.onAllNodesWithText(missingMessage)[1].performScrollTo().performClick()
+        // The visible full-object ordinal remains distinct from the remaining-issue position.
+        val targetNumber = (before.steps.indexOfFirst { it.id == target.id } + 1).toString().padStart(2, '0')
+        val chosenNumber = target.regions.sortedWith(compareBy({ it.zIndex }, { it.id })).indexOfFirst { it.id == chosen.id } + 1
+        val targetContext = "步骤 $targetNumber · 区域 $chosenNumber"
+        val chosenIssueLabel = "步骤 $targetNumber · ${target.title} · 区域 $chosenNumber"
+        compose.onNode(hasText(missingMessage) and hasText(chosenIssueLabel)).performScrollTo().performClick()
         waitFor("可见区域")
         awaitIdle()
         assertEquals(ProjectRoute.STEPS, projects.state.value.route)
         assertEquals(projectId, regions.state.value.projectId)
         assertEquals(target.id, regions.state.value.stepId)
         assertEquals(chosen.id, regions.state.value.selectedId)
+        compose.onNodeWithText(targetContext).assertIsDisplayed()
+        compose.onNodeWithText("$chosenNumber · ${chosen.name}").assertIsSelected()
         assertNull(regions.state.value.cropBitmap)
         assertEquals(before, store.readProject(projectId))
         assertEquals(filesBefore, savedFiles())
@@ -516,6 +524,7 @@ class DeliveryIssueNavigationHostTest {
         waitForEnabled("确认实际裁片已复核")
         awaitIdle()
         compose.onNodeWithContentDescription("待检查的实际区域 PNG，未叠加标记或锚点").assertIsDisplayed()
+        compose.onNodeWithText(targetContext).assertIsDisplayed()
         val generated = checkNotNull(store.readProject(projectId))
         val generatedRegion = generated.steps.single { it.id == target.id }.regions.single { it.id == chosen.id }
         val cropAsset = checkNotNull(generatedRegion.asset)
@@ -564,6 +573,8 @@ class DeliveryIssueNavigationHostTest {
         assertEquals(projectId, projects.state.value.project?.project?.id)
         assertEquals(listOf(unreviewedMessage, missingMessage, staleMessage), projects.state.value.issues.map { it.message })
         compose.onAllNodesWithText(missingMessage).assertCountEquals(1)
+        compose.onNodeWithText(chosenIssueLabel).assertDoesNotExist()
+        compose.onNodeWithText("步骤 $targetNumber · ${target.title} · 区域 1").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText(unreviewedMessage).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText(staleMessage).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("生成待复核成品").performScrollTo().assertIsNotEnabled()
