@@ -1128,10 +1128,13 @@ class ProjectStore(context: Context) {
         } }
     }
 
-    fun renameProject(projectId: String, title: String, goal: String? = null): ProjectSnapshot {
+    fun renameProject(projectId: String, title: String, goal: String? = null, expectedRevision: Long? = null): ProjectSnapshot {
         val cleanTitle = text(title, "项目名称", 120)
         val cleanGoal = goal?.let { text(it, "项目目标", 1_000, allowEmpty = true) }
         return edit(projectId) { db ->
+            require(expectedRevision == null || requireSnapshot(db, projectId).project.revision == expectedRevision) {
+                "项目已更新；当前输入仍保留，请取消后重新打开项目文字并核对。"
+            }
             db.update("projects", ContentValues().apply {
                 put("title", cleanTitle)
                 if (cleanGoal != null) put("goal", cleanGoal)

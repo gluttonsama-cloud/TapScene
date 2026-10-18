@@ -127,6 +127,7 @@ fun ReleaseReviewContent(
     onEditSourceStep: ((String) -> Unit)? = null,
     onBackToChecks: (() -> Unit)? = null,
     sourceHasPendingEdits: Boolean = false,
+    onEditSourceProjectText: (() -> Unit)? = null,
 ) {
     val candidate = state.candidate
     var section by rememberSaveable(candidate?.id) { mutableStateOf(initialSection.coerceIn(0, 5)) }
@@ -294,6 +295,17 @@ fun ReleaseReviewContent(
                         ShellDivider()
                         Text("开场说明", style = MaterialTheme.typography.labelLarge, color = ShellColors.Muted)
                         Text(scene.goal.ifBlank { "未填写开场说明。" }, style = MaterialTheme.typography.bodyLarge)
+                        if (onEditSourceProjectText != null) {
+                            TextButton(onClick = onEditSourceProjectText, enabled = !state.busy,
+                                modifier = Modifier.heightIn(min = 48.dp)) { Text("修改来源项目文字") }
+                            Text("修改只保存到来源草稿；这份固定候选和已封存版本仍保留原文字。",
+                                style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                        }
+                        if (currentDraftRevision != null && currentDraftRevision != candidate.projectRevision) {
+                            StatusNote("草稿已有修改；当前显示的仍是旧候选文字，重新生成并复核后才会进入新成品。")
+                            TextButton(onClick = onRebuild, enabled = !state.busy,
+                                modifier = Modifier.heightIn(min = 48.dp)) { Text("从当前草稿重新生成") }
+                        }
                         ShellDivider()
                         ShellLabelValue("起点", scene.states.firstOrNull { it.id == scene.startStateId }?.title ?: "起点不可用")
                         ShellLabelValue("内容摘要", candidate.contentDigest)

@@ -222,9 +222,10 @@ class ProjectWorkspace internal constructor(application: Application,
         renameProject(id, title)
     }
 
-    fun renameProject(id: String, title: String) = execute("重命名项目", editing = true) {
-        val renamed = withContext(Dispatchers.IO) { store.renameProject(id, title) }
+    fun renameProject(id: String, title: String, goal: String? = null, expectedRevision: Long? = null, onSaved: () -> Unit = {}) = execute("保存项目文字", editing = true) {
+        val renamed = withContext(Dispatchers.IO) { store.renameProject(id, title, goal, expectedRevision) }
         if (state.value.project?.project?.id == id) applyProject(renamed)
+        onSaved()
     }
 
     /** Copy the saved project only. Reading home-page drafts must never rebase or clear them. */

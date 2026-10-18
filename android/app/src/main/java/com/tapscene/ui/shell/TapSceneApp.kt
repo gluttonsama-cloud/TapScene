@@ -808,6 +808,11 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 onReviewRegion = releases::selectReviewRegion, onConfirmRegion = releases::confirmReviewRegion,
                                 editableSourceStepIds = reviewSource?.steps?.map { it.id }?.toSet().orEmpty(),
                                 sourceHasPendingEdits = reviewSourceInfo?.second == true,
+                                onEditSourceProjectText = reviewSource?.project?.takeIf { it.id == releaseState.candidate?.projectId }?.let { source -> ({
+                                    if (!unavailable && !mediaState.busy && releases.state.value.candidate?.projectId == source.id) {
+                                        projects.clearMessage(); renaming = source
+                                    }
+                                }) },
                                 onEditSourceStep = { stepId ->
                                     val candidate = releases.state.value.candidate
                                     if (candidate != null && !unavailable && !mediaState.busy &&
@@ -970,7 +975,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                             GlobalNavigation(true, { library = false }, {})
                         }
                         else -> ProjectHomeFrame({ push("record") }, requestImport, { push("settings") }, { library = true; releases.reloadLibrary() }, onImportScreenshot = requestScreenshot, onImportAi = openAiImport, onClickPlan = { push("click-plan") }) {
-                            ProjectHomeContent(state, { tab = ProjectTab.STEPS; projects.openProject(it) }, { renaming = it },
+                            ProjectHomeContent(state, { tab = ProjectTab.STEPS; projects.openProject(it) }, { projects.clearMessage(); renaming = it },
                                 { deletingProject = it }, onCopyProject = copyProject)
                         }
                     }
@@ -979,8 +984,14 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
             if (newProject) ProjectTitleDialog("新建项目", "", "", true, !state.busy, { newProject = false; importAfterCreate = false }) { title, goal ->
                 newProject = false; pages.clear(); awaitingCreatedProject = true; projects.createProject(title, goal)
             }
-            renaming?.let { item -> ProjectTitleDialog("项目名称", item.title, item.goal, false, !state.busy, { renaming = null }) { title, _ ->
-                renaming = null; projects.renameProject(item.id, title)
+            renaming?.let { item -> key(item.id) {
+                ProjectTextDialog(item.title, item.goal, !state.busy && !state.loadFailed,
+                    state.message, { if (!state.busy) renaming = null }, canDismiss = !state.busy) { title, goal ->
+                    projects.renameProject(item.id, title, goal, item.revision) {
+                        if (renaming?.id == item.id) renaming = null
+                        if (page == "review") releases.message("来源草稿已更新；固定候选仍保留原文字。请重新生成并复核；如有动画计划，先检查并保存计划。")
+                    }
+                }
             } }
             deletingProject?.let { item -> ConfirmDelete("删除“${item.title}”？",
                 "项目、${item.stepCount} 个步骤、热点、项目图片、原截图和本机文字建议将删除，无法撤销。原录屏与导出的文件保留；原录屏可在设置的本机保留素材中管理。", !state.busy,
@@ -1048,7 +1059,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                 }, confirmButton = { TextButton(onClick = { showUnsavedSteps = false }) { Text("关闭") } })
             if (projectMore) AlertDialog(onDismissRequest = { projectMore = false }, title = { Text("项目") }, text = {
                 Column {
-                    ShellActionRow("重命名", onClick = { projectMore = false; renaming = state.project?.project })
+                    ShellActionRow("项目文字", "名称与随包交付的开场说明", enabled = !unavailable && !mediaState.busy,
+                        onClick = { projectMore = false; projects.clearMessage(); renaming = state.project?.project })
                     ShellActionRow("复制项目", "复制已保存内容，独立编辑", enabled = !unavailable && !mediaState.busy,
                         onClick = { projectMore = false; state.project?.project?.id?.let(copyProject) })
                     ShellActionRow("动画计划", "保留并编辑完整访问与效果", onClick = { projectMore = false; openDraftAi() })
@@ -1058,6 +1070,39 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                 }
             }, confirmButton = { TextButton(onClick = { projectMore = false }) { Text("关闭") } })
         }
+    }
+}
+
+@Composable
+internal fun ProjectTextDialog(initialTitle: String, initialGoal: String, enabled: Boolean,
+    message: String? = null, onDismiss: () -> Unit, canDismiss: Boolean = true, onConfirm: (String, String) -> Unit) {
+    var name by rememberSaveable { mutableStateOf(initialTitle) }
+    var goal by rememberSaveable { mutableStateOf(initialGoal) }
+    val nameLength = name.trim().length
+    val goalLength = goal.trim().length
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("项目文字") }, text = {
+        ProjectTextFields(name, goal, { name = it }, { goal = it }, enabled, message)
+    }, confirmButton = { TextButton(onClick = { onConfirm(name.trim(), goal.trim()) },
+        enabled = enabled && nameLength in 1..120 && goalLength <= 1_000) { Text("保存") } },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = canDismiss) { Text("取消") } })
+}
+
+/** The actual dialog body is also rendered directly by Layoutlib, which omits popup windows. */
+@Composable
+internal fun ProjectTextFields(name: String, goal: String, onName: (String) -> Unit, onGoal: (String) -> Unit,
+    enabled: Boolean, message: String? = null) {
+    val nameLength = name.trim().length
+    val goalLength = goal.trim().length
+    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedTextField(name, onName, label = { Text("项目名称") }, enabled = enabled, singleLine = true,
+                modifier = Modifier.fillMaxWidth(), isError = nameLength > 120,
+                supportingText = { Text("$nameLength / 120") })
+            OutlinedTextField(goal, onGoal, label = { Text("开场说明（选填）") }, enabled = enabled,
+                modifier = Modifier.fillMaxWidth(), minLines = 2, maxLines = 5, isError = goalLength > 1_000,
+                supportingText = { Text("$goalLength / 1000 · 观看者会看到这段文字") })
+            Text("保存只更新草稿。固定候选及已封存版本保留原文字，须重新生成并复核。",
+                style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+            message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
     }
 }
 

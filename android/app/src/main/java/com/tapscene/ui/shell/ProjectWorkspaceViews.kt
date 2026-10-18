@@ -194,7 +194,7 @@ private fun ProjectRow(
 /** Production project menu, also exercised by the small-screen Layoutlib previews. */
 @Composable
 internal fun ProjectActionsMenuContent(enabled: Boolean, onRename: () -> Unit, onCopy: () -> Unit, onDelete: () -> Unit) {
-    DropdownMenuItem(text = { Text("重命名") }, onClick = onRename,
+    DropdownMenuItem(text = { Text("项目文字") }, onClick = onRename,
         enabled = enabled, modifier = Modifier.heightIn(min = 48.dp))
     DropdownMenuItem(text = { Text("复制项目") }, onClick = onCopy,
         enabled = enabled, modifier = Modifier.heightIn(min = 48.dp))
