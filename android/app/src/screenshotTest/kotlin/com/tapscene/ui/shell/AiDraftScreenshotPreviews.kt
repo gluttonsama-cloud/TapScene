@@ -68,6 +68,13 @@ private object AiDraftPreviewFixture {
 fun AiImportReviewSmallPreview() = AiDraftSurface { ImportFixture(AiDraftPreviewFixture.importing) }
 
 @PreviewTest
+@Preview(name = "ai_import_busy_small", widthDp = 320, heightDp = 568, locale = "zh-rCN", showBackground = true)
+@Composable
+fun AiImportBusySmallPreview() = AiDraftSurface {
+    ImportFixture(AiDraftPreviewFixture.importing.copy(busy = true, stage = "恢复导入记录"))
+}
+
+@PreviewTest
 @Preview(name = "ai_import_text_landscape", widthDp = 740, heightDp = 360, locale = "zh-rCN", showBackground = true)
 @Composable
 fun AiImportTextLandscapePreview() = AiDraftSurface { ImportFixture(AiDraftPreviewFixture.importing, 1) }
@@ -89,15 +96,25 @@ fun AiImportUnknownSmallPreview() = AiDraftSurface {
 @Preview(name = "draft_ai_long_path_landscape", widthDp = 740, heightDp = 360, locale = "zh-rCN", showBackground = true)
 @Composable
 fun DraftAiLongPathLandscapePreview() = AiDraftSurface {
-    DraftAiPlanContent(AiDraftPreviewFixture.draft, DraftAiPlanCallbacks(), initialVisitId = AiDraftPreviewFixture.draftVisits.first().visitId)
+    Column {
+        DraftAiTaskNavigationNote(AiDraftPreviewFixture.draft, pendingHold = false)
+        Box(Modifier.weight(1f)) {
+            DraftAiPlanContent(AiDraftPreviewFixture.draft, DraftAiPlanCallbacks(), initialVisitId = AiDraftPreviewFixture.draftVisits.first().visitId)
+        }
+    }
 }
 
 @PreviewTest
 @Preview(name = "draft_ai_effect_detail_small", widthDp = 320, heightDp = 568, locale = "zh-rCN", showBackground = true)
 @Composable
 fun DraftAiEffectDetailSmallPreview() = AiDraftSurface {
-    DraftAiPlanContent(AiDraftPreviewFixture.draft, DraftAiPlanCallbacks(), initialSection = 1,
-        initialEffectId = AiDraftPreviewFixture.draftEffects.first().id)
+    Column {
+        DraftAiTaskNavigationNote(AiDraftPreviewFixture.draft, pendingHold = false)
+        Box(Modifier.weight(1f)) {
+            DraftAiPlanContent(AiDraftPreviewFixture.draft, DraftAiPlanCallbacks(), initialSection = 1,
+                initialEffectId = AiDraftPreviewFixture.draftEffects.first().id)
+        }
+    }
 }
 
 @PreviewTest
@@ -128,7 +145,7 @@ private fun ImportFixture(state: AiDraftImportUiState, section: Int = 0) {
 @Composable
 private fun AiDraftSurface(content: @Composable () -> Unit) {
     TapSceneTheme {
-        Surface {
+        Surface(color = ShellColors.Background) {
             Column(Modifier.fillMaxSize()) {
                 Text("布局样例 · 合成内容 · 非设备或触控验证", Modifier.fillMaxWidth().background(ShellColors.AccentSoft).padding(8.dp),
                     style = MaterialTheme.typography.labelSmall)

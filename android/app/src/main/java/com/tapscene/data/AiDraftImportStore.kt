@@ -190,7 +190,7 @@ class AiDraftImportStore(context: Context) {
         val review = AiDraftImportPolicy.review(prepared.scene, prepared.plan, prepared.baseline)
         return AiDraftImportPreview(session.id, requireNotNull(session.previewDigest), session.projectId, prepared.scene, prepared.plan,
             prepared.baseline?.releaseId, prepared.baseline?.title, review.issues, review.differences, review.summary, review.trustNotice,
-            expanded(prepared))
+            expanded(prepared), prepared.baseline)
     }
     private fun expanded(prepared: Prepared): Long = prepared.copies.sumOf { copy -> prepared.scene.assets.single { it.id == copy.sourceAssetId }.byteLength }
     private fun capacity(prepared: Prepared) {

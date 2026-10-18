@@ -99,6 +99,7 @@ fun MediaScreen(
     stepTitle: String? = null,
     onStepTitleChange: (String) -> Unit = {},
     onUseSuggestedTitle: (String) -> Unit = {},
+    manualTimeInputs: ManualMediaTimeInputs? = null,
     onReviewedImage: (suspend (ReviewedStepInput) -> Unit)? = null,
 ) {
     val state by workspace.state.collectAsStateWithLifecycle()
@@ -108,6 +109,8 @@ fun MediaScreen(
     var sourceMenu by remember { mutableStateOf(false) }
     var deleteDialog by remember { mutableStateOf(false) }
     var maskDialog by remember { mutableStateOf(false) }
+    val scopeProjectId = workspace.projectId
+    var rereadSourceId by remember(scopeProjectId, state.selectedId) { mutableStateOf<String?>(null) }
     val scrollState = rememberScrollState()
     val idle = !state.busy && !savePending
     val canEdit = idle && !state.unsavedEdits
@@ -138,7 +141,11 @@ fun MediaScreen(
         }
     }
     val leave: () -> Unit = {
-        if (canLeave) onBack?.invoke() else workspace.message("请等待处理完成，或先取消处理并保存修改")
+        when {
+            canLeave -> onBack?.invoke()
+            idle && state.unsavedEdits && state.selectedId != null -> rereadSourceId = state.selectedId
+            else -> workspace.message("请等待处理完成，或先取消处理并保存修改")
+        }
     }
     BackHandler(enabled = onBack != null, onBack = leave)
     val import = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -233,10 +240,8 @@ fun MediaScreen(
             }
             if (savePending) StatusNote("请在系统文件窗口选择保存位置；取消后可继续校正。")
             state.message?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = ShellColors.Accent) }
-            if (state.unsavedEdits) {
-                StatusNote("遮挡尚未保存，修改仍保留在当前画面。保存成功后才能生成成品。")
-                OutlinedButton(onClick = workspace::retryEdits, enabled = idle) { Text("重试保存遮挡") }
-            }
+            if (state.unsavedEdits) PendingMaskEditsActions(idle, workspace::retryEdits,
+                onReread = { rereadSourceId = state.selectedId })
             val selected = state.selected
             if (selected == null && !state.loadFailed) {
                 ScreenEmpty("选择要校正的素材", "手动选取录屏中的画面，按需遮挡，再确认实际输出。原片仅保留在本机私有空间。")
@@ -245,15 +250,17 @@ fun MediaScreen(
                 Text("支持 H.264 / H.265；单段不超过 3 分钟、200 MiB，按本机能力解码。",
                     style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
             }
-            if (selected != null) key(selected.source.sourceId) {
+            if (selected != null) key(workspace.projectId, selected.source.sourceId) {
                 val meta = selected.source.metadata
-                // Keep local time fields when moving between modes; they still invalidate output on edit.
-                var requestedSeconds by rememberSaveable { mutableStateOf(selected.frameTimeUs / 1_000_000f) }
+                // Only the manual shell retains these raw fields across a temporary task page.
+                // Batch review keeps local fields and still follows its actual decoded frame.
+                val times = manualTimeInputs?.takeIf { it.matches(workspace.projectId, selected.source.sourceId) }
+                    ?: rememberSaveable(saver = ManualMediaTimeInputs.Saver) {
+                        ManualMediaTimeInputs.create(workspace.projectId.orEmpty(), selected.source.sourceId, selected.frameTimeUs, meta.durationUs)
+                    }
                 LaunchedEffect(state.frame?.presentationTimeUs, batchReview) {
-                    if (batchReview) state.frame?.let { requestedSeconds = it.presentationTimeUs / 1_000_000f }
+                    if (batchReview) state.frame?.let { times.requestedSeconds = it.presentationTimeUs / 1_000_000f }
                 }
-                var start by rememberSaveable { mutableStateOf("0.000") }
-                var end by rememberSaveable { mutableStateOf(seconds(min(meta.durationUs, 3_000_000))) }
                 when (mode) {
                     ManualMediaMode.FRAME -> {
                         state.frame?.let { frame ->
@@ -261,13 +268,13 @@ fun MediaScreen(
                             Text("当前画面 ${frame.presentationTimeUs / 1000} ms · 毫秒精度",
                                 style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                         } ?: StatusNote("选择时间并手动取帧，查看这段录屏中的实际画面。")
-                        Text("取帧位置 ${seconds((requestedSeconds * 1_000_000).toLong())} 秒",
+                        Text("取帧位置 ${seconds((times.requestedSeconds * 1_000_000).toLong())} 秒",
                             style = MaterialTheme.typography.titleSmall)
-                        Slider(value = requestedSeconds, onValueChange = { requestedSeconds = it },
+                        Slider(value = times.requestedSeconds, onValueChange = { times.requestedSeconds = it },
                             valueRange = 0f..(meta.durationUs / 1_000_000f).coerceAtLeast(0.001f), enabled = canEdit,
                             modifier = Modifier.semantics { contentDescription = "录屏取帧时间" })
                         OutlinedButton(onClick = {
-                            val time = (requestedSeconds * 1_000_000).toLong()
+                            val time = (times.requestedSeconds * 1_000_000).toLong()
                             if (batchReview) workspace.prepareCandidateImage(selected.source.sourceId, time, requireNotNull(reviewItemId)) else workspace.takeFrame(time)
                         },
                             enabled = canEdit, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("手动取这一帧") }
@@ -304,15 +311,15 @@ fun MediaScreen(
                         Text("每段最多 10 秒。遮挡固定覆盖整段，请覆盖敏感内容的完整运动范围；输出移除全部原音轨。",
                             style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            OutlinedTextField(value = start, onValueChange = { start = it; workspace.invalidateCandidate() },
+                            OutlinedTextField(value = times.clipStart, onValueChange = { times.clipStart = it; workspace.invalidateCandidate() },
                                 label = { Text("起点（秒）") }, singleLine = true, enabled = canEdit,
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
-                            OutlinedTextField(value = end, onValueChange = { end = it; workspace.invalidateCandidate() },
+                            OutlinedTextField(value = times.clipEnd, onValueChange = { times.clipEnd = it; workspace.invalidateCandidate() },
                                 label = { Text("终点（秒）") }, singleLine = true, enabled = canEdit,
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
                         }
-                        val startUs = parseSeconds(start)
-                        val endUs = parseSeconds(end)
+                        val startUs = parseSeconds(times.clipStart)
+                        val endUs = parseSeconds(times.clipEnd)
                         val valid = startUs != null && endUs != null && startUs >= 0 && endUs > startUs &&
                             endUs <= meta.durationUs && endUs - startUs <= 10_000_000
                         Button(onClick = { workspace.makeVideo(requireNotNull(startUs), requireNotNull(endUs)) },
@@ -399,6 +406,17 @@ fun MediaScreen(
             Spacer(Modifier.height(4.dp))
         }
     }
+    if (rereadSourceId != null && state.unsavedEdits) AlertDialog(
+        onDismissRequest = { if (idle) rereadSourceId = null },
+        title = { Text("重新读取遮挡？") },
+        text = { Text("上次保存可能已写入。重新读取会保留实际已保存的遮挡，放弃尚未写入的本轮修改；随后需要重新取帧、生成并复核输出。读取失败会继续保留当前修改。") },
+        confirmButton = { TextButton(onClick = {
+            val sourceId = rereadSourceId
+            rereadSourceId = null
+            if (sourceId != null) workspace.rereadPendingEdits(sourceId, scopeProjectId)
+        }, enabled = idle) { Text("重新读取") } },
+        dismissButton = { TextButton(onClick = { rereadSourceId = null }, enabled = idle) { Text("保留当前修改") } },
+    )
     if (deleteDialog) AlertDialog(onDismissRequest = { deleteDialog = false },
         title = { Text("删除 App 中的素材副本？") },
         text = { Text("只删除 TapScene 私有空间中的这段录屏副本及取帧、遮挡记录、本机文字建议，无法撤销。系统原文件和已导出文件不受影响；仍被项目步骤引用的素材会保留。") },
@@ -458,6 +476,17 @@ internal fun FrameEditor(bitmap: Bitmap, masks: List<OpaqueMask>, enabled: Boole
             if (from != null && to != null) drawRect(Color.Black,
                 Offset(min(from.x, to.x), min(from.y, to.y)), Size(abs(from.x - to.x), abs(from.y - to.y)))
         }
+    }
+}
+
+@Composable
+internal fun PendingMaskEditsActions(enabled: Boolean, onRetry: () -> Unit, onReread: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        StatusNote("遮挡保存结果未确认，当前修改仍保留。可重试保存，或重新读取实际已保存记录；未确认前不能生成成品。")
+        OutlinedButton(onClick = onRetry, enabled = enabled,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("重试保存遮挡") }
+        TextButton(onClick = onReread, enabled = enabled,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("重新读取已保存遮挡") }
     }
 }
 

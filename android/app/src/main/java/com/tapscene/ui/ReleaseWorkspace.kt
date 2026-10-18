@@ -67,7 +67,52 @@ data class AiPackageConfiguration(
     val fromDraft: Boolean = false,
 ) {
     fun resolve(): RenderPlan = RenderPlan.build(scene, width, height, visits, effects)
+
+    /** Structural comparison also works for an unfinished path; resolving it would lose that guard. */
+    internal fun sameAnimation(other: AiPackageConfiguration): Boolean =
+        scene.releaseId == other.scene.releaseId && fromDraft == other.fromDraft &&
+            width == other.width && height == other.height && visits.size == other.visits.size &&
+            visits.zip(other.visits).all { (a, b) ->
+                a.visitId == b.visitId && a.stateId == b.stateId &&
+                    a.selectedEdgeId == b.selectedEdgeId && a.holdFrames == b.holdFrames
+            } && effects.size == other.effects.size && effects.zip(other.effects).all { (a, b) ->
+                a.type == b.type && a.visitId == b.visitId && a.startFrame == b.startFrame &&
+                    a.durationFrames == b.durationFrames && a.hotspotId == b.hotspotId &&
+                    a.regionId == b.regionId && a.text == b.text &&
+                    (if (a.rect == null || b.rect == null) a.rect == null && b.rect == null else
+                        a.rect.x == b.rect.x && a.rect.y == b.rect.y &&
+                            a.rect.width == b.rect.width && a.rect.height == b.rect.height)
+            }
+
+    fun withAnnotation(visitId: String, text: String): AiPackageConfiguration {
+        check(!fromDraft) { "此计划随草稿封存，请回项目的动画计划调整后重新封存。" }
+        check(text.isNotBlank() && text.length <= 240) { "标注须为 1 至 240 字的非空白文字。" }
+        val visit = visits.singleOrNull { it.visitId == visitId } ?: error("播放顺序中没有这一步。")
+        val annotations = effects.filter { it.visitId == visitId && it.type == "annotation" }
+        check(annotations.size <= 1) { "此访问有多条标注，无法单独调整。" }
+        val existing = annotations.singleOrNull()
+        if (existing != null) {
+            val updated = RenderPlan.Effect(existing.type, existing.visitId, existing.startFrame, existing.durationFrames,
+                existing.hotspotId, existing.regionId, text, existing.rect)
+            return copy(effects = effects.map { if (it === existing) updated else it })
+        }
+        check(effects.size < RenderPlan.MAX_EFFECTS) { "最多 256 个效果。" }
+        return copy(effects = effects + RenderPlan.Effect("annotation", visitId, 0, visit.holdFrames,
+            null, null, text, ViewerScene.Rect(.08, .08, .84, .14)))
+    }
+
+    fun withoutAnnotation(visitId: String): AiPackageConfiguration {
+        check(!fromDraft) { "此计划随草稿封存，请回项目的动画计划调整后重新封存。" }
+        check(visits.singleOrNull { it.visitId == visitId } != null) { "播放顺序中没有这一步。" }
+        val annotations = effects.filter { it.visitId == visitId && it.type == "annotation" }
+        check(annotations.size <= 1) { "此访问有多条标注，无法单独调整。" }
+        val existing = annotations.singleOrNull() ?: return this
+        return copy(effects = effects.filterNot { it === existing })
+    }
 }
+
+/** A deliberate delivery choice, independent from the last seal operation's result. */
+data class DeliverySelection(val releaseId: String, val contentDigest: String, val projectId: String)
 
 data class ReleaseUiState(
     val releases: List<ReleaseSummary> = emptyList(),
@@ -84,12 +129,19 @@ data class ReleaseUiState(
     val stage: String? = null,
     val message: String? = null,
     val lastSealedId: String? = null,
+    val deliverySelection: DeliverySelection? = null,
     val lastImportedId: String? = null,
     val exportFile: File? = null,
     val pendingShare: OfflineShare? = null,
     val shareChooserOpen: Boolean = false,
     val aiConfiguration: AiPackageConfiguration? = null,
-)
+    /** Changes since the last confirmed load/save; cancellation may leave disk outcome unknown. */
+    val aiConfigurationChanged: Boolean = false,
+) {
+    val deliveryRelease: ReleaseSummary? get() = deliverySelection?.let { selected ->
+        releases.singleOrNull { it.id == selected.releaseId && it.contentDigest == selected.contentDigest && it.origin == "local" }
+    }
+}
 
 /**
  * Fixed candidate/release IO is independent from mutable draft state. Only validated derived
@@ -106,11 +158,15 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     private var playerGeneration = 0L
     private var reviewVideoTask: Job? = null
     private var reviewRunSequence = 0L
+    private var aiConfigurationBaseline: AiPackageConfiguration? = null
     private var exportDigest: String? = null
     private var exportLength: Long? = null
     private var pendingExportFile: File? = null
     private var savePickerPending = false
     private var sharePreparationActive = false
+    private var deliverySelectionActive = false
+    private var deliveryExportActive = false
+    private var exportDeliverySelection: DeliverySelection? = null
     private var cancellationNote: String? = null
 
     init { reloadLibrary() }
@@ -118,7 +174,10 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     fun reloadLibrary() = execute("读取演示库") {
         val items = withContext(Dispatchers.IO) { store.listReleases() }
         val candidates = withContext(Dispatchers.IO) { store.listCandidates() }
-        mutableState.update { it.copy(releases = items, pendingCandidates = candidates) }
+        mutableState.update { current -> current.copy(releases = items, pendingCandidates = candidates,
+            deliverySelection = current.deliverySelection?.takeIf { selected -> items.any {
+                it.id == selected.releaseId && it.contentDigest == selected.contentDigest && it.origin == "local"
+            } }) }
     }
 
     fun openReview(projectId: String) = execute("读取待复核成品") {
@@ -296,7 +355,8 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         execute("重检并封存固定版本") {
             val sealed = withContext(Dispatchers.IO) { store.seal(candidate.id, candidate.contentDigest) }
             val items = withContext(Dispatchers.IO) { store.listReleases() }
-            mutableState.update { it.copy(releases = items, lastSealedId = sealed.id, candidate = null,
+            mutableState.update { it.copy(releases = items, lastSealedId = sealed.id,
+                deliverySelection = DeliverySelection(sealed.id, sealed.contentDigest, candidate.projectId), candidate = null,
                 reviewStateId = null, reviewBitmap = null, reviewRegionId = null, reviewRegionBitmap = null, player = null, playerBitmap = null) }
             message("版本已封存，可保存离线观看包")
         }
@@ -484,7 +544,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     private fun launchPlayerWork(block: suspend () -> Unit) {
         playerTask?.cancel()
         val generation = ++playerGeneration
-        mutableState.update { it.copy(busy = true, stage = "读取安全画面") }
+        mutableState.update { it.copy(busy = true, stage = "读取安全画面", message = null) }
         playerTask = viewModelScope.launch {
             try { block() }
             catch (cancelled: CancellationException) { throw cancelled }
@@ -521,21 +581,62 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
             player = it.player?.takeUnless { player -> player.candidateId == null && player.scene.releaseId == id },
             playerBitmap = it.playerBitmap.takeUnless { _ -> it.player?.scene?.releaseId == id },
             lastSealedId = it.lastSealedId?.takeUnless { selected -> selected == id },
+            deliverySelection = it.deliverySelection?.takeUnless { selected -> selected.releaseId == id },
             aiConfiguration = it.aiConfiguration?.takeUnless { config -> config.scene.releaseId == id }) }
     }
 
-    fun prepareExport(id: String) = execute("生成并验证离线观看包") {
+    /** Project entry must not inherit another project's previous delivery choice. */
+    fun openProjectDelivery(projectId: String) {
+        leaveDeliveryPage()
+        mutableState.update { it.copy(deliverySelection = it.deliverySelection?.takeIf { selected -> selected.projectId == projectId }) }
+    }
+
+    /** Read retained sealed provenance; source projects may have been renamed or deleted. */
+    fun selectDeliveryRelease(id: String): Boolean {
+        if (state.value.busy || savePickerPending || state.value.shareChooserOpen || state.value.pendingShare != null || state.value.exportFile != null) return false
+        mutableState.update { it.copy(deliverySelection = null) }
+        execute("读取封存版本") {
+            deliverySelectionActive = true
+            try {
+                val summary = state.value.releases.singleOrNull { it.id == id && it.origin == "local" }
+                    ?: error("请选择已复核封存的本机版本。")
+                val binding = withContext(Dispatchers.IO) { store.readHostedRelease(id, summary.contentDigest) }
+                currentCoroutineContext().ensureActive()
+                mutableState.update { it.copy(deliverySelection = DeliverySelection(id, summary.contentDigest, binding.projectId)) }
+            } finally { deliverySelectionActive = false }
+        }
+        return true
+    }
+
+    fun prepareDeliveryExport() {
+        val selection = state.value.deliverySelection ?: return
+        if (state.value.deliveryRelease == null) return
+        prepareExport(selection.releaseId, selection)
+    }
+
+    fun prepareExport(id: String) = prepareExport(id, null)
+
+    private fun prepareExport(id: String, selection: DeliverySelection?) = execute("生成并验证离线观看包") {
         exportDigest = null; exportLength = null; pendingExportFile = null
+        exportDeliverySelection = selection
+        deliveryExportActive = selection != null
         mutableState.update { it.copy(exportFile = null) }
-        val file = withContext(Dispatchers.IO) { store.exportRelease(id) }
-        val digest = withContext(Dispatchers.IO) { ViewerPackageCodec.sha256(file) }
-        exportDigest = digest; exportLength = file.length()
-        mutableState.update { it.copy(exportFile = file) }
+        try {
+            if (selection != null) withContext(Dispatchers.IO) { store.readHostedRelease(id, selection.contentDigest) }
+            val file = withContext(Dispatchers.IO) { store.exportRelease(id) }
+            val digest = withContext(Dispatchers.IO) { ViewerPackageCodec.sha256(file) }
+            currentCoroutineContext().ensureActive()
+            check(selection == null || (state.value.deliverySelection == selection && state.value.deliveryRelease != null)) {
+                "交付版本已改变，请重新选择保存。"
+            }
+            exportDigest = digest; exportLength = file.length()
+            mutableState.update { it.copy(exportFile = file) }
+        } finally { deliveryExportActive = false }
     }
 
     fun prepareOfflineShare(id: String) {
         val selected = state.value.releases.singleOrNull { it.id == id && it.origin == "local" }
-        if (selected == null || state.value.lastSealedId != id) {
+        if (selected == null || state.value.deliveryRelease != selected) {
             message("请选择当前已复核封存的本机版本。")
             return
         }
@@ -556,14 +657,20 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         if (current.busy || current.shareChooserOpen || savePickerPending) return null
         val share = current.pendingShare ?: return null
         mutableState.update { it.copy(pendingShare = null) }
-        if (visibleReleaseId != share.releaseId || current.lastSealedId != share.releaseId ||
-            current.releases.none { it.id == share.releaseId && it.origin == "local" }) return null
+        if (visibleReleaseId != share.releaseId || current.deliveryRelease?.id != share.releaseId) return null
         if (System.currentTimeMillis() >= share.expiresAt) {
             message("分享副本已过期，请重新点击系统分享。")
             return null
         }
         mutableState.update { it.copy(shareChooserOpen = true) }
         return share
+    }
+
+    /** Cancel only this page's preparation, never library/AI exports or a file already being saved. */
+    fun leaveDeliveryPage() {
+        if (deliverySelectionActive || deliveryExportActive) task?.cancel()
+        if (deliveryExportActive || (exportDeliverySelection != null && state.value.exportFile != null)) cancelExportPicker()
+        leaveSharePage()
     }
 
     fun leaveSharePage() {
@@ -582,16 +689,23 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     fun openAiPackage(id: String) = execute("读取固定版本与动画配置") {
-        mutableState.update { it.copy(aiConfiguration = null) }
+        aiConfigurationBaseline = null
+        mutableState.update { it.copy(aiConfiguration = null, aiConfigurationChanged = false) }
         val scene = withContext(Dispatchers.IO) { store.loadRelease(id) }
         val saved = withContext(Dispatchers.IO) { store.readAiPlan(id) }
         val fromDraft = withContext(Dispatchers.IO) { store.hasDraftAiPlan(id) }
         val config = if (saved == null) AiPackageConfiguration(scene, listOf(RenderPlan.Visit(java.util.UUID.randomUUID().toString(), scene.startStateId, null, 90)))
             else AiPackageConfiguration(scene, saved.visits, saved.effects, saved.width, saved.height, fromDraft)
-        mutableState.update { it.copy(aiConfiguration = config) }
+        aiConfigurationBaseline = config
+        mutableState.update { it.copy(aiConfiguration = config, aiConfigurationChanged = false) }
     }
 
-    fun clearAiConfiguration() { if (!state.value.busy && !savePickerPending) mutableState.update { it.copy(aiConfiguration = null) } }
+    fun clearAiConfiguration() {
+        if (!state.value.busy && !savePickerPending) {
+            aiConfigurationBaseline = null
+            mutableState.update { it.copy(aiConfiguration = null, aiConfigurationChanged = false) }
+        }
+    }
 
     fun chooseAiEdge(edgeId: String) = editAi { config ->
         val current = config.visits.last()
@@ -620,6 +734,8 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         check(index >= 0) { "播放顺序中没有这一步。" }
         config.copy(visits = config.visits.map { if (it.visitId == visitId) RenderPlan.Visit(it.visitId, it.stateId, it.selectedEdgeId, frames) else it })
     }
+    fun applyAiAnnotation(visitId: String, text: String) = editAi { it.withAnnotation(visitId, text) }
+    fun removeAiAnnotation(visitId: String) = editAi { it.withoutAnnotation(visitId) }
     fun toggleAiEffect(visitId: String, type: String, regionId: String? = null, text: String? = null) = editAi { config ->
         val visit = config.visits.single { it.visitId == visitId }
         val existing = config.effects.any { it.visitId == visitId && it.type == type && it.regionId == regionId }
@@ -648,21 +764,33 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         if (state.value.busy || savePickerPending) return
         val config = state.value.aiConfiguration ?: return
         if (config.fromDraft) { message("此计划随草稿封存，请回项目的动画计划调整后重新封存。"); return }
-        try { mutableState.update { it.copy(aiConfiguration = change(config), exportFile = null, message = null) } }
+        try {
+            val changed = change(config)
+            val differs = aiConfigurationBaseline?.let { !changed.sameAnimation(it) } ?: true
+            mutableState.update { it.copy(aiConfiguration = changed, aiConfigurationChanged = differs, exportFile = null, message = null) }
+        }
         catch (error: IllegalStateException) { message(error.message ?: "动画配置无效。") }
         catch (error: IllegalArgumentException) { message(error.message ?: "动画配置无效。") }
     }
     fun prepareAiExport() = execute("生成并回读验证 AI 数据包") {
         val config = state.value.aiConfiguration ?: error("请先选择固定版本。")
         val plan = config.resolve()
-        exportDigest = null; exportLength = null; pendingExportFile = null
+        exportDigest = null; exportLength = null; pendingExportFile = null; exportDeliverySelection = null
         mutableState.update { it.copy(exportFile = null) }
         val file = withContext(Dispatchers.IO) { store.exportAiRelease(config.scene.releaseId, plan) }
+        // The store has confirmed its local configuration write, before hashing or the system picker.
+        aiConfigurationBaseline = config
+        mutableState.update { it.copy(aiConfigurationChanged = false) }
         exportDigest = withContext(Dispatchers.IO) { ViewerPackageCodec.sha256(file) }; exportLength = file.length()
         mutableState.update { it.copy(exportFile = file) }
     }
 
-    fun beginExportPicker(): Boolean {
+    fun beginExportPicker(deliveryPageVisible: Boolean = true): Boolean {
+        val selected = exportDeliverySelection
+        if (selected != null && (!deliveryPageVisible || state.value.deliverySelection != selected || state.value.deliveryRelease == null)) {
+            cancelExportPicker()
+            return false
+        }
         if (state.value.busy || savePickerPending || state.value.shareChooserOpen || state.value.pendingShare != null || state.value.exportFile == null || exportDigest == null) return false
         savePickerPending = true
         pendingExportFile = state.value.exportFile
@@ -671,7 +799,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     fun cancelExportPicker() {
-        savePickerPending = false; exportDigest = null; exportLength = null; pendingExportFile = null
+        savePickerPending = false; exportDigest = null; exportLength = null; pendingExportFile = null; exportDeliverySelection = null
         mutableState.update { it.copy(exportFile = null) }
     }
 
@@ -766,7 +894,26 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         history = next.history, ended = next.ended, endLabel = next.endLabel, endEdgeId = next.endEdgeId,
         matchingHotspotIds = emptyList(), visitedEdgeIds = next.visitedEdgeIds, completedFromStart = next.completedFromStart)
 
-    fun cancel() { task?.cancel(); mutableState.update { it.copy(pendingShare = null) } }
+    fun cancel() {
+        if (playerTask?.isActive == true) {
+            // The visible busy action belongs to the player, not the independent package task.
+            // Keep an already displayed visit; only abandon a transition that has not advanced.
+            cancelPlayerWork()
+            mutableState.update { current ->
+                val player = current.player
+                current.copy(player = if (player?.traversal()?.pendingEdgeId != null)
+                    player.applyTraversal(player.traversal().cancelTransition(player.scene)).copy(video = null)
+                    else player,
+                    message = if (player?.candidateId != null)
+                        "已取消处理，保留当前画面；请点重来后继续试走。"
+                    else "已取消读取，保留当前画面")
+            }
+            return
+        }
+        if (deliveryExportActive || (exportDeliverySelection != null && state.value.exportFile != null)) cancelExportPicker()
+        task?.cancel()
+        mutableState.update { it.copy(pendingShare = null) }
+    }
     fun message(text: String) { mutableState.update { it.copy(message = text) } }
     fun clearMessage() { mutableState.update { it.copy(message = null) } }
 
@@ -792,10 +939,15 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
                 // A cancellation can arrive after an atomic commit. Re-read library truth without
                 // deleting the successfully published version or manufacturing a success message.
                 withContext(NonCancellable + Dispatchers.IO) {
-                    runCatching { store.listReleases() }.getOrNull()?.let { items -> mutableState.update { it.copy(releases = items) } }
-                    runCatching { store.listCandidates() }.getOrNull()?.let { candidates -> mutableState.update { it.copy(pendingCandidates = candidates) } }
+                    try {
+                        runCatching { store.listReleases() }.getOrNull()?.let { items -> mutableState.update { it.copy(releases = items) } }
+                        runCatching { store.listCandidates() }.getOrNull()?.let { candidates -> mutableState.update { it.copy(pendingCandidates = candidates) } }
+                    } finally {
+                        // Returning to a cancelled dispatcher can throw again. Clear inside this
+                        // barrier, last: busy prevents another operation from starting before here.
+                        mutableState.update { it.copy(busy = false, stage = null) }
+                    }
                 }
-                mutableState.update { it.copy(busy = false, stage = null) }
             }
         }
     }

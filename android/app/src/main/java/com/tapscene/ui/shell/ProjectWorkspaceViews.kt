@@ -22,6 +22,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
@@ -35,6 +36,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -64,6 +66,7 @@ import com.tapscene.data.ProjectSummary
 import com.tapscene.data.SourceDraft
 import com.tapscene.data.StepAsset
 import com.tapscene.ui.ProjectUiState
+import com.tapscene.ui.ProjectIssueCorrection
 import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
@@ -194,7 +197,7 @@ private fun ProjectRow(
 /** Production project menu, also exercised by the small-screen Layoutlib previews. */
 @Composable
 internal fun ProjectActionsMenuContent(enabled: Boolean, onRename: () -> Unit, onCopy: () -> Unit, onDelete: () -> Unit) {
-    DropdownMenuItem(text = { Text("重命名") }, onClick = onRename,
+    DropdownMenuItem(text = { Text("项目文字") }, onClick = onRename,
         enabled = enabled, modifier = Modifier.heightIn(min = 48.dp))
     DropdownMenuItem(text = { Text("复制项目") }, onClick = onCopy,
         enabled = enabled, modifier = Modifier.heightIn(min = 48.dp))
@@ -204,6 +207,7 @@ internal fun ProjectActionsMenuContent(enabled: Boolean, onRename: () -> Unit, o
 
 /** Never resolves source paths. [stepThumbnail] may only return the step's derived PNG. */
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 fun StoryboardContent(
     state: ProjectUiState,
     onOpenStep: (String) -> Unit,
@@ -216,6 +220,8 @@ fun StoryboardContent(
     onBuildPath: (() -> Unit)? = null,
     onAiPlan: (() -> Unit)? = null,
     onCopyStep: (String) -> Unit = {},
+    connectionRepairStepId: String? = null,
+    onReturnToChecks: (() -> Unit)? = null,
 ) {
     val snapshot = state.project
     if (snapshot == null) {
@@ -225,8 +231,17 @@ fun StoryboardContent(
         return
     }
     val editable = !state.busy && !state.loadFailed
+    val listState = rememberLazyListState()
+    val repairStep = snapshot.steps.firstOrNull { it.id == connectionRepairStepId }
+    val unreachableIds = state.issues.filter { it.correction == ProjectIssueCorrection.CONNECTION }.mapNotNull { it.stepId }.toSet()
+    val validStart = snapshot.steps.any { it.id == snapshot.project.startStepId }
+    var showConnectionSources by rememberSaveable(snapshot.project.id, connectionRepairStepId) { mutableStateOf(false) }
+    LaunchedEffect(snapshot.project.id, connectionRepairStepId) {
+        val index = snapshot.steps.indexOfFirst { it.id == connectionRepairStepId }
+        if (index >= 0) listState.scrollToItem(index + 1)
+    }
     LazyColumn(
-        modifier = modifier.fillMaxSize(),
+        modifier = modifier.fillMaxSize(), state = listState,
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
@@ -271,6 +286,9 @@ fun StoryboardContent(
             }
         }
         itemsIndexed(snapshot.steps, key = { _, step -> step.id }) { index, step ->
+            if (step.id == repairStep?.id && onReturnToChecks != null) ConnectionRepairNotice(
+                step.title, index + 1, !validStart || step.id in unreachableIds, editable,
+                { showConnectionSources = true }, onReturnToChecks)
             StoryboardStepRow(
                 step = step, index = index, snapshot = snapshot, enabled = editable,
                 hasUnsavedChanges = step.id in state.dirtyStepIds,
@@ -278,6 +296,50 @@ fun StoryboardContent(
                 onMoveStep = onMoveStep, onDeleteStep = onDeleteStep, onCopyStep = onCopyStep,
                 stepThumbnail = stepThumbnail,
             )
+        }
+    }
+    if (showConnectionSources && repairStep != null) ModalBottomSheet(onDismissRequest = { showConnectionSources = false }) {
+        ConnectionSourceChoices(snapshot, repairStep, if (validStart) unreachableIds else snapshot.steps.map { it.id }.toSet(), editable) { id ->
+            showConnectionSources = false
+            onOpenStep(id)
+        }
+    }
+}
+
+@Composable
+internal fun ConnectionRepairNotice(title: String, ordinal: Int, unresolved: Boolean, enabled: Boolean,
+    onChooseSource: () -> Unit, onReturnToChecks: () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("接入步骤 ${ordinal.toString().padStart(2, '0')} · $title", style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.primary, modifier = Modifier.semantics { heading() })
+        Text(if (unresolved) "打开一个可到达的步骤，在“热点”中添加通向本步的动作；也可通过本步更多菜单调整起点。"
+            else "此步已接入当前起点路径。", style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (unresolved) OutlinedButton(onClick = onChooseSource, enabled = enabled,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("选择接入步骤") }
+        TextButton(onClick = onReturnToChecks, enabled = enabled,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("返回交付检查") }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    }
+}
+
+@Composable
+internal fun ConnectionSourceChoices(project: ProjectSnapshot, target: ProjectStep, unreachableIds: Set<String>,
+    enabled: Boolean, onChooseSource: (String) -> Unit) {
+    val sources = project.steps.filter { it.id != target.id && it.id !in unreachableIds }
+    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("从哪一步接入", style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
+        Text("目标：${(project.steps.indexOfFirst { it.id == target.id } + 1).toString().padStart(2, '0')} ${target.title}。选择只打开来源步骤，不会更改路线。随后在“热点”添加指向本步的动作并保存。",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (sources.isEmpty()) Text("尚无可选的已连接步骤；请先在分镜中设置有效起点。",
+            style = MaterialTheme.typography.bodyMedium)
+        sources.forEach { source ->
+            val ordinal = (project.steps.indexOfFirst { it.id == source.id } + 1).toString().padStart(2, '0')
+            ShellActionRow("$ordinal ${source.title}",
+                if (source.isTerminal) "当前是终点，需先取消终点标记再添加动作。"
+                else if (source.id == project.project.startStepId) "当前起点" else "可从当前起点到达",
+                onClick = { onChooseSource(source.id) }, enabled = enabled)
         }
     }
 }
@@ -499,6 +561,8 @@ fun ProjectSourcesContent(
         item(key = "source_summary") {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 WorkspaceSectionTitle("本机原录屏", "${drafts.size} / 3 段")
+                Text("录屏合计上限：5 分钟 / 500 MiB", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (drafts.isNotEmpty()) Text(
                     "合计 ${formatSourceDuration(drafts.sumOf { it.source.metadata.durationUs })} · ${formatSourceBytes(drafts.sumOf { it.source.metadata.byteLength })}",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -546,6 +610,9 @@ internal fun SourceAddOptionsContent(
     val enabled = !busy && !loadFailed
     Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 12.dp)) {
         Text("添加素材", style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
+        Text("单段录屏最多 3 分钟、200 MiB；项目合计最多 5 分钟、500 MiB。",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 8.dp, bottom = 8.dp))
         TextButton(onClick = onRecord, enabled = enabled,
             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("手动录屏") }
         TextButton(onClick = onImportVideo, enabled = enabled && sourceCount < 3,

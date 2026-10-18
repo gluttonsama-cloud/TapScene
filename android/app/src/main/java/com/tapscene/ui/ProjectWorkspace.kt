@@ -5,6 +5,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.tapscene.data.DraftAiConfig
+import com.tapscene.data.DraftPlanProjection
 import com.tapscene.data.EditorDraftFields
 import com.tapscene.data.EditorFormKind
 import com.tapscene.data.SafeImageBinding
@@ -65,7 +67,9 @@ data class StepEditDraft(
     val conflicts: Set<String> = emptySet(),
 )
 
-data class ProjectIssue(val stepId: String?, val message: String)
+enum class ProjectIssueCorrection { STEP_EDITOR, CONNECTION, REGION, ANIMATION }
+data class ProjectIssue(val stepId: String?, val message: String,
+    val correction: ProjectIssueCorrection = ProjectIssueCorrection.STEP_EDITOR, val regionId: String? = null)
 
 /** A durable receipt is acknowledged only after the production screen has shown this result. */
 data class ProjectCopyNotice(val operationId: String, val message: String)
@@ -222,9 +226,10 @@ class ProjectWorkspace internal constructor(application: Application,
         renameProject(id, title)
     }
 
-    fun renameProject(id: String, title: String) = execute("重命名项目", editing = true) {
-        val renamed = withContext(Dispatchers.IO) { store.renameProject(id, title) }
+    fun renameProject(id: String, title: String, goal: String? = null, expectedRevision: Long? = null, onSaved: () -> Unit = {}) = execute("保存项目文字", editing = true) {
+        val renamed = withContext(Dispatchers.IO) { store.renameProject(id, title, goal, expectedRevision) }
         if (state.value.project?.project?.id == id) applyProject(renamed)
+        onSaved()
     }
 
     /** Copy the saved project only. Reading home-page drafts must never rebase or clear them. */
@@ -891,25 +896,41 @@ class ProjectWorkspace internal constructor(application: Application,
     }
 
     /** Hotspots are removed; incoming next buttons become unresolved, after UI confirmation. */
-    fun deleteStep(stepId: String) {
+    fun deleteStep(stepId: String, expectedProjectId: String? = null, expectedRevision: Long? = null) {
         val project = state.value.project ?: return
+        if (expectedProjectId != null && expectedProjectId != project.project.id ||
+            expectedRevision != null && expectedRevision != project.project.revision) {
+            message("项目内容已变化，请重新检查删除影响。")
+            return
+        }
         execute("删除步骤并更新相关动作", editing = true, afterRefresh = {
             // Even a cancelled dispatcher return can hide a successful deletion transaction.
             if (state.value.project?.project?.id == project.project.id && state.value.project?.steps?.none { it.id == stepId } == true) {
+                invalidateStaging(project.project.id to stepId)
                 drafts.remove(project.project.id to stepId)
                 pruneDeletedTargets(project.project.id, stepId)
             }
         }) {
-            invalidateStaging(project.project.id to stepId)
-            val result = draftWriteLock.withLock { withContext(Dispatchers.IO) { store.deleteStep(project.project.id, stepId) } }
-            drafts.remove(project.project.id to stepId)
+            val result = draftWriteLock.withLock {
+                val result = withContext(Dispatchers.IO) {
+                    store.deleteStep(project.project.id, stepId, expectedRevision ?: project.project.revision)
+                }
+                // Rejected confirmation must not cancel the target's pending draft staging.
+                invalidateStaging(project.project.id to stepId)
+                drafts.remove(project.project.id to stepId)
+                result
+            }
             applyProject(result.snapshot)
             // Never resurrect a just-deleted target from another step's retained dirty draft.
             pruneDeletedTargets(project.project.id, stepId)
             if (state.value.selectedStepId == stepId || state.value.route == ProjectRoute.EDIT) {
                 mutableState.update { it.copy(route = ProjectRoute.STEPS, selectedStepId = null, stepDraft = null, bitmap = null) }
             }
-            message("步骤已删除，已移除 ${result.impact.hotspotCount} 个相关热点" +
+            val newStart = result.snapshot.steps.firstOrNull { it.id == result.snapshot.project.startStepId }
+            val startMessage = if (!result.impact.wasStart) "" else if (newStart == null)
+                "；项目已没有步骤和起点"
+            else "；起点已改为步骤 ${(result.snapshot.steps.indexOf(newStart) + 1).toString().padStart(2, '0')} · ${newStart.title}"
+            message("步骤已删除，已移除 ${result.impact.hotspotCount} 个相关热点" + startMessage +
                 (if (result.impact.incomingNextActionCount > 0) "；${result.impact.incomingNextActionCount} 个下一步动作需重选目标" else "") +
                 (if (result.pendingAssetCleanupCount > 0) "；本机图片（可能含原截图）稍后继续清理" else ""))
         }
@@ -1382,7 +1403,20 @@ class ProjectWorkspace internal constructor(application: Application,
         }
     }
 
-    private fun applyProject(project: ProjectSnapshot) {
+    private suspend fun applyProject(project: ProjectSnapshot) {
+        // The saved plan belongs to this project; validation uses this exact displayed revision.
+        // A later saved plan revision is conservatively blocked until the final refresh.
+        var readinessFailed = false
+        val issues = try {
+            withContext(Dispatchers.IO) { deliveryIssues(project, store.readDraftAiConfig(project.project.id)) }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // A committed image/step must remain authoritative if this optional read fails.
+            // Unknown is never treated as an absent plan or as permission to generate.
+            readinessFailed = true
+            deliveryIssues(project) + ProjectIssue(null, "动画计划检查暂时无法完成，请重新读取项目。", ProjectIssueCorrection.ANIMATION)
+        }
         state.value.textRegions.binding?.let { binding ->
             if (project.steps.none { binding.matches(project.project, it) }) cancelTextRegions()
         }
@@ -1399,8 +1433,9 @@ class ProjectWorkspace internal constructor(application: Application,
         val selectedDraft = selectedId?.let { draftFor(project, stepsById.getValue(it)) }
         mutableState.update { old -> old.copy(project = project, selectedStepId = selectedId,
             route = if (old.route == ProjectRoute.EDIT && selectedId == null) ProjectRoute.STEPS else old.route,
-            stepDraft = selectedDraft, issues = graphIssues(project), dirtyStepIds = dirtyIds(project.project.id),
-            bitmap = if (current.project?.project?.id != project.project.id || current.selectedStepId != selectedId ||
+            stepDraft = selectedDraft, issues = issues, loadFailed = old.loadFailed || readinessFailed,
+            dirtyStepIds = dirtyIds(project.project.id),
+            bitmap = if (readinessFailed || current.project?.project?.id != project.project.id || current.selectedStepId != selectedId ||
                 current.selectedStep?.asset != selectedId?.let { stepsById[it]?.asset }) null else old.bitmap) }
     }
 
@@ -1650,6 +1685,22 @@ class ProjectWorkspace internal constructor(application: Application,
         private const val MAX_DISPLAY_PIXELS = 1080L * 2400
         private val PNG_SIGNATURE = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
 
+        /** Snapshot-level readiness only; generation still verifies the actual persisted assets. */
+        fun deliveryIssues(snapshot: ProjectSnapshot, animation: DraftAiConfig? = null): List<ProjectIssue> = graphIssues(snapshot) +
+            snapshot.steps.flatMap { step -> step.regions.mapNotNull { region ->
+                val problem = when {
+                    !region.matchesBase(step.asset) -> "底图已改变，请校正范围后重新生成并复核。"
+                    region.asset == null -> "尚未生成裁片，请生成并复核。"
+                    region.reviewedAt == null -> "尚未复核裁片，请查看并确认。"
+                    else -> null
+                }
+                problem?.let { ProjectIssue(step.id, "步骤“${step.title}”的区域“${region.name}”$it",
+                    ProjectIssueCorrection.REGION, region.id) }
+            } } + if (animation != null && (animation.needsRepair ||
+                animation.boundRevision != snapshot.project.revision || DraftPlanProjection.issues(snapshot, animation).isNotEmpty()))
+                listOf(ProjectIssue(null, "动画计划待核对，请检查路径与效果并保存。", ProjectIssueCorrection.ANIMATION))
+            else emptyList()
+
         fun graphIssues(snapshot: ProjectSnapshot): List<ProjectIssue> {
             if (snapshot.steps.isEmpty()) return listOf(ProjectIssue(null, "项目还没有步骤，请添加已生成并复核的图片"))
             val byId = snapshot.steps.associateBy { it.id }
@@ -1666,8 +1717,23 @@ class ProjectWorkspace internal constructor(application: Application,
                 (step.hotspots.mapNotNull { it.targetStepId } + listOfNotNull(step.nextAction?.targetStepId))
                     .filter { it in byId && it !in reached }.forEach(queue::addLast)
             }
+            // A reachable cycle is valid only when it can eventually reach an explicit ending.
+            val predecessors = mutableMapOf<String, MutableSet<String>>()
+            val reachesEnding = mutableSetOf<String>()
             snapshot.steps.forEach { step ->
-                if (start != null && start in byId && step.id !in reached) result += ProjectIssue(step.id, "无法从起点到达“${step.title}”，请连接动作或调整起点")
+                (step.hotspots.mapNotNull { it.targetStepId } + listOfNotNull(step.nextAction?.targetStepId))
+                    .filter { it in byId }.forEach { target -> predecessors.getOrPut(target) { mutableSetOf() }.add(step.id) }
+                if (step.isTerminal || step.hotspots.any { it.targetStepId == null && !it.endLabel.isNullOrBlank() })
+                    queue.addLast(step.id)
+            }
+            while (queue.isNotEmpty()) {
+                val id = queue.removeFirst()
+                if (!reachesEnding.add(id)) continue
+                predecessors[id].orEmpty().filter { it !in reachesEnding }.forEach(queue::addLast)
+            }
+            snapshot.steps.forEach { step ->
+                if (start != null && start in byId && step.id !in reached) result += ProjectIssue(step.id,
+                    "无法从起点到达“${step.title}”，请连接动作或调整起点", ProjectIssueCorrection.CONNECTION)
                 if (!step.isTerminal && step.hotspots.isEmpty() && step.nextAction == null) {
                     result += ProjectIssue(step.id, "“${step.title}”尚无动作，请添加下一步、热点或设为终点")
                 }
@@ -1681,6 +1747,11 @@ class ProjectWorkspace internal constructor(application: Application,
                 }
                 step.hotspots.filter { it.targetStepId != null && it.targetStepId !in byId }.forEach {
                     result += ProjectIssue(step.id, "热点“${it.label}”缺少目标，请重新选择目标或结束")
+                }
+                val targets = step.hotspots.mapNotNull { it.targetStepId } + listOfNotNull(step.nextAction?.targetStepId)
+                val missingTarget = targets.any { it !in byId } || step.nextAction?.targetStepId == null && step.nextAction != null
+                if (!step.isTerminal && step.id !in reachesEnding && targets.any { it in byId } && !missingTarget) {
+                    result += ProjectIssue(step.id, "从“${step.title}”无法到达结束，请连接终点或添加结束热点")
                 }
             }
             return result

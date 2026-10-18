@@ -24,6 +24,7 @@ import com.tapscene.data.ReleaseStore
 import com.tapscene.ui.ReleaseWorkspace
 import kotlinx.coroutines.Dispatchers
 import com.tapscene.data.ProjectStore
+import com.tapscene.data.WorkspaceStore
 import com.tapscene.ui.ProjectWorkspace
 import com.tapscene.clickplan.ClickAction
 import com.tapscene.clickplan.ClickDevice
@@ -218,9 +219,39 @@ class ClickEntryNavigationHostTest {
         compose.waitForIdle()
         compose.onNodeWithContentDescription("返回").performClick()
         waitFor("其他创建方式")
-        compose.onNodeWithText(created.title).performClick()
-        waitFor("素材")
-        compose.onNodeWithText("素材").performClick()
+        val reopenedProjects = ViewModelProvider(compose.activity)[ProjectWorkspace::class.java]
+        val reopenedMedia = ViewModelProvider(compose.activity)[MediaWorkspace::class.java]
+        compose.waitUntil(30_000) {
+            compose.waitForIdle()
+            !reopenedProjects.state.value.busy && !reopenedMedia.state.value.busy
+        }
+        // Hold only the synthetic workspace read: openProject publishes STEPS before its
+        // final refresh completes. This deterministically exposes the busy tab window.
+        val refreshHeld = CountDownLatch(1)
+        val finishRefresh = CountDownLatch(1)
+        val refreshHolder = Thread {
+            WorkspaceStore.withProjectCopyLock { refreshHeld.countDown(); check(finishRefresh.await(90, TimeUnit.SECONDS)) }
+        }.apply { start() }
+        try {
+            check(refreshHeld.await(10, TimeUnit.SECONDS))
+            compose.onNodeWithText(created.title).performClick()
+            waitFor("素材")
+            assertEquals(created.id, reopenedProjects.state.value.project?.project?.id)
+            assertEquals(com.tapscene.ui.ProjectRoute.STEPS, reopenedProjects.state.value.route)
+            assertTrue(reopenedProjects.state.value.busy)
+            compose.onNodeWithText("素材").assertIsNotSelected().performClick()
+            compose.onNodeWithText("素材").assertIsNotSelected()
+            compose.onNodeWithText("悬浮编排").assertDoesNotExist()
+            println("HOST_PROJECT_TAB busy=${reopenedProjects.state.value.busy}; sources click retains Steps while refresh is blocked")
+            compose.onNodeWithText("素材").assertIsNotEnabled()
+        } finally {
+            finishRefresh.countDown(); refreshHolder.join(10_000)
+            check(!refreshHolder.isAlive)
+        }
+        compose.waitUntil(30_000) {
+            compose.onAllNodes(hasText("素材") and isEnabled()).fetchSemanticsNodes().size == 1
+        }
+        compose.onNodeWithText("素材").assertIsEnabled().performClick().assertIsSelected()
         compose.onNodeWithText("悬浮编排").performClick()
         waitFor("开启无障碍服务")
         assertEquals(listOf(created.id), ProjectStore(app).listProjects().map { it.id })
@@ -493,6 +524,74 @@ class ClickEntryNavigationHostTest {
         waitFor("交付方式")
         assertEquals(fixed.scene.releaseId, releases.state.value.lastSealedId)
         println("HOST_REVIEW_SOURCE source/edit/return/deletion/fixed-candidate/seal/player-return PASS; device NOT_RUN")
+    }
+
+    @Test fun libraryDeliveryUsesExplicitVersionAndNeverFollowsIntoAnotherProject() {
+        waitFor("悬浮编排")
+        val app = RuntimeEnvironment.getApplication()
+        val projects = ViewModelProvider(compose.activity)[ProjectWorkspace::class.java]
+        val releases = ViewModelProvider(compose.activity)[ReleaseWorkspace::class.java]
+        val store = ProjectStore(app)
+        val sealed = runBlocking(Dispatchers.IO) {
+            val fixture = AiDraftImportFixtures.complete(app)
+            val imports = AiDraftImportStore(app)
+            val input = fixture.zip.inputStream().use { imports.prepare(it) }
+            val projectId = checkNotNull(imports.commit(input.sessionId, input.previewDigest).projectId)
+            AiDraftImportFixtures.reviewDraftRegions(store, projectId)
+            AiDraftImportFixtures.sealFixture(app, projectId, fixture)
+        }
+        store.createProject("另一个项目 B")
+        compose.runOnIdle { projects.reload(); releases.reloadLibrary() }
+        compose.waitUntil(30_000) { compose.waitForIdle(); !projects.state.value.busy && !releases.state.value.busy }
+        assertNull(releases.state.value.lastSealedId)
+        compose.onNodeWithText("演示库").performClick()
+        waitFor("交付此版本")
+        compose.waitUntil(30_000) { compose.waitForIdle(); !releases.state.value.busy && !projects.state.value.busy }
+        compose.onNodeWithText("交付此版本").performScrollTo().assertIsEnabled().performClick()
+        waitFor("交付方式")
+        compose.waitUntil(30_000) { compose.waitForIdle(); !releases.state.value.busy }
+        assertEquals(sealed.id, releases.state.value.deliveryRelease?.id)
+        assertEquals(sealed.contentDigest, releases.state.value.deliverySelection?.contentDigest)
+        assertNull(releases.state.value.lastSealedId)
+        compose.onNodeWithText("系统分享").assertIsEnabled()
+        compose.onNodeWithContentDescription("返回").performClick()
+        waitFor("交付此版本")
+        compose.onNodeWithText("项目", useUnmergedTree = true).performClick()
+        waitFor("另一个项目 B")
+        compose.onNodeWithText("另一个项目 B").performClick()
+        waitFor("检查与交付")
+        compose.onNodeWithText("检查与交付").performClick()
+        compose.onNodeWithText("查看交付方式").performScrollTo().performClick()
+        waitFor("当前未选择封存版本")
+        assertNull(releases.state.value.deliveryRelease)
+        compose.onNodeWithText("系统分享").assertDoesNotExist()
+        compose.onNodeWithText("保存到文件").assertDoesNotExist()
+        compose.onNodeWithText("从演示库选择版本").performScrollTo().performClick()
+        waitFor("交付此版本")
+        compose.waitUntil(30_000) { compose.waitForIdle(); !releases.state.value.busy && !projects.state.value.busy }
+        compose.onNodeWithText("交付此版本").performScrollTo().assertIsEnabled().performClick()
+        waitFor("交付方式")
+        compose.waitUntil(30_000) { compose.waitForIdle(); !releases.state.value.busy }
+        assertEquals(sealed.id, releases.state.value.deliveryRelease?.id)
+        compose.onNodeWithText("查看封存成品").performScrollTo().performClick()
+        compose.waitUntil(30_000) { compose.waitForIdle(); !releases.state.value.busy && releases.state.value.player != null }
+        assertEquals(sealed.id, releases.state.value.player?.scene?.releaseId)
+        compose.onNodeWithText("退出").performClick()
+        waitFor("交付方式")
+        assertEquals(sealed.id, releases.state.value.deliveryRelease?.id)
+        // System Back must leave delivery just like its toolbar, not cancel a save already in progress.
+        val writing = kotlinx.coroutines.Job()
+        @Suppress("UNCHECKED_CAST") val releaseState = ReleaseWorkspace::class.java.getDeclaredField("mutableState")
+            .apply { isAccessible = true }.get(releases) as MutableStateFlow<com.tapscene.ui.ReleaseUiState>
+        compose.runOnIdle {
+            ReleaseWorkspace::class.java.getDeclaredField("task").apply { isAccessible = true }.set(releases, writing)
+            releaseState.value = releaseState.value.copy(busy = true, stage = "完整写入所选文件")
+        }
+        compose.runOnIdle { compose.activity.onBackPressedDispatcher.onBackPressed() }
+        waitFor("交付此版本")
+        check(writing.isActive)
+        compose.runOnIdle { writing.cancel(); releaseState.value = releaseState.value.copy(busy = false, stage = null) }
+        println("HOST_DELIVERY_NAVIGATION library/explicit-version/project-isolation/player-return PASS; system chooser/device NOT_RUN")
     }
 
     private fun assertFixedCandidate(expected: ReleaseCandidate, actual: ReleaseCandidate?) {

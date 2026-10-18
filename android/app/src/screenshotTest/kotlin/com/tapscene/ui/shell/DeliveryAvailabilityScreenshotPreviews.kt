@@ -13,7 +13,7 @@ import com.android.tools.screenshot.PreviewTest
 @Preview(name = "delivery_without_sealed_version", widthDp = 320, heightDp = 1050, locale = "zh-rCN", fontScale = 1.2f, showBackground = true)
 @Composable
 fun DeliveryWithoutSealedVersionPreview() = AvailabilityPreviewSurface {
-    DeliveryOptionsScreen({}, {}, {}, {}, {})
+    DeliveryOptionsScreen({}, {}, {}, {}, {}, onChooseVersion = {})
 }
 
 @PreviewTest

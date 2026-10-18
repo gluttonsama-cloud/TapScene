@@ -25,7 +25,20 @@ private fun DeliveryShareSurface() {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             DeliveryOptionsScreen({}, {}, {}, {}, {},
                 sealedSummary = ReleasePreviewFixture.summary.copy(title = "活动报名：选择活动并核对报名结果"),
-                onExport = {}, onShare = {}, onOpenSealed = {})
+                onExport = {}, onShare = {}, onOpenSealed = {}, onChooseVersion = {})
+        }
+    }
+}
+
+@PreviewTest
+@Preview(name = "delivery_library_selection_small", widthDp = 320, heightDp = 640, locale = "zh-rCN", fontScale = 1.2f, showBackground = true)
+@Composable
+fun DeliveryLibrarySelectionSmallPreview() {
+    TapSceneTheme {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            ReleaseLibraryContent(com.tapscene.ui.ReleaseUiState(releases = listOf(
+                ReleasePreviewFixture.summary.copy(title = "活动报名：选择活动并核对报名结果"))),
+                {}, {}, {}, {}, {}, onAi = {}, onDelivery = {})
         }
     }
 }

@@ -127,6 +127,7 @@ fun ReleaseReviewContent(
     onEditSourceStep: ((String) -> Unit)? = null,
     onBackToChecks: (() -> Unit)? = null,
     sourceHasPendingEdits: Boolean = false,
+    onEditSourceProjectText: (() -> Unit)? = null,
 ) {
     val candidate = state.candidate
     var section by rememberSaveable(candidate?.id) { mutableStateOf(initialSection.coerceIn(0, 5)) }
@@ -294,6 +295,17 @@ fun ReleaseReviewContent(
                         ShellDivider()
                         Text("开场说明", style = MaterialTheme.typography.labelLarge, color = ShellColors.Muted)
                         Text(scene.goal.ifBlank { "未填写开场说明。" }, style = MaterialTheme.typography.bodyLarge)
+                        if (onEditSourceProjectText != null) {
+                            TextButton(onClick = onEditSourceProjectText, enabled = !state.busy,
+                                modifier = Modifier.heightIn(min = 48.dp)) { Text("修改来源项目文字") }
+                            Text("修改只保存到来源草稿；这份固定候选和已封存版本仍保留原文字。",
+                                style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                        }
+                        if (currentDraftRevision != null && currentDraftRevision != candidate.projectRevision) {
+                            StatusNote("草稿已有修改；当前显示的仍是旧候选文字，重新生成并复核后才会进入新成品。")
+                            TextButton(onClick = onRebuild, enabled = !state.busy,
+                                modifier = Modifier.heightIn(min = 48.dp)) { Text("从当前草稿重新生成") }
+                        }
                         ShellDivider()
                         ShellLabelValue("起点", scene.states.firstOrNull { it.id == scene.startStateId }?.title ?: "起点不可用")
                         ShellLabelValue("内容摘要", candidate.contentDigest)
@@ -442,6 +454,7 @@ fun ReleaseLibraryContent(
     onDiscardCandidate: (ReleaseCandidate) -> Unit = {},
     onAi: ((String) -> Unit)? = null,
     onHosting: (() -> Unit)? = null,
+    onDelivery: ((String) -> Unit)? = null,
 ) {
     Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
         ShellTopBar("演示库", actions = {
@@ -490,6 +503,11 @@ fun ReleaseLibraryContent(
                         style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                     Text("版本 ${release.id.take(12)}", style = MaterialTheme.typography.labelSmall, color = ShellColors.Muted)
                     if (release.origin != "local") Text("完整性校验不代表作者身份或隐私内容已获认证。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    if (release.origin == "local" && onDelivery != null) OutlinedButton(
+                        onClick = { onDelivery(release.id) }, enabled = !state.busy,
+                        shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                        Text("交付此版本")
+                    }
                     if (onAi != null) TextButton(onClick = { onAi(release.id) }, enabled = !state.busy,
                         modifier = Modifier.heightIn(min = 48.dp)) { Text("配置 AI 数据包") }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -510,7 +528,10 @@ fun ReleaseLibraryContent(
 }
 
 @Composable
-fun OfflineImportContent(state: ReleaseUiState, onBack: () -> Unit, onChoose: () -> Unit) {
+fun OfflineImportContent(
+    state: ReleaseUiState, onBack: () -> Unit, onChoose: () -> Unit,
+    onOpen: ((String) -> Unit)? = null,
+) {
     BackHandler(enabled = !state.busy) { onBack() }
     val imported = state.releases.firstOrNull { it.id == state.lastImportedId }
     Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
@@ -527,9 +548,15 @@ fun OfflineImportContent(state: ReleaseUiState, onBack: () -> Unit, onChoose: ()
                     SectionHeader("已加入演示库", imported.title)
                     ShellLabelValue("步骤", "${imported.stepCount} 个")
                     ShellLabelValue("包内文件", formatShellBytes(imported.byteLength))
+                    Text("版本 ${imported.id.take(12)}", style = MaterialTheme.typography.labelSmall, color = ShellColors.Muted)
                     StatusNote("文件完整性与内容结构校验通过。这不代表作者身份或图片、文字的隐私内容已获认证。")
+                    onOpen?.let { open ->
+                        Button(onClick = { open(imported.id) },
+                            enabled = state.exportFile == null && state.pendingShare == null && !state.shareChooserOpen,
+                            shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("立即观看") }
+                    }
+                    OutlinedButton(onClick = onBack, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("返回演示库") }
                     state.message?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted) }
-                    Button(onClick = onBack, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("返回演示库") }
                 }
                 state.message != null -> {
                     SectionHeader("导入未完成")
@@ -589,6 +616,10 @@ fun ReleasePlayerContent(
     val hotspots = scene.hotspots.filter { it.stateId == player.currentStateId }
     val outgoing = scene.edges.filter { it.fromStateId == player.currentStateId }
     val actionsEnabled = !state.busy && player.video == null && !player.ended && current != null && state.playerBitmap.isUsable()
+    val actionScroll = rememberScrollState()
+    LaunchedEffect(scene.releaseId, state.message) {
+        if (state.message != null) actionScroll.scrollTo(0)
+    }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val panelMaxHeight = (maxHeight * .30f).coerceIn(72.dp, 240.dp)
         val explanationMaxHeight = (maxHeight * .16f).coerceIn(56.dp, 128.dp)
@@ -624,8 +655,9 @@ fun ReleasePlayerContent(
             } else ReleaseImageCanvas(state.playerBitmap, if (player.ended || video != null) emptyList() else hotspots,
                 Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp), enabled = actionsEnabled, busy = state.busy,
                 imageDescription = current?.title ?: "离线演示画面", onTap = onTap)
-            Column(Modifier.fillMaxWidth().heightIn(max = panelMaxHeight).verticalScroll(rememberScrollState())
+            Column(Modifier.fillMaxWidth().heightIn(max = panelMaxHeight).verticalScroll(actionScroll)
                 .padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                state.message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = ShellColors.Accent) }
                 when {
                     video != null -> {
                         Text(if (video.failed) "过渡播放失败" else "正在播放过渡", style = MaterialTheme.typography.titleSmall)
@@ -662,7 +694,6 @@ fun ReleasePlayerContent(
                         }
                     }
                 }
-                state.message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = ShellColors.Accent) }
             }
             ShellDivider()
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {

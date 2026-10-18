@@ -1128,10 +1128,13 @@ class ProjectStore(context: Context) {
         } }
     }
 
-    fun renameProject(projectId: String, title: String, goal: String? = null): ProjectSnapshot {
+    fun renameProject(projectId: String, title: String, goal: String? = null, expectedRevision: Long? = null): ProjectSnapshot {
         val cleanTitle = text(title, "项目名称", 120)
         val cleanGoal = goal?.let { text(it, "项目目标", 1_000, allowEmpty = true) }
         return edit(projectId) { db ->
+            require(expectedRevision == null || requireSnapshot(db, projectId).project.revision == expectedRevision) {
+                "项目已更新；当前输入仍保留，请取消后重新打开项目文字并核对。"
+            }
             db.update("projects", ContentValues().apply {
                 put("title", cleanTitle)
                 if (cleanGoal != null) put("goal", cleanGoal)
@@ -1956,9 +1959,12 @@ class ProjectStore(context: Context) {
         deletionImpact(requireSnapshot(db, projectId), stepId)
     }
 
-    fun deleteStep(projectId: String, stepId: String): StepDeletionResult = access { db ->
+    fun deleteStep(projectId: String, stepId: String, expectedRevision: Long? = null): StepDeletionResult = access { db ->
         val result = transaction(db) {
             val current = requireSnapshot(db, projectId)
+            require(expectedRevision == null || current.project.revision == expectedRevision) {
+                "项目内容已变化，请重新检查删除影响。"
+            }
             val step = current.steps.firstOrNull { it.id == stepId } ?: error("步骤已不存在，请刷新。")
             val impact = deletionImpact(current, stepId)
             val affected = current.steps.flatMap { from -> from.hotspots.filter {

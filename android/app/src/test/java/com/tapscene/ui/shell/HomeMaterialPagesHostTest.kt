@@ -115,11 +115,13 @@ class HomeMaterialPagesHostTest {
                 {}, {}, {}, onImportScreenshot = { calls += "screenshot" }, onClickPlan = { calls += "plan" })
         }
         compose.onNodeWithText("还没有原录屏").assertIsDisplayed()
+        compose.onNodeWithText("录屏合计上限：5 分钟 / 500 MiB").assertIsDisplayed()
         compose.onNodeWithText("还没有素材").assertDoesNotExist()
         compose.onNodeWithText("悬浮编排").performClick()
         listOf("手动录屏", "导入录屏", "导入截图").forEach { label ->
             compose.onNodeWithText("其他方式").performClick()
             compose.onNodeWithText("添加素材").assertIsDisplayed()
+            compose.onNodeWithText("单段录屏最多 3 分钟、200 MiB；项目合计最多 5 分钟、500 MiB。").assertIsDisplayed()
             compose.onNodeWithText(label).performClick()
             compose.onNodeWithText("添加素材").assertDoesNotExist()
         }

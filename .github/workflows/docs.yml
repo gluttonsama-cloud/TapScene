@@ -238,7 +238,7 @@ jobs:
           import xml.etree.ElementTree as ET
           cases = [case for path in Path("android/app/build/test-results/testPreviewUnitTest").glob("TEST-*.xml")
                    for case in ET.parse(path).getroot().iter("testcase")]
-          assert len(cases) == 7, f"Expected seven entry/review checks: {len(cases)}"
+          assert len(cases) == 8, f"Expected eight entry/review/delivery checks: {len(cases)}"
           assert all(not any(case.find(kind) is not None for kind in ("failure", "error", "skipped")) for case in cases)
           print("OVERLAY_ENTRY_HOST_CHECKS_OK: production navigation only; Android overlay/playback/recording NOT_RUN")
           PY_ENTRY
@@ -265,7 +265,15 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 87, f"Expected eighty-seven Compose review images, found {len(images)}"
+          assert len(images) == 117, f"Expected one hundred seventeen Compose review images, found {len(images)}"
+          busy_tab_images = [image for image in images if "ProjectSourcesBusyPreview" in str(image)]
+          assert len(busy_tab_images) == 1, f"Expected one busy project tab image, found {len(busy_tab_images)}"
+          project_source_images = [image for image in images if "ProjectSourceStorageScreenshotPreviewsKt" in str(image)]
+          assert len(project_source_images) == 2, f"Expected two project source storage images, found {len(project_source_images)}"
+          offline_import_images = [image for image in images if "OfflineImportPlaybackScreenshotPreviewsKt" in str(image)]
+          assert len(offline_import_images) == 1, f"Expected one offline import playback image, found {len(offline_import_images)}"
+          ai_configuration_images = [image for image in images if "AiConfigurationExitScreenshotPreviewsKt" in str(image)]
+          assert len(ai_configuration_images) == 2, f"Expected two AI configuration exit images, found {len(ai_configuration_images)}"
           delivery_images = [image for image in images if "DeliveryAvailabilityScreenshotPreviewsKt" in str(image)]
           assert len(delivery_images) == 3, f"Expected three delivery availability images, found {len(delivery_images)}"
           click_review_images = [image for image in images if "ClickChainReviewScreenshotPreviewsKt" in str(image)]
@@ -281,9 +289,23 @@ jobs:
           copy_images = [image for image in images if "SavedStepCopyScreenshotPreviewsKt" in str(image)]
           assert len(copy_images) == 2, f"Expected two saved-step-copy review images, found {len(copy_images)}"
           share_images = [image for image in images if "OfflineShareScreenshotPreviewsKt" in str(image)]
-          assert len(share_images) == 2, f"Expected two delivery share review images, found {len(share_images)}"
+          assert len(share_images) == 3, f"Expected three delivery selection/share review images, found {len(share_images)}"
+          project_text_images = [image for image in images if "ProjectTextScreenshotPreviewsKt" in str(image)]
+          assert len(project_text_images) == 2, f"Expected two project text images, found {len(project_text_images)}"
+          mask_recovery_images = [image for image in images if "MaskRecoveryScreenshotPreviewsKt" in str(image)]
+          assert len(mask_recovery_images) == 2, f"Expected two mask recovery images, found {len(mask_recovery_images)}"
+          recording_owner_images = [image for image in images if "RecordingOwnerScreenshotPreviewsKt" in str(image)]
+          assert len(recording_owner_images) == 2, f"Expected two recording owner images, found {len(recording_owner_images)}"
+          ending_route_images = [image for image in images if "DeliveryEndingScreenshotPreviewsKt" in str(image)]
+          assert len(ending_route_images) == 2, f"Expected two ending route images, found {len(ending_route_images)}"
+          region_readiness_images = [image for image in images if "DeliveryRegionScreenshotPreviewsKt" in str(image)]
+          assert len(region_readiness_images) == 2, f"Expected two region readiness images, found {len(region_readiness_images)}"
+          connection_images = [image for image in images if "ConnectionRepairScreenshotPreviewsKt" in str(image)]
+          assert len(connection_images) == 2, f"Expected two connection repair images, found {len(connection_images)}"
+          annotation_images = [image for image in images if "AiAnnotationScreenshotPreviewsKt" in str(image)]
+          assert len(annotation_images) == 2, f"Expected two annotation editor images, found {len(annotation_images)}"
           ai_draft_images = [image for image in images if "AiDraftScreenshotPreviewsKt" in str(image)]
-          assert len(ai_draft_images) == 8, f"Expected eight AI draft review images, found {len(ai_draft_images)}"
+          assert len(ai_draft_images) == 9, f"Expected nine AI draft review images, found {len(ai_draft_images)}"
           lines = [
               "TapScene shell review: host-side Compose / Layoutlib renders.",
               "Not device screenshots; does not validate media decoding, touch, or system pickers.",
@@ -398,6 +420,7 @@ jobs:
           gradle -p android --no-daemon --max-workers=2 -PcompatibilityPreview=true -PtapsceneAbi=arm64-v8a \
             :app:testDebugUnitTest \
             --tests com.tapscene.data.ProjectStoreHostTest \
+            --tests com.tapscene.media.SourceCapacityHostTest \
             --tests com.tapscene.ui.ProjectWorkspaceHostTest \
             --tests com.tapscene.data.AiRoundTripHostTest \
             --tests com.tapscene.data.SavedStepCopyHostTest \
@@ -406,7 +429,28 @@ jobs:
             --tests com.tapscene.ui.CopyWorkspaceHostTest \
             --tests com.tapscene.sharing.OfflineShareHostTest \
             --tests com.tapscene.ui.OfflineShareWorkspaceHostTest \
+            --tests com.tapscene.ui.DeliverySelectionHostTest \
             --tests com.tapscene.ui.shell.DeliveryProductPagesHostTest \
+            --tests com.tapscene.ui.shell.DraftAiHoldInputHostTest \
+            --tests com.tapscene.ui.shell.ManualMediaInputHostTest \
+            --tests com.tapscene.ui.shell.ManualMaskRecoveryHostTest \
+            --tests com.tapscene.ui.shell.RecordingOwnerNavigationHostTest \
+            --tests com.tapscene.ui.shell.ProjectTextEditingHostTest \
+            --tests com.tapscene.ui.shell.DeliveryIssueNavigationHostTest \
+            --tests com.tapscene.ui.shell.StepDeletionConfirmationHostTest \
+            --tests com.tapscene.ui.shell.CopiedAnimationReadinessHostTest \
+            --tests com.tapscene.ui.AnimationReadinessFailureHostTest \
+            --tests com.tapscene.ui.shell.AuthoredPathImpactHostTest \
+            --tests com.tapscene.ui.ReleasePlayerCancellationHostTest \
+            --tests com.tapscene.ui.shell.OfflineImportPlaybackHostTest \
+            --tests com.tapscene.ui.shell.ProjectStorageNavigationHostTest \
+            --tests com.tapscene.ui.shell.ReleasePlayerFeedbackHostTest \
+            --tests com.tapscene.ui.shell.AiImportNavigationHostTest \
+            --tests com.tapscene.ui.shell.AiImportDifferenceIdentityHostTest \
+            --tests com.tapscene.ui.AiImportCancellationHostTest \
+            --tests com.tapscene.ui.AiConfigurationRetentionHostTest \
+            --tests com.tapscene.ui.AiAnnotationEditsTest \
+            --tests com.tapscene.ui.shell.AiAnnotationInputHostTest \
             --tests com.tapscene.ui.shell.HomeMaterialPagesHostTest \
             --tests com.tapscene.ui.HostingWorkspaceHostTest \
             --tests com.tapscene.ocr.TextRegionPolicyTest \
@@ -444,6 +488,18 @@ jobs:
           root = Path("android/app/build/test-results/testDebugUnitTest")
           files = sorted(root.glob("TEST-*.xml"))
           expected = {
+              ("com.tapscene.ui.AnimationReadinessFailureHostTest", "unreadableAnimationCannotTurnCommittedAddOrReplacementIntoFailure"): 1,
+              ("com.tapscene.ui.shell.AuthoredPathImpactHostTest", "sameTitleStepsShowOnlyChangedTransitionImpactAndRequireExplicitBuild"): 1,
+              ("com.tapscene.ui.shell.AuthoredPathImpactHostTest", "changedRevisionAndBusyStateBlockBuildCallbacks"): 1,
+              ("com.tapscene.ui.ReleasePlayerCancellationHostTest", "cancelBlockedNextRetainsDisplayedVisitAndCannotClearNewPlayerWork"): 1,
+              ("com.tapscene.ui.ReleasePlayerCancellationHostTest", "cancelTransitionPreparationClearsPendingAndRejectsOldRunCallbacks"): 1,
+              ("com.tapscene.ui.shell.ReleasePlayerFeedbackHostTest", "newCancellationFeedbackResetsScrolledLandscapeActionsAndKeepsRestartReachable"): 1,
+              ("com.tapscene.ui.shell.CopiedAnimationReadinessHostTest", "copiedPlanBlocksDeliveryUntilExplicitSaveOnExactOwnerAndPreservesOriginalCandidate"): 1,
+              ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "failedProjectReadBlocksGenerationWithoutShowingProgress"): 1,
+              ("com.tapscene.ui.shell.StepDeletionConfirmationHostTest", "exactStepAndStartImpactStayFrozenUntilExplicitCurrentConfirmation"): 1,
+              ("com.tapscene.media.SourceCapacityHostTest", "aggregateLimitsRejectBeforeWriteAndAcceptExactBoundary"): 1,
+              ("com.tapscene.media.SourceCapacityHostTest", "capacityMappingIsClosedAndUnknownFailuresStayPrivate"): 1,
+              ("com.tapscene.media.SourceCapacityHostTest", "interruptedProviderReadCleansOnlyItsUnregisteredCopy"): 1,
               ("com.tapscene.clickplan.InitialFrameAdmissionEngineTest", "pendingLeavesReadyWithoutStartedIntentOrGestureAndNeverBeginsTwice"): 1,
               ("com.tapscene.clickplan.InitialFrameAdmissionEngineTest", "preparationPredicatesAndBeginCannotReopenAReentrantlyCancelledRun"): 1,
               ("com.tapscene.clickplan.InitialFrameAdmissionEngineTest", "synchronousForeignThreadAndDuplicateNotificationsOnlyEnqueueOneStartAndOneCall"): 1,
@@ -619,10 +675,49 @@ jobs:
               ("com.tapscene.sharing.OfflineShareHostTest", "exactReadOnlyUrisRejectTraversalTamperingAndExpiry"): 2,
               ("com.tapscene.sharing.OfflineShareHostTest", "cacheLimitsAndCancelledPreparationPreserveExistingSnapshots"): 2,
               ("com.tapscene.ui.OfflineShareWorkspaceHostTest", "chooserRequestIsConsumedOnceAndNeverRestoredAfterExit"): 1,
+              ("com.tapscene.ui.DeliverySelectionHostTest", "explicitOldVersionSurvivesWorkspaceReopenAndRejectsCrossProjectAndLateExport"): 1,
               ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "noSelectionKeepsReviewAndOtherVersionAiReachableWithoutDeadExportButtons"): 1,
               ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "selectedVersionDetailsAndBusyStatePreserveExportAndShareCallbacks"): 1,
               ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "importedVersionCannotShareAndDeveloperHostingRetainsAllDestinations"): 1,
               ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "settingsOnlyShowsRealStorageAndExpandableAccurateHelp"): 1,
+              ("com.tapscene.ui.shell.DraftAiHoldInputHostTest", "pendingHoldSurvivesCollapseAndTabsAndCannotSilentlySaveOldValue"): 1,
+              ("com.tapscene.ui.shell.DraftAiHoldInputHostTest", "pendingInputCanBeExplicitlyDiscardedAndNeverFollowsAnotherProject"): 1,
+              ("com.tapscene.ui.shell.DraftAiHoldInputHostTest", "shellTaskViewProtectsRawAndDirtyPlansButAllowsCleanDiscardedAndSavedPlans"): 1,
+              ("com.tapscene.ui.shell.RecordingOwnerNavigationHostTest", "recordingOwnerSurvivesProjectSwitchRecoveryCancelAndUnavailableProject"): 1,
+              ("com.tapscene.ui.shell.ManualMaskRecoveryHostTest", "failedSaveAndRereadKeepMasksUntilConfirmedRecoveryThenBackWorks"): 1,
+              ("com.tapscene.ui.shell.ManualMaskRecoveryHostTest", "cancellationAfterRealDirectorySyncRereadsCommittedMasksWithoutRollback"): 1,
+              ("com.tapscene.ui.shell.ManualMediaInputHostTest", "shellRecordingCoverRetainsRawTimesButSourceSwitchAndFullExitClearThem"): 1,
+              ("com.tapscene.ui.shell.DeliveryIssueNavigationHostTest", "regionPreflightTargetsExactCropAndRequiresExplicitGenerationAndReview"): 1,
+              ("com.tapscene.ui.shell.DeliveryIssueNavigationHostTest", "reachableClosedLoopRequiresExplicitEndingAndRepairsExactSameTitleStep"): 1,
+              ("com.tapscene.ui.shell.DeliveryIssueNavigationHostTest", "unreachableCopiedTerminalRepairsIncomingHotspotOnlyAfterExplicitSave"): 1,
+              ("com.tapscene.ui.shell.ProjectTextEditingHostTest", "fixedReviewEditsCurrentSourceTextByIdAndRebuildsOnlyAfterExplicitConfirmation"): 1,
+              ("com.tapscene.ui.shell.AiImportNavigationHostTest", "busyBackPreservesImportAndOnlyExplicitCancelReachesDestructiveCallback"): 1,
+              ("com.tapscene.ui.shell.AiImportDifferenceIdentityHostTest", "reviewUsesEachVersionsNamesOrderAndDeletedHotspotWithoutCommitting"): 1,
+              ("com.tapscene.ui.shell.AiImportDifferenceIdentityHostTest", "missingMismatchedAndIncompleteSnapshotsNeverBorrowTheOtherSidesIdentity"): 1,
+              ("com.tapscene.ui.AiImportCancellationHostTest", "cancellingUnknownReceiptRetryAlwaysReadsActualCommitBeforeCleanup"): 1,
+              ("com.tapscene.ui.AiImportCancellationHostTest", "lateExplicitCancelDuringFinalRefreshIsReconciledBeforeBusyClears"): 1,
+              ("com.tapscene.ui.AiAnnotationEditsTest", "updatingTextPreservesOriginalSlotTimingRectangleAndEveryOtherField"): 1,
+              ("com.tapscene.ui.AiAnnotationEditsTest", "addingUsesVisitHoldAndDefaultRectangleWithoutChangingOtherEffects"): 1,
+              ("com.tapscene.ui.AiAnnotationEditsTest", "explicitRemovalKeepsOtherVisitsEffectsAndOrder"): 1,
+              ("com.tapscene.ui.AiAnnotationEditsTest", "removingAbsentAnnotationIsAnIdempotentNoOp"): 1,
+              ("com.tapscene.ui.AiAnnotationEditsTest", "blankAndOversizedTextRejectsBothAddAndUpdateWithoutDeleting"): 1,
+              ("com.tapscene.ui.AiAnnotationEditsTest", "maximumLengthTextCanBeAddedAndUpdatedExactly"): 1,
+              ("com.tapscene.ui.AiAnnotationEditsTest", "missingVisitRejectsBothApplyAndRemovalWithoutChangingSource"): 1,
+              ("com.tapscene.ui.AiAnnotationEditsTest", "draftBoundPlanRejectsAddUpdateAndRemovalIncludingNoOpRemoval"): 1,
+              ("com.tapscene.ui.AiAnnotationEditsTest", "multipleAnnotationsOnOneVisitRejectApplyAndRemovalDespiteDifferentRegions"): 1,
+              ("com.tapscene.ui.AiAnnotationEditsTest", "effectLimitBlocksOnlyAdditionNotTextUpdatesOrRemoval"): 1,
+              ("com.tapscene.ui.shell.ProjectStorageNavigationHostTest", "sameTitleProjectsOpenTheirOwnSourcesAndLateCallbacksDoNotReopenOrStackNavigation"): 1,
+              ("com.tapscene.ui.shell.ProjectStorageNavigationHostTest", "unreadableUsageStillOpensOwningProjectSourcesAndExplicitReloadRecoversOriginalRecord"): 1,
+              ("com.tapscene.ui.shell.OfflineImportPlaybackHostTest", "repeatedOlderSameTitleImportOpensExactVersionAndExitBackAndReadFailureReturnToLibrary"): 1,
+              ("com.tapscene.ui.shell.OfflineImportPlaybackHostTest", "repeatedLocalPackageRetainsProvenanceAndBackCancelsBlockedPlayerRead"): 1,
+              ("com.tapscene.ui.shell.OfflineImportPlaybackHostTest", "importBranchesOnlyExposeCurrentSuccessfulIdAndReselectionClearsSuccess"): 1,
+              ("com.tapscene.ui.AiConfigurationRetentionHostTest", "unfinishedConfigurationTracksFieldChangesAndRestoringValuesClearsChanges"): 1,
+              ("com.tapscene.ui.AiConfigurationRetentionHostTest", "successfulExportBecomesCleanAndPickerCancellationPreservesExactPlanOnReopen"): 1,
+              ("com.tapscene.ui.shell.AiAnnotationInputHostTest", "appliedBackAndVersionSelectionPreservePendingText"): 1,
+              ("com.tapscene.ui.shell.AiAnnotationInputHostTest", "busyBackNeverLeavesWhileCleanAndDraftBoundConfigurationsCanReturn"): 1,
+              ("com.tapscene.ui.shell.AiAnnotationInputHostTest", "pendingTextSurvivesCollapseAndBothBacksButNeverLeaksToAnotherVersion"): 1,
+              ("com.tapscene.ui.shell.AiAnnotationInputHostTest", "editingExistingTextRequiresApplyAndEmptyInputNeverMeansDelete"): 1,
+              ("com.tapscene.ui.shell.AiAnnotationInputHostTest", "shellRecordingCoverRetainsInputButVersionReplacementAndFullExitClearIt"): 1,
               ("com.tapscene.ui.shell.HomeMaterialPagesHostTest", "healthyHomeEmptyStateDoesNotReplaceLoadingOrFailure"): 1,
               ("com.tapscene.ui.shell.HomeMaterialPagesHostTest", "acquisitionSheetDismissesAndKeepsEachCallbackSeparate"): 1,
               ("com.tapscene.ui.shell.HomeMaterialPagesHostTest", "quotaLoadFailureAndBusyKeepExistingActionGates"): 1,
@@ -695,6 +790,7 @@ jobs:
           path: |
             android/app/build/test-results/testDebugUnitTest/
             android/app/build/reports/tests/testDebugUnitTest/
+            android/app/build/reports/step-delete-layouts/
             ${{ runner.temp }}/host-data-checks.txt
             ${{ runner.temp }}/host-data-execution.txt
             ${{ runner.temp }}/ai-round-trip/

@@ -1,5 +1,6 @@
 package com.tapscene.ui.shell
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
@@ -14,6 +15,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -24,6 +27,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.key
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -48,6 +52,7 @@ import com.tapscene.hosting.HostedModels
 import com.tapscene.packageformat.ViewerScene
 import com.tapscene.packageformat.ViewerPackageCodec
 import kotlinx.coroutines.delay
+import com.tapscene.ui.ProjectIssueCorrection
 import com.tapscene.ui.ProjectIssue
 import com.tapscene.ui.AiPackageConfiguration
 import com.tapscene.ui.ReleaseUiState
@@ -193,6 +198,7 @@ fun DeliveryCheckScreen(
     onBuildCandidate: (() -> Unit)? = null,
     busy: Boolean = false,
     buildEnabled: Boolean = true,
+    loadFailed: Boolean = false,
 ) {
     var showMediaDetails by rememberSaveable(project?.project?.id) { mutableStateOf(false) }
     ServicePage("检查与交付", onBack, showTopBar = showTopBar) {
@@ -211,21 +217,30 @@ fun DeliveryCheckScreen(
                 ) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text("${issues.size} 项待处理", style = MaterialTheme.typography.titleLarge, color = ShellColors.Accent)
-                        Text("结构与路径", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                        Text("交付前检查", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                     }
                     Button(shape = RoundedCornerShape(8.dp), onClick = { onIssue(firstIssue) }, modifier = Modifier.heightIn(min = 48.dp)) { Text("去修正") }
                 }
                 issues.forEach { issue ->
-                    val stepTitle = project?.steps?.firstOrNull { it.id == issue.stepId }?.title
+                    val stepIndex = project?.steps?.indexOfFirst { it.id == issue.stepId } ?: -1
+                    val step = project?.steps?.getOrNull(stepIndex)
+                    val regionIndex = step?.regions?.sortedWith(compareBy({ it.zIndex }, { it.id }))
+                        ?.indexOfFirst { it.id == issue.regionId } ?: -1
+                    val targetLabel = step?.let { "步骤 ${(stepIndex + 1).toString().padStart(2, '0')} · ${it.title}" +
+                        if (regionIndex >= 0) " · 区域 ${regionIndex + 1}" else "" }
                     ShellDivider()
                     ShellActionRow(
                         title = issue.message,
-                        subtitle = stepTitle?.let { "步骤：$it" } ?: "项目结构",
+                        subtitle = targetLabel ?: if (issue.correction == ProjectIssueCorrection.ANIMATION) "项目动画计划" else "项目结构",
                         onClick = { onIssue(issue) },
                     )
                 }
             } else {
-                SectionHeader("结构与路径", if (project == null) "未选择项目。" else "当前本机结构检查未返回问题。")
+                SectionHeader("交付前检查", when {
+                    loadFailed -> "检查暂未完成，请重试读取项目。"
+                    project == null -> "未选择项目。"
+                    else -> "当前检查未返回待处理问题。"
+                })
             }
             ShellDivider()
             ShellActionRow("试走点击路径", "确认每个动作到达预期画面或结束结果。", onClick = onPreview, enabled = project?.steps?.isNotEmpty() == true)
@@ -250,21 +265,22 @@ fun DeliveryCheckScreen(
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
                 when {
+                    loadFailed -> "请先重试读取项目，再确认交付检查。"
                     busy -> "正在生成固定候选，请稍候。"
                     !buildEnabled -> "先保存当前修改，再生成固定候选。"
-                    issues.isNotEmpty() -> "先修正结构与路径问题，再生成候选。"
+                    issues.isNotEmpty() -> "先修正以上问题，再生成候选。"
                     onBuildCandidate == null -> "生成入口尚不可用；已保存内容不受影响。"
                     else -> "固定当前图片与文字，完成逐项复核和实际试走后封存。"
                 },
                 style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted,
             )
-            if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (busy && !loadFailed) LinearProgressIndicator(Modifier.fillMaxWidth())
             Button(
                 shape = RoundedCornerShape(8.dp),
                 onClick = { onBuildCandidate?.invoke() },
-                enabled = onBuildCandidate != null && !busy && buildEnabled && project?.steps?.isNotEmpty() == true && issues.isEmpty(),
+                enabled = onBuildCandidate != null && !busy && !loadFailed && buildEnabled && project?.steps?.isNotEmpty() == true && issues.isEmpty(),
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-            ) { Text(if (busy) "正在生成" else "生成待复核成品") }
+            ) { Text(if (busy && !loadFailed) "正在生成" else "生成待复核成品") }
         }
         Column {
             ShellDivider()
@@ -305,6 +321,7 @@ fun DeliveryOptionsScreen(
     busy: Boolean = false,
     onHosting: (() -> Unit)? = null,
     onOpenSealed: (() -> Unit)? = null,
+    onChooseVersion: (() -> Unit)? = null,
 ) {
     var showVersionDetails by rememberSaveable(sealedSummary?.id) { mutableStateOf(false) }
     ServicePage("交付方式", onBack) {
@@ -341,6 +358,9 @@ fun DeliveryOptionsScreen(
                 Button(shape = RoundedCornerShape(8.dp), onClick = onReview, enabled = !busy,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("继续成品复核") }
             }
+        }
+        onChooseVersion?.let { choose ->
+            ShellActionRow("从演示库选择版本", "打开已有封存版本，保存或系统分享。", enabled = !busy, onClick = choose)
         }
         Column {
             ShellDivider()
@@ -379,6 +399,9 @@ fun AiPackageScreen(
     onHold: (String, Int) -> Unit = { _, _ -> },
     onEffect: (String, String, String?, String?) -> Unit = { _, _, _, _ -> },
     onExport: () -> Unit = {},
+    onApplyAnnotation: (String, String) -> Unit = { _, _ -> },
+    onRemoveAnnotation: (String) -> Unit = {},
+    onPendingInputChange: (Boolean) -> Unit = {},
 ) {
     val config = state.aiConfiguration
     val resolved = remember(config) { config?.let { runCatching { it.resolve() } } }
@@ -386,13 +409,44 @@ fun AiPackageScreen(
     var confirmExport by remember(config) { mutableStateOf(false) }
     var chooseSource by rememberSaveable { mutableStateOf(false) }
     var chooseNext by remember(config) { mutableStateOf(false) }
+    var annotationInputs by rememberSaveable(config?.scene?.releaseId) { mutableStateOf(hashMapOf<String, String>()) }
+    var expandedEffects by rememberSaveable(config?.scene?.releaseId) { mutableStateOf(hashSetOf<String>()) }
+    var annotationToLocate by remember(config?.scene?.releaseId) { mutableStateOf<String?>(null) }
+    var discardAnnotationRequested by rememberSaveable(config?.scene?.releaseId) { mutableStateOf(false) }
+    var requestedReleaseId by rememberSaveable(config?.scene?.releaseId) { mutableStateOf<String?>(null) }
+    var busyBackNotice by remember { mutableStateOf(false) }
+    val annotations = config?.effects.orEmpty().filter { it.type == "annotation" }.groupBy { it.visitId }
+    val pendingAnnotations = config?.visits.orEmpty().filter { visit ->
+        config?.fromDraft == false && annotations[visit.visitId].orEmpty().size <= 1 &&
+            annotationInputs[visit.visitId]?.let { it != annotations[visit.visitId]?.singleOrNull()?.text.orEmpty() } == true
+    }
+    LaunchedEffect(config) {
+        val visits = config?.visits.orEmpty().map { it.visitId }.toSet()
+        annotationInputs = HashMap(annotationInputs.filter { (id, text) -> id in visits && text != annotations[id]?.singleOrNull()?.text.orEmpty() })
+    }
+    val configurationChanged = config?.fromDraft == false && state.aiConfigurationChanged
+    val hasPendingChanges = configurationChanged || pendingAnnotations.isNotEmpty()
+    SideEffect { onPendingInputChange(pendingAnnotations.isNotEmpty()) }
+    LaunchedEffect(state.busy) { if (!state.busy) busyBackNotice = false }
+    val requestBack: () -> Unit = {
+        when {
+            state.busy -> busyBackNotice = true
+            chooseSource -> chooseSource = false
+            hasPendingChanges -> { requestedReleaseId = null; discardAnnotationRequested = true }
+            else -> onBack()
+        }
+    }
+    // Only the visible AI page handles its Back; no effect cancels another route's work.
+    BackHandler(enabled = state.busy || chooseSource || hasPendingChanges, onBack = requestBack)
     val last = config?.visits?.lastOrNull()
     val lastStep = config?.scene?.states?.firstOrNull { it.id == last?.stateId }
     val needsNext = last != null && last.selectedEdgeId == null && lastStep?.terminal == false
     val selectedFrames = remember(config) { config?.let { runCatching { aiSelectedDurationFrames(it) }.getOrNull() } }
     Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
-        ShellTopBar("AI 动画配置", onBack)
+        ShellTopBar("AI 动画配置", requestBack)
         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (busyBackNotice) Text("正在处理动画包，请等待完成；如需中止，请使用任务的取消。",
+            Modifier.padding(horizontal = 16.dp, vertical = 8.dp), color = ShellColors.Accent)
         Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp)) {
             state.message?.let { Text(it, color = ShellColors.Accent) }
@@ -401,7 +455,11 @@ fun AiPackageScreen(
                     if (state.releases.isEmpty()) Text("先完成成品复核与封存，再选择固定版本。", color = ShellColors.Muted)
                     state.releases.forEach { item ->
                         ShellActionRow(item.title, "${item.stepCount} 个步骤 · ${formatReleaseDate(item.sealedAt)} · ${if (item.origin == "local") "本机成品" else "导入版本"}",
-                            onClick = { chooseSource = false; onChooseRelease(item.id) }, enabled = !state.busy)
+                            onClick = {
+                                if (item.id == config?.scene?.releaseId) chooseSource = false
+                                else if (hasPendingChanges) { requestedReleaseId = item.id; discardAnnotationRequested = true }
+                                else { chooseSource = false; onChooseRelease(item.id) }
+                            }, enabled = !state.busy)
                     }
                 } else {
                     ShellLabelValue("版本", config.scene.title)
@@ -422,8 +480,11 @@ fun AiPackageScreen(
                         val step = config.scene.states.single { it.id == visit.stateId }
                         val edge = config.scene.edges.firstOrNull { it.id == visit.selectedEdgeId }
                         val effects = config.effects.filter { it.visitId == visit.visitId }
-                        var showEffects by rememberSaveable(visit.visitId) { mutableStateOf(false) }
-                        var annotation by rememberSaveable(visit.visitId) { mutableStateOf(effects.firstOrNull { it.type == "annotation" }?.text.orEmpty()) }
+                        val showEffects = visit.visitId in expandedEffects
+                        val existingAnnotations = annotations[visit.visitId].orEmpty()
+                        val annotation = annotationInputs[visit.visitId] ?: existingAnnotations.singleOrNull()?.text.orEmpty()
+                        val annotationPending = pendingAnnotations.any { it.visitId == visit.visitId }
+                        val annotationLocation = remember(visit.visitId) { BringIntoViewRequester() }
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text("${index + 1}. ${step.title}", style = MaterialTheme.typography.titleSmall)
                             Text(edge?.let { "接着：${it.label}" } ?: if (step.terminal) "播放到这里结束" else "请选择下一步", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
@@ -433,8 +494,9 @@ fun AiPackageScreen(
                                 OutlinedButton(onClick = { onHold(visit.visitId, minOf(RenderPlan.MAX_HOLD_FRAMES, visit.holdFrames + 30)) }, enabled = !state.busy && !config.fromDraft && visit.holdFrames < RenderPlan.MAX_HOLD_FRAMES, modifier = Modifier.heightIn(min = 48.dp)) { Text("+ 1 秒") }
                             }
                             effects.forEach { Text(aiEffectLabel(config, it), style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted) }
-                            TextButton(onClick = { showEffects = !showEffects }, enabled = !config.fromDraft, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (showEffects) "收起效果" else if (effects.isEmpty()) "添加效果" else "调整效果") }
-                            if (showEffects) {
+                            TextButton(onClick = { expandedEffects = HashSet(expandedEffects).apply { if (showEffects) remove(visit.visitId) else add(visit.visitId) } },
+                                enabled = !config.fromDraft, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (showEffects) "收起效果" else if (effects.isEmpty()) "添加效果" else "调整效果") }
+                            if (showEffects && !config.fromDraft) {
                                 if (edge?.hotspotId != null) TextButton(onClick = { onEffect(visit.visitId, "click", null, null) }, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("${if (effects.any { it.type == "click" }) "✓ " else ""}点击提示") }
                                 if (edge?.toStateId != null && edge.transitionAssetId == null) TextButton(onClick = { onEffect(visit.visitId, "transition", null, null) }, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("${if (effects.any { it.type == "transition" }) "✓ " else ""}平滑切换到下一步") }
                                 config.scene.regions.filter { it.stateId == visit.stateId }.forEach { region ->
@@ -445,17 +507,28 @@ fun AiPackageScreen(
                                         }
                                     }
                                 }
-                                OutlinedTextField(value = annotation, onValueChange = { if (it.length <= 240) annotation = it }, enabled = !state.busy,
-                                    label = { Text("画面标注（最多 240 字）") }, modifier = Modifier.fillMaxWidth())
-                                TextButton(onClick = { onEffect(visit.visitId, "annotation", null, annotation) }, enabled = !state.busy && (annotation.isNotBlank() || effects.any { it.type == "annotation" }), modifier = Modifier.heightIn(min = 48.dp)) { Text(if (effects.any { it.type == "annotation" }) "移除已有标注" else "加入标注") }
+                                LaunchedEffect(annotationToLocate) {
+                                    if (annotationToLocate == visit.visitId) { annotationLocation.bringIntoView(); annotationToLocate = null }
+                                }
+                                if (existingAnnotations.size > 1) Text("此访问包含多条标注，请回草稿逐项编辑后重新封存。", color = ShellColors.Accent)
+                                else {
+                                    AiAnnotationEditor(annotation, annotationPending, !state.busy, existingAnnotations.isNotEmpty(),
+                                        onText = { text -> annotationInputs = HashMap(annotationInputs).apply { put(visit.visitId, text) } },
+                                        onApply = { onApplyAnnotation(visit.visitId, annotation) },
+                                        onRestore = { annotationInputs = HashMap(annotationInputs).apply { remove(visit.visitId) } },
+                                        onRemove = {
+                                            onRemoveAnnotation(visit.visitId)
+                                            annotationInputs = HashMap(annotationInputs).apply { remove(visit.visitId) }
+                                        }, fieldModifier = Modifier.bringIntoViewRequester(annotationLocation))
+                                }
                             }
                         }
                         ShellDivider()
                     }
                     if (!needsNext) Text("已选好播放顺序", color = ShellColors.Accent)
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        TextButton(onClick = onPrevious, enabled = !state.busy && !config.fromDraft && (config.visits.size > 1 || last?.selectedEdgeId != null), modifier = Modifier.heightIn(min = 48.dp)) { Text("撤回最后一步") }
-                        TextButton(onClick = onReset, enabled = !state.busy && !config.fromDraft, modifier = Modifier.heightIn(min = 48.dp)) { Text("重新选择") }
+                        TextButton(onClick = onPrevious, enabled = !state.busy && !config.fromDraft && pendingAnnotations.isEmpty() && (config.visits.size > 1 || last?.selectedEdgeId != null), modifier = Modifier.heightIn(min = 48.dp)) { Text("撤回最后一步") }
+                        TextButton(onClick = onReset, enabled = !state.busy && !config.fromDraft && pendingAnnotations.isEmpty(), modifier = Modifier.heightIn(min = 48.dp)) { Text("重新选择") }
                     }
                 }
                 DetailSection("保存前检查") {
@@ -470,17 +543,37 @@ fun AiPackageScreen(
         if (config != null && !chooseSource) {
             ShellDivider()
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (pendingAnnotations.isNotEmpty()) TextButton(onClick = {
+                    val id = pendingAnnotations.first().visitId
+                    expandedEffects = HashSet(expandedEffects).apply { add(id) }; annotationToLocate = id
+                }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("${pendingAnnotations.size} 处标注输入未应用 · 返回检查") }
+                if (configurationChanged) Text("已应用的修改仍需检查并保存。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Accent)
                 Text("${config.visits.size} 步 / ${if (plan != null) "总时长" else "当前时长"} ${
                     (plan?.totalFrames ?: selectedFrames)?.let { "约 ${aiSeconds(it)} 秒" } ?: "待检查"
                 }", style = MaterialTheme.typography.labelMedium, color = ShellColors.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Button(onClick = { if (needsNext) chooseNext = true else confirmExport = true },
-                    enabled = !state.busy && (needsNext || plan != null), shape = RoundedCornerShape(8.dp),
+                    enabled = !state.busy && pendingAnnotations.isEmpty() && (needsNext || plan != null), shape = RoundedCornerShape(8.dp),
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                     Text(if (needsNext) "接着播放" else "检查并保存")
                 }
             }
         }
     }
+    if (discardAnnotationRequested) AiConfigurationExitDialog(
+        configurationChanged = configurationChanged,
+        destination = requestedReleaseId?.let { id -> state.releases.firstOrNull { it.id == id } },
+        enabled = !state.busy,
+        destinationId = requestedReleaseId,
+        onContinue = { discardAnnotationRequested = false; requestedReleaseId = null; chooseSource = false },
+        onDiscard = {
+            val next = requestedReleaseId
+            if (next == null || state.releases.any { it.id == next }) {
+                discardAnnotationRequested = false; requestedReleaseId = null; annotationInputs = hashMapOf()
+                chooseSource = false
+                if (next != null) onChooseRelease(next) else onBack()
+            }
+        },
+    )
     if (chooseNext && config != null && last != null && needsNext) AlertDialog(
         onDismissRequest = { chooseNext = false }, title = { Text("接着播放") },
         text = {
@@ -502,6 +595,56 @@ fun AiPackageScreen(
         confirmButton = { TextButton(onClick = { confirmExport = false; onExport() }) { Text("选择保存位置") } },
         dismissButton = { TextButton(onClick = { confirmExport = false }) { Text("返回调整") } },
     )
+}
+
+/** Applied edits remain temporary until the export preparation confirms its local save. */
+@Composable
+internal fun AiConfigurationExitDialog(
+    configurationChanged: Boolean, destination: ReleaseSummary?, enabled: Boolean,
+    onContinue: () -> Unit, onDiscard: () -> Unit,
+    destinationId: String? = destination?.id,
+) {
+    AlertDialog(onDismissRequest = onContinue,
+        title = { Text(if (configurationChanged || destinationId != null) "动画配置尚未确认保存" else "标注文字尚未应用") },
+        text = { AiConfigurationExitDetails(destination, destinationId) },
+        confirmButton = { TextButton(onClick = onContinue) { Text("继续编辑") } },
+        dismissButton = { TextButton(onClick = onDiscard, enabled = enabled && (destinationId == null || destination != null)) {
+            Text(if (destinationId != null) "放弃未保存修改并换版本" else if (configurationChanged) "放弃未保存修改并返回" else "放弃标注输入并返回")
+        } },
+    )
+}
+
+/** Production dialog text, separately renderable because Layoutlib omits the modal window. */
+@Composable
+internal fun AiConfigurationExitDetails(destination: ReleaseSummary?, destinationId: String?) {
+    Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("继续编辑并检查保存，或放弃未保存修改和未应用输入。下次打开以本机已保留配置为准，已经保留的配置不会撤销。")
+        destinationId?.let { id ->
+            Text(if (destination != null) "将打开：${destination.title}\n版本 ID：$id"
+                else "该版本已不可用，请返回重新选择。\n版本 ID：$id")
+        }
+    }
+}
+
+/** Shared production editor body so pending and invalid states can be inspected in host layouts. */
+@Composable
+internal fun AiAnnotationEditor(
+    text: String, pending: Boolean, enabled: Boolean, hasAnnotation: Boolean,
+    onText: (String) -> Unit, onApply: () -> Unit, onRestore: () -> Unit, onRemove: () -> Unit,
+    fieldModifier: Modifier = Modifier,
+) {
+    val valid = text.isNotBlank() && text.length <= 240
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        OutlinedTextField(value = text, onValueChange = onText, enabled = enabled, isError = pending && !valid,
+            supportingText = { Text(if (pending && !valid) "请输入 1–240 字；删除请用“移除标注”。" else if (pending) "尚未应用；保存前请先应用或还原输入。" else "应用文字时保留原标注的时段和位置。") },
+            label = { Text("画面标注（最多 240 字）") }, modifier = fieldModifier.fillMaxWidth())
+        TextButton(onClick = onApply, enabled = enabled && valid && pending,
+            modifier = Modifier.heightIn(min = 48.dp)) { Text("应用标注文字") }
+        if (pending) TextButton(onClick = onRestore, enabled = enabled,
+            modifier = Modifier.heightIn(min = 48.dp)) { Text("还原文字输入") }
+        if (hasAnnotation) TextButton(onClick = onRemove, enabled = enabled,
+            modifier = Modifier.heightIn(min = 48.dp)) { Text("移除标注") }
+    }
 }
 
 /** Informational duration of the explicit visits only; it never makes an unfinished plan exportable. */
@@ -532,6 +675,7 @@ private fun aiEffectLabel(config: AiPackageConfiguration, effect: RenderPlan.Eff
 internal fun AiExportReviewContent(config: AiPackageConfiguration, plan: RenderPlan) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(config.scene.title, style = MaterialTheme.typography.titleSmall)
+        Text("确认后会先在本机保留配置。取消选择保存位置，不会撤销已经保留的配置。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
         Text("${if (plan.width < plan.height) "竖屏" else "横屏"} · 约 ${aiSeconds(plan.totalFrames)} 秒 · ${plan.visits.size} 步")
         plan.visits.forEachIndexed { index, visit ->
             val step = config.scene.states.single { it.id == visit.stateId }

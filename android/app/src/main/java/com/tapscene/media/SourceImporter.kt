@@ -7,6 +7,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import android.system.Os
 import android.system.OsConstants
+import com.tapscene.data.WorkspaceCapacityException
 import com.tapscene.data.WorkspaceDurabilityException
 import java.io.File
 import java.io.FileOutputStream
@@ -88,7 +89,7 @@ class SourceImporter(context: Context) {
                 failure = error
                 throw error
             } catch (cause: Exception) {
-                val error = MediaImportException("无法导入录屏，请检查文件访问权限和本机空间后重试。", cause)
+                val error = sourceImportFailure(cause)
                 failure = error
                 throw error
             } catch (fatal: Throwable) {
@@ -152,6 +153,13 @@ class SourceImporter(context: Context) {
 
 
 }
+
+/** Only the closed capacity reasons are safe to expose; arbitrary storage errors stay private. */
+internal fun sourceImportFailure(cause: Exception): MediaImportException = MediaImportException(
+    if (cause is WorkspaceCapacityException) cause.limit.userMessage
+    else "无法导入录屏，请检查文件访问权限和本机空间后重试。",
+    cause,
+)
 
 internal fun videoTrack(extractor: MediaExtractor): Pair<Int, MediaFormat> {
     var track: Pair<Int, MediaFormat>? = null

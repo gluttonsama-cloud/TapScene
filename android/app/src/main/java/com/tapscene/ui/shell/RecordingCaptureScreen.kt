@@ -229,13 +229,20 @@ fun RecordingCaptureContent(
     callbacks: RecordingCaptureCallbacks,
 ) {
     var showDiscard by rememberSaveable(recording.sessionId) { mutableStateOf(false) }
+    val hasSession = recording.phase != RecordingPhase.Idle
+    val ownerTitle = recordingOwnerTitle(projectState, recording)
+    val currentTitle = projectState.project?.project?.title ?: "新项目"
     Column(Modifier.fillMaxSize()) {
         ShellTopBar("录制操作", callbacks.onBack)
         Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text(projectState.project?.project?.title ?: "新项目", style = MaterialTheme.typography.titleMedium)
+                    Text(if (hasSession) "本次录制所属项目" else "新录制目标",
+                        style = MaterialTheme.typography.labelSmall, color = ShellColors.Muted)
+                    Text(if (hasSession) ownerTitle else currentTitle, style = MaterialTheme.typography.titleMedium)
+                    if (hasSession && recording.projectId != null && recording.projectId != projectState.project?.project?.id)
+                        Text("本次录制来自其他项目，仍保留原所属关系。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                     Text("原片只保存在本机", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                 }
                 if (!recording.isBusy && projectState.route == ProjectRoute.STEPS) TextButton(onClick = callbacks.onNewProject, enabled = !projectState.busy && !preparingConsent && !recording.canRetry) { Text("录到新项目") }
@@ -278,7 +285,12 @@ fun RecordingCaptureContent(
                         TextButton(onClick = { showDiscard = true }, colors = ButtonDefaults.textButtonColors(contentColor = ShellColors.Muted), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                             Text("删除未完成录制")
                         }
-                        Text("请先继续检查或删除未完成录制，再开始新录制。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                        Text("继续检查会处理本机全部待恢复录制，分别保留各自的原所属项目。请先处理未完成录制，再开始新录制。",
+                            style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    }
+                    if (hasSession) {
+                        ShellDivider()
+                        Text("以下操作使用当前项目：$currentTitle", style = MaterialTheme.typography.titleSmall)
                     }
                     callbacks.onReviewClickChain?.let { reviewChain ->
                         Button(onClick = reviewChain, enabled = !projectState.busy && !preparingConsent,
@@ -307,10 +319,18 @@ fun RecordingCaptureContent(
     if (showDiscard && recording.canRetry && !recording.isBusy) AlertDialog(
         onDismissRequest = { showDiscard = false },
         title = { Text("删除未完成录制？") },
-        text = { Text("只删除此次未完成录制在 TapScene 内的本地副本，无法撤销。已经登记的素材和已加入的步骤不会被删除。") },
+        text = { Text("所属项目：$ownerTitle。只删除此次未完成录制在 TapScene 内的本地副本，无法撤销。已经登记的素材和已加入的步骤不会被删除。") },
         confirmButton = { TextButton(onClick = { showDiscard = false; callbacks.onDiscard() }) { Text("删除此副本") } },
         dismissButton = { TextButton(onClick = { showDiscard = false }) { Text("保留") } },
     )
+}
+
+/** Resolve the coordinator's owner by ID; the currently open project may be unrelated. */
+internal fun recordingOwnerTitle(projectState: ProjectUiState, recording: RecordingUiState): String {
+    val id = recording.projectId ?: return "未绑定项目"
+    return projectState.project?.project?.takeIf { it.id == id }?.title
+        ?: projectState.projects.firstOrNull { it.id == id }?.title
+        ?: "原项目暂不可用"
 }
 
 private fun recordingElapsed(ms: Long): String {

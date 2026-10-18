@@ -74,6 +74,10 @@ fun RegionEditorContent(state: RegionUiState, callbacks: RegionEditorCallbacks, 
     var regenerating by rememberSaveable(state.stepId) { mutableStateOf(false) }
     val step = state.step
     val selected = state.selected
+    val regionOrdinals = state.regions.mapIndexed { index, region -> region.id to index + 1 }.toMap()
+    val stepOrdinal = state.snapshot?.steps?.indexOfFirst { it.id == state.stepId }?.takeIf { it >= 0 }?.plus(1)
+    val targetLabel = stepOrdinal?.let { "步骤 ${it.toString().padStart(2, '0')}" +
+        (regionOrdinals[state.selectedId]?.let { ordinal -> " · 区域 $ordinal" } ?: "") }
     val canEdit = state.canEdit && state.cropBitmap == null
     val currentBase = selected != null && step != null && selected.matchesBase(step.asset)
     val create: (OpaqueMask) -> Unit = { rect ->
@@ -97,6 +101,8 @@ fun RegionEditorContent(state: RegionUiState, callbacks: RegionEditorCallbacks, 
             Column(Modifier.weight(1f)) {
                 Text(if (state.cropBitmap == null) step?.title ?: "正在读取步骤" else selected?.name.orEmpty(),
                     style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                targetLabel?.let { Text(it, style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 Text(if (state.cropBitmap == null) "安全截图裁片 · ${state.regions.size}/12"
                     else selected?.asset?.let { "实际 PNG · ${it.width} × ${it.height} 像素" }.orEmpty(),
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -113,7 +119,7 @@ fun RegionEditorContent(state: RegionUiState, callbacks: RegionEditorCallbacks, 
                 adding = adding && state.canAdd, onSelect = { callbacks.onSelect(it); adding = false }, onCreate = create,
                 onChangeRect = { id, rect -> visible.firstOrNull { it.id == id }?.let { region ->
                     if (step != null) edit(region, regionPixelBox(rect, step.asset.width, step.asset.height))
-                } }, objectLabel = "区域")
+                } }, objectLabel = "区域", objectOrdinals = regionOrdinals)
         }
     }
     val details: @Composable (Modifier) -> Unit = { detailsModifier ->
@@ -141,7 +147,7 @@ fun RegionEditorContent(state: RegionUiState, callbacks: RegionEditorCallbacks, 
                     horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     state.regions.forEach { region ->
                         FilterChip(region.id == state.selectedId, { callbacks.onSelect(region.id); adding = false },
-                            enabled = canEdit, label = { Text(region.name, maxLines = 1) })
+                            enabled = canEdit, label = { Text("${regionOrdinals.getValue(region.id)} · ${region.name}", maxLines = 1) })
                     }
                 }
                 if (selected != null) {

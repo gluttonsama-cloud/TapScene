@@ -78,6 +78,7 @@ fun ProjectWorkspaceFrame(
     onBack: () -> Unit,
     onPreview: () -> Unit,
     onMore: () -> Unit,
+    tabsEnabled: Boolean = true,
     content: @Composable () -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
@@ -88,8 +89,9 @@ fun ProjectWorkspaceFrame(
         Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
             ProjectTab.entries.forEach { tab ->
                 Column(Modifier.weight(1f).fillMaxHeight()) {
-                    TextButton(onClick = { onTab(tab) }, modifier = Modifier.fillMaxWidth().weight(1f).heightIn(min = 48.dp).semantics { selected = tab == selectedTab; role = Role.Tab }) {
-                        Text(tab.label, textAlign = TextAlign.Center, color = if (tab == selectedTab) ShellColors.Accent else ShellColors.Muted)
+                    TextButton(onClick = { onTab(tab) }, enabled = tabsEnabled, modifier = Modifier.fillMaxWidth().weight(1f).heightIn(min = 48.dp).semantics { selected = tab == selectedTab; role = Role.Tab }) {
+                        Text(tab.label, textAlign = TextAlign.Center, color = if (!tabsEnabled) ShellColors.Muted.copy(alpha = 0.5f)
+                            else if (tab == selectedTab) ShellColors.Accent else ShellColors.Muted)
                     }
                     Box(Modifier.fillMaxWidth().height(2.dp), contentAlignment = Alignment.BottomCenter) {
                         if (tab == selectedTab) HorizontalDivider(thickness = 2.dp, color = ShellColors.Accent) else ShellDivider()

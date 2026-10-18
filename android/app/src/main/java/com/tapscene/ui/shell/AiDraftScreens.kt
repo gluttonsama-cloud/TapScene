@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -26,6 +27,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.tapscene.data.DraftAiEffect
+import com.tapscene.data.AiDraftImportPreview
 import com.tapscene.data.ProjectSnapshot
 import com.tapscene.data.ProjectStep
 import com.tapscene.packageformat.AiDraftImportPolicy
@@ -63,7 +65,7 @@ fun AiDraftImportContent(
     var chooseBaseline by rememberSaveable(preview?.sessionId) { mutableStateOf(false) }
     var confirmCancel by rememberSaveable { mutableStateOf(false) }
     var technicalExpanded by rememberSaveable(preview?.sessionId) { mutableStateOf(false) }
-    val requestBack: () -> Unit = { if (state.busy) onCancel() else onBack() }
+    val requestBack: () -> Unit = { if (!state.busy) onBack() }
     BackHandler(onBack = requestBack)
     Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
         ShellTopBar(if (completed) "已导入待复核" else "导入 AI 包", requestBack)
@@ -72,7 +74,12 @@ fun AiDraftImportContent(
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
             state.message?.let { item { StatusNote(it) } }
-            if (state.busy) item { Text(state.stage ?: "正在处理", color = ShellColors.Muted) }
+            if (state.busy) item {
+                Text(state.stage ?: "正在处理", color = ShellColors.Muted)
+                Text(if (completed) "正在核对已提交结果，完成后可返回。已建立的草稿不会取消。"
+                    else "处理完成后可返回，已准备的导入会保留。要停止本次处理，请使用下方取消按钮。",
+                    style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+            }
             if (completed) {
                 item {
                     SectionHeader(preview?.scene?.title ?: "导入结果", if (state.result?.projectExists == true) "已建立独立的新项目；原草稿和旧成品保持不变。" else "这次导入记录已保留，新项目已不在本机。")
@@ -128,12 +135,7 @@ fun AiDraftImportContent(
                     if (preview.baselineReleaseId != null) {
                         item { SectionHeader("内容差异 ${preview.differences.size} 项", "比较文字、图、区域和图片身份；动画计划独立列示，不推断计划差异。") }
                         if (preview.differences.isEmpty()) item { Text("上述内容与选定对比版本一致；仍须重新复核。", color = ShellColors.Muted) }
-                        itemsIndexed(preview.differences) { index, difference -> AiPanel {
-                            Text("${index + 1}. ${differenceCategory(difference.category)} · ${differenceField(difference.field)}", style = MaterialTheme.typography.titleSmall)
-                            Text("对比版本：${differenceValue(preview.scene, difference.field, difference.before)}")
-                            Text("导入内容：${differenceValue(preview.scene, difference.field, difference.after)}")
-                            TechnicalDisclosure("差异定位", "分类：${difference.category}\n字段：${difference.field}\n对象：${difference.subjectId}\n对比版本原值：${difference.before ?: "（无）"}\n导入原值：${difference.after ?: "（无）"}")
-                        } }
+                        itemsIndexed(preview.differences) { index, difference -> AiImportDifferencePanel(preview, difference, index) }
                     }
                 }
                 1 -> {
@@ -204,6 +206,7 @@ fun AiDraftImportContent(
         ShellDivider()
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             when {
+                state.busy && !completed -> OutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("取消处理并核对结果") }
                 state.outcomeUnknown -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (state.result?.status != "committed") OutlinedButton(onClick = onCancel, enabled = !state.busy,
                         modifier = Modifier.heightIn(min = 48.dp)) { Text("尝试取消") }
@@ -216,7 +219,6 @@ fun AiDraftImportContent(
                         enabled = !state.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("打开新草稿并复核") }
                     TextButton(onClick = onNewImport, enabled = !state.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("导入另一个包") }
                 }
-                state.busy -> OutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("取消处理并核对结果") }
                 preview != null -> {
                     Text(if (preview.issues.isEmpty()) "3  确认后建立独立新草稿，全部内容待复核" else "存在 ${preview.issues.size} 个阻断项，不能建立草稿", style = MaterialTheme.typography.labelMedium, color = ShellColors.Muted)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -260,8 +262,20 @@ data class DraftAiPlanCallbacks(
 )
 
 @Composable
+internal fun DraftAiTaskNavigationNote(state: DraftAiPlanUiState, pendingHold: Boolean) {
+    Text(when {
+        state.busy -> "正在处理动画计划，完成后可查看其他任务。"
+        state.saveOutcomeUnknown -> "先重读动画计划的保存结果，再查看任务。"
+        pendingHold -> "先应用停留输入并保存计划，或返回放弃，再查看任务。"
+        else -> "先保存动画计划，或返回放弃修改，再查看任务。"
+    }, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+}
+
+@Composable
 fun DraftAiPlanContent(state: DraftAiPlanUiState, callbacks: DraftAiPlanCallbacks, initialSection: Int = 0,
-    initialVisitId: String? = null, initialEffectId: String? = null) {
+    initialVisitId: String? = null, initialEffectId: String? = null,
+    onPendingHoldChange: (Boolean) -> Unit = {}) {
     val config = state.config
     val project = state.project
     var section by rememberSaveable(project?.project?.id) { mutableIntStateOf(initialSection) }
@@ -269,11 +283,35 @@ fun DraftAiPlanContent(state: DraftAiPlanUiState, callbacks: DraftAiPlanCallback
     var effectDetails by rememberSaveable(project?.project?.id) { mutableStateOf(initialEffectId) }
     var editingEffect by rememberSaveable(project?.project?.id) { mutableStateOf<String?>(null) }
     var deletingEffect by rememberSaveable(project?.project?.id) { mutableStateOf<String?>(null) }
-    var exitRequested by rememberSaveable { mutableStateOf(false) }
+    var exitRequested by rememberSaveable(project?.project?.id) { mutableStateOf(false) }
+    var discardHoldRequested by rememberSaveable(project?.project?.id) { mutableStateOf(false) }
+    // Keep raw, possibly invalid input outside collapsed/lazy items and tabs until explicitly applied.
+    var holdInputs by rememberSaveable(project?.project?.id) { mutableStateOf(hashMapOf<String, String>()) }
+    val pendingHolds = config?.visits.orEmpty().filter { visit ->
+        holdInputs[visit.visitId]?.let { it.toIntOrNull() != visit.holdFrames } == true
+    }
+    // The shell must not let task banners bypass this editor's pending-input confirmation.
+    SideEffect { onPendingHoldChange(pendingHolds.isNotEmpty()) }
+    val listState = rememberLazyListState()
+    var locateHold by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(config) {
+        val visits = config?.visits.orEmpty().associateBy { it.visitId }
+        holdInputs = HashMap(holdInputs.filter { (id, text) -> visits[id]?.let { text.toIntOrNull() != it.holdFrames } == true })
+    }
+    LaunchedEffect(locateHold, section) {
+        locateHold?.let { id ->
+            val index = config?.visits?.indexOfFirst { it.visitId == id } ?: -1
+            if (section == 0 && index >= 0) {
+                listState.scrollToItem(2 + (if (state.message != null) 1 else 0) + (if (state.issues.isNotEmpty()) 1 else 0) + index)
+                locateHold = null
+            }
+        }
+    }
     val enabled = !state.busy && !state.saveOutcomeUnknown
     val requestBack: () -> Unit = {
         if (!state.busy) {
-            if (state.dirty || state.saveOutcomeUnknown) exitRequested = true else callbacks.onBack()
+            if (pendingHolds.isNotEmpty()) discardHoldRequested = true
+            else if (state.dirty || state.saveOutcomeUnknown) exitRequested = true else callbacks.onBack()
         }
     }
     BackHandler(onBack = requestBack)
@@ -282,7 +320,7 @@ fun DraftAiPlanContent(state: DraftAiPlanUiState, callbacks: DraftAiPlanCallback
         ShellTopBar("动画计划", requestBack)
         if (state.busy || state.checking) LinearProgressIndicator(Modifier.fillMaxWidth())
         AiSectionTabs(listOf("访问路径", "全部效果", "草稿内容"), section, { section = it })
-        LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp),
+        LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState, contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
             item { SectionHeader(project?.project?.title ?: "读取草稿", "计划属于当前草稿。修改不会自动复核图片或生成可交付版本。") }
             state.message?.let { item { StatusNote(it) } }
@@ -303,7 +341,7 @@ fun DraftAiPlanContent(state: DraftAiPlanUiState, callbacks: DraftAiPlanCallback
                             FilterChip(selected = config.width == 1920, onClick = { callbacks.onCanvas(true) }, enabled = enabled,
                                 label = { Text("横屏 1920×1080") }, modifier = Modifier.weight(1f).heightIn(min = 48.dp))
                         }
-                        TextButton(onClick = callbacks.onRestart, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp)) { Text("从当前草稿起点重选路径…") }
+                        TextButton(onClick = callbacks.onRestart, enabled = enabled && pendingHolds.isEmpty(), modifier = Modifier.heightIn(min = 48.dp)) { Text("从当前草稿起点重选路径…") }
                     } }
                     itemsIndexed(config.visits, key = { _, visit -> "visit-${visit.visitId}" }) { index, visit ->
                         val step = project.steps.firstOrNull { it.id == visit.stateId }
@@ -312,25 +350,28 @@ fun DraftAiPlanContent(state: DraftAiPlanUiState, callbacks: DraftAiPlanCallback
                                 "${visit.holdFrames} 帧（${frames(visit.holdFrames)}） · ${draftAction(project, visit.selectedEdgeId)}",
                                 onClick = { visitDetails = visit.visitId.takeUnless { it == visitDetails } })
                             if (visitDetails == visit.visitId) {
-                                var hold by rememberSaveable(visit.visitId, visit.holdFrames) { mutableStateOf(visit.holdFrames.toString()) }
-                                OutlinedTextField(hold, { hold = it }, label = { Text("停留帧数（1–1800）") }, enabled = enabled,
-                                    singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
+                                val hold = holdInputs[visit.visitId] ?: visit.holdFrames.toString()
                                 val value = hold.toIntOrNull()
-                                OutlinedButton(onClick = { value?.let { callbacks.onHold(visit.visitId, it) } }, enabled = enabled && value != null && value in 1..1800,
+                                val valid = value != null && value in 1..1800
+                                OutlinedTextField(hold, { holdInputs = HashMap(holdInputs).apply { put(visit.visitId, it) } },
+                                    label = { Text("停留帧数（1–1800）") }, enabled = enabled, isError = !valid,
+                                    supportingText = { Text(if (!valid) "请输入 1–1800 的整数，输入仍保留。" else if (value != visit.holdFrames) "尚未应用；保存前请先应用此输入。" else "已应用到计划") },
+                                    singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
+                                OutlinedButton(onClick = { value?.let { callbacks.onHold(visit.visitId, it) } }, enabled = enabled && valid,
                                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("应用停留，保留全部效果") }
                                 Text("缩短停留可能使效果超界；效果会保留并列为待修复。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                                 if (step != null) {
                                     SectionHeader("重新选择本次访问的动作", "后续访问若受影响，会先列出删除的访问与效果，再由你确认。")
-                                    AiChoice(if (step.isTerminal) "在此结束，不选择动作" else "先在此截断，路径待补全", visit.selectedEdgeId == null, enabled) {
+                                    AiChoice(if (step.isTerminal) "在此结束，不选择动作" else "先在此截断，路径待补全", visit.selectedEdgeId == null, enabled && pendingHolds.isEmpty()) {
                                         callbacks.onChooseEdge(visit.visitId, null)
                                     }
                                     step.hotspots.forEach { hotspot ->
                                         AiChoice("${hotspot.label} → ${hotspot.targetStepId?.let { draftStep(project, it) } ?: "结束：${hotspot.endLabel.orEmpty()}"}",
-                                            visit.selectedEdgeId == hotspot.edgeId, enabled) { callbacks.onChooseEdge(visit.visitId, hotspot.edgeId) }
+                                            visit.selectedEdgeId == hotspot.edgeId, enabled && pendingHolds.isEmpty()) { callbacks.onChooseEdge(visit.visitId, hotspot.edgeId) }
                                     }
                                     step.nextAction?.let { next ->
                                         AiChoice("${next.label} → ${next.targetStepId?.let { draftStep(project, it) } ?: "待补目标"}", visit.selectedEdgeId == next.id,
-                                            enabled && next.targetStepId != null) { callbacks.onChooseEdge(visit.visitId, next.id) }
+                                            enabled && pendingHolds.isEmpty() && next.targetStepId != null) { callbacks.onChooseEdge(visit.visitId, next.id) }
                                     }
                                 } else Text("从前面的有效访问重选路径，或从起点重选。旧参数保留到你明确确认。", color = ShellColors.Accent)
                                 TechnicalDisclosure("访问标识", "访问：${visit.visitId}\n步骤：${visit.stateId}\n动作：${visit.selectedEdgeId ?: "无"}")
@@ -377,14 +418,24 @@ fun DraftAiPlanContent(state: DraftAiPlanUiState, callbacks: DraftAiPlanCallback
         }
         ShellDivider()
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            if (pendingHolds.isNotEmpty()) TextButton(onClick = {
+                section = 0; visitDetails = pendingHolds.first().visitId; locateHold = visitDetails
+            }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("${pendingHolds.size} 处停留输入未应用 · 返回检查") }
             Text(if (config == null) "先完成步骤与起点" else "${config.visits.size} 次访问 · ${config.effects.size} 项效果 · ${if (state.dirty) "有未保存修改" else "已读取保存内容"}",
                 style = MaterialTheme.typography.labelMedium, color = ShellColors.Muted)
             if (state.saveOutcomeUnknown) Button(onClick = callbacks.onReadResult, enabled = !state.busy,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("重读保存结果") }
-            else Button(onClick = { callbacks.onSave(false) }, enabled = enabled && config != null,
+            else Button(onClick = { callbacks.onSave(false) }, enabled = enabled && config != null && pendingHolds.isEmpty(),
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (state.issues.isEmpty()) "检查并保存计划" else "保存待修复计划") }
         }
     }
+    if (discardHoldRequested) AlertDialog(onDismissRequest = { discardHoldRequested = false }, title = { Text("停留帧数尚未应用") },
+        text = { Text("${pendingHolds.size} 处输入尚未写入计划。继续编辑并应用后再保存；放弃输入不会丢弃已经应用的其他修改。") },
+        confirmButton = { TextButton(onClick = { discardHoldRequested = false }) { Text("继续编辑") } },
+        dismissButton = { TextButton(onClick = {
+            discardHoldRequested = false; holdInputs = hashMapOf()
+            if (state.dirty || state.saveOutcomeUnknown) exitRequested = true else callbacks.onBack()
+        }) { Text("放弃输入并返回") } })
     if (exitRequested) AlertDialog(onDismissRequest = { exitRequested = false }, title = { Text("保留动画计划修改？") },
         text = { Text(if (state.saveOutcomeUnknown) "保存结果尚未确定。先重读结果，避免覆盖已保存内容。" else "未保存的访问与效果修改还在本页。") },
         confirmButton = { TextButton(onClick = { exitRequested = false; if (state.saveOutcomeUnknown) callbacks.onReadResult() else callbacks.onSave(true) }, enabled = !state.busy) {
@@ -585,13 +636,38 @@ private fun differenceField(value: String): String = when (value) {
     "cropImage" -> "区域裁片"; "sourceDimensions" -> "原图尺寸"; "bbox" -> "像素范围"; "zIndex" -> "叠放次序"; "anchor" -> "局部锚点"
     else -> "参数"
 }
-private fun differenceValue(scene: ViewerScene, field: String, value: String?): String {
+/** Resolve each side against its own frozen scene, including renamed or removed objects. */
+@Composable
+internal fun AiImportDifferencePanel(preview: AiDraftImportPreview, difference: AiDraftImportPolicy.Difference, index: Int) {
+    val baseline = preview.baselineScene?.takeIf { it.releaseId == preview.baselineReleaseId }
+    AiPanel {
+        Text("${index + 1}. ${differenceCategory(difference.category)} · ${differenceField(difference.field)}", style = MaterialTheme.typography.titleSmall)
+        Text("对比版本：${differenceValue(baseline, difference.field, difference.before, "对比版本")}")
+        Text("导入内容：${differenceValue(preview.scene, difference.field, difference.after, "导入内容")}")
+        TechnicalDisclosure("差异定位", "分类：${difference.category}\n字段：${difference.field}\n对象：${difference.subjectId}\n对比版本原值：${difference.before ?: "（无）"}\n导入原值：${difference.after ?: "（无）"}")
+    }
+}
+
+private fun differenceStepLabel(scene: ViewerScene, id: String): String? {
+    val index = scene.states.indexOfFirst { it.id == id }
+    return if (index < 0) null else "步骤 ${index + 1} · ${scene.states[index].title}"
+}
+
+private fun differenceValue(scene: ViewerScene?, field: String, value: String?, side: String): String {
     if (value == null) return "（无）"
+    if (scene == null && field in setOf("startStateId", "stateId", "fromStateId", "toStateId", "hotspotId", "order")) {
+        return "${side}对象信息不可用，标识可展开查看"
+    }
     return when (field) {
         "image", "baseImage", "cropImage", "transition" -> "已记录图片内容与尺寸，精确摘要可展开查看"
-        "startStateId", "stateId", "fromStateId", "toStateId" -> scene.states.firstOrNull { it.id == value }?.title ?: "导入内容中不存在的步骤，标识可展开查看"
-        "hotspotId" -> scene.hotspots.firstOrNull { it.id == value }?.label ?: "导入内容中不存在的热点，标识可展开查看"
-        "order" -> value.split(',').mapIndexed { index, id -> "${index + 1}. ${scene.states.firstOrNull { it.id == id }?.title ?: "未纳入导入内容的步骤"}" }.joinToString("\n")
+        "startStateId", "stateId", "fromStateId", "toStateId" -> differenceStepLabel(checkNotNull(scene), value)
+            ?: "${side}中未找到此步骤，标识可展开查看"
+        "hotspotId" -> checkNotNull(scene).hotspots.firstOrNull { it.id == value }?.let { hotspot ->
+            val index = scene.hotspots.filter { it.stateId == hotspot.stateId }.indexOfFirst { it.id == value }
+            "${differenceStepLabel(scene, hotspot.stateId) ?: "所属步骤未找到"} / 热点 ${index + 1} · ${hotspot.label}"
+        } ?: "${side}中未找到此热点，标识可展开查看"
+        "order" -> value.split(',').joinToString("\n") { id -> differenceStepLabel(checkNotNull(scene), id)
+            ?: "${side}中未找到此步骤，标识可展开查看" }
         "terminal" -> if (value == "true") "可结束" else "非结束步骤"
         "trigger" -> when (value) { "tap" -> "点击画面热点"; "continue" -> "画布外下一步按钮"; else -> "其他方式，原值可展开查看" }
         "sourceKindDeclaration" -> when (value) { "recorded" -> "声称来自录制"; "authored" -> "声称由作者编排"; "imported" -> "声称来自导入"; else -> "其他声明，原值可展开查看" }
