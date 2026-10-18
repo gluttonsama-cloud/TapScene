@@ -408,6 +408,7 @@ jobs:
             --tests com.tapscene.ui.OfflineShareWorkspaceHostTest \
             --tests com.tapscene.ui.DeliverySelectionHostTest \
             --tests com.tapscene.ui.shell.DeliveryProductPagesHostTest \
+            --tests com.tapscene.ui.shell.DraftAiHoldInputHostTest \
             --tests com.tapscene.ui.shell.AiImportNavigationHostTest \
             --tests com.tapscene.ui.AiImportCancellationHostTest \
             --tests com.tapscene.ui.shell.HomeMaterialPagesHostTest \
@@ -627,6 +628,8 @@ jobs:
               ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "selectedVersionDetailsAndBusyStatePreserveExportAndShareCallbacks"): 1,
               ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "importedVersionCannotShareAndDeveloperHostingRetainsAllDestinations"): 1,
               ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "settingsOnlyShowsRealStorageAndExpandableAccurateHelp"): 1,
+              ("com.tapscene.ui.shell.DraftAiHoldInputHostTest", "pendingHoldSurvivesCollapseAndTabsAndCannotSilentlySaveOldValue"): 1,
+              ("com.tapscene.ui.shell.DraftAiHoldInputHostTest", "pendingInputCanBeExplicitlyDiscardedAndNeverFollowsAnotherProject"): 1,
               ("com.tapscene.ui.shell.AiImportNavigationHostTest", "busyBackPreservesImportAndOnlyExplicitCancelReachesDestructiveCallback"): 1,
               ("com.tapscene.ui.AiImportCancellationHostTest", "cancellingUnknownReceiptRetryAlwaysReadsActualCommitBeforeCleanup"): 1,
               ("com.tapscene.ui.shell.HomeMaterialPagesHostTest", "healthyHomeEmptyStateDoesNotReplaceLoadingOrFailure"): 1,

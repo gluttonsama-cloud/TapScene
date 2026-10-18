@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -274,11 +275,33 @@ fun DraftAiPlanContent(state: DraftAiPlanUiState, callbacks: DraftAiPlanCallback
     var effectDetails by rememberSaveable(project?.project?.id) { mutableStateOf(initialEffectId) }
     var editingEffect by rememberSaveable(project?.project?.id) { mutableStateOf<String?>(null) }
     var deletingEffect by rememberSaveable(project?.project?.id) { mutableStateOf<String?>(null) }
-    var exitRequested by rememberSaveable { mutableStateOf(false) }
+    var exitRequested by rememberSaveable(project?.project?.id) { mutableStateOf(false) }
+    var discardHoldRequested by rememberSaveable(project?.project?.id) { mutableStateOf(false) }
+    // Keep raw, possibly invalid input outside collapsed/lazy items and tabs until explicitly applied.
+    var holdInputs by rememberSaveable(project?.project?.id) { mutableStateOf(hashMapOf<String, String>()) }
+    val pendingHolds = config?.visits.orEmpty().filter { visit ->
+        holdInputs[visit.visitId]?.let { it.toIntOrNull() != visit.holdFrames } == true
+    }
+    val listState = rememberLazyListState()
+    var locateHold by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(config) {
+        val visits = config?.visits.orEmpty().associateBy { it.visitId }
+        holdInputs = HashMap(holdInputs.filter { (id, text) -> visits[id]?.let { text.toIntOrNull() != it.holdFrames } == true })
+    }
+    LaunchedEffect(locateHold, section) {
+        locateHold?.let { id ->
+            val index = config?.visits?.indexOfFirst { it.visitId == id } ?: -1
+            if (section == 0 && index >= 0) {
+                listState.scrollToItem(2 + (if (state.message != null) 1 else 0) + (if (state.issues.isNotEmpty()) 1 else 0) + index)
+                locateHold = null
+            }
+        }
+    }
     val enabled = !state.busy && !state.saveOutcomeUnknown
     val requestBack: () -> Unit = {
         if (!state.busy) {
-            if (state.dirty || state.saveOutcomeUnknown) exitRequested = true else callbacks.onBack()
+            if (pendingHolds.isNotEmpty()) discardHoldRequested = true
+            else if (state.dirty || state.saveOutcomeUnknown) exitRequested = true else callbacks.onBack()
         }
     }
     BackHandler(onBack = requestBack)
@@ -287,7 +310,7 @@ fun DraftAiPlanContent(state: DraftAiPlanUiState, callbacks: DraftAiPlanCallback
         ShellTopBar("动画计划", requestBack)
         if (state.busy || state.checking) LinearProgressIndicator(Modifier.fillMaxWidth())
         AiSectionTabs(listOf("访问路径", "全部效果", "草稿内容"), section, { section = it })
-        LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp),
+        LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState, contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
             item { SectionHeader(project?.project?.title ?: "读取草稿", "计划属于当前草稿。修改不会自动复核图片或生成可交付版本。") }
             state.message?.let { item { StatusNote(it) } }
@@ -308,7 +331,7 @@ fun DraftAiPlanContent(state: DraftAiPlanUiState, callbacks: DraftAiPlanCallback
                             FilterChip(selected = config.width == 1920, onClick = { callbacks.onCanvas(true) }, enabled = enabled,
                                 label = { Text("横屏 1920×1080") }, modifier = Modifier.weight(1f).heightIn(min = 48.dp))
                         }
-                        TextButton(onClick = callbacks.onRestart, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp)) { Text("从当前草稿起点重选路径…") }
+                        TextButton(onClick = callbacks.onRestart, enabled = enabled && pendingHolds.isEmpty(), modifier = Modifier.heightIn(min = 48.dp)) { Text("从当前草稿起点重选路径…") }
                     } }
                     itemsIndexed(config.visits, key = { _, visit -> "visit-${visit.visitId}" }) { index, visit ->
                         val step = project.steps.firstOrNull { it.id == visit.stateId }
@@ -317,25 +340,28 @@ fun DraftAiPlanContent(state: DraftAiPlanUiState, callbacks: DraftAiPlanCallback
                                 "${visit.holdFrames} 帧（${frames(visit.holdFrames)}） · ${draftAction(project, visit.selectedEdgeId)}",
                                 onClick = { visitDetails = visit.visitId.takeUnless { it == visitDetails } })
                             if (visitDetails == visit.visitId) {
-                                var hold by rememberSaveable(visit.visitId, visit.holdFrames) { mutableStateOf(visit.holdFrames.toString()) }
-                                OutlinedTextField(hold, { hold = it }, label = { Text("停留帧数（1–1800）") }, enabled = enabled,
-                                    singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
+                                val hold = holdInputs[visit.visitId] ?: visit.holdFrames.toString()
                                 val value = hold.toIntOrNull()
-                                OutlinedButton(onClick = { value?.let { callbacks.onHold(visit.visitId, it) } }, enabled = enabled && value != null && value in 1..1800,
+                                val valid = value != null && value in 1..1800
+                                OutlinedTextField(hold, { holdInputs = HashMap(holdInputs).apply { put(visit.visitId, it) } },
+                                    label = { Text("停留帧数（1–1800）") }, enabled = enabled, isError = !valid,
+                                    supportingText = { Text(if (!valid) "请输入 1–1800 的整数，输入仍保留。" else if (value != visit.holdFrames) "尚未应用；保存前请先应用此输入。" else "已应用到计划") },
+                                    singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
+                                OutlinedButton(onClick = { value?.let { callbacks.onHold(visit.visitId, it) } }, enabled = enabled && valid,
                                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("应用停留，保留全部效果") }
                                 Text("缩短停留可能使效果超界；效果会保留并列为待修复。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                                 if (step != null) {
                                     SectionHeader("重新选择本次访问的动作", "后续访问若受影响，会先列出删除的访问与效果，再由你确认。")
-                                    AiChoice(if (step.isTerminal) "在此结束，不选择动作" else "先在此截断，路径待补全", visit.selectedEdgeId == null, enabled) {
+                                    AiChoice(if (step.isTerminal) "在此结束，不选择动作" else "先在此截断，路径待补全", visit.selectedEdgeId == null, enabled && pendingHolds.isEmpty()) {
                                         callbacks.onChooseEdge(visit.visitId, null)
                                     }
                                     step.hotspots.forEach { hotspot ->
                                         AiChoice("${hotspot.label} → ${hotspot.targetStepId?.let { draftStep(project, it) } ?: "结束：${hotspot.endLabel.orEmpty()}"}",
-                                            visit.selectedEdgeId == hotspot.edgeId, enabled) { callbacks.onChooseEdge(visit.visitId, hotspot.edgeId) }
+                                            visit.selectedEdgeId == hotspot.edgeId, enabled && pendingHolds.isEmpty()) { callbacks.onChooseEdge(visit.visitId, hotspot.edgeId) }
                                     }
                                     step.nextAction?.let { next ->
                                         AiChoice("${next.label} → ${next.targetStepId?.let { draftStep(project, it) } ?: "待补目标"}", visit.selectedEdgeId == next.id,
-                                            enabled && next.targetStepId != null) { callbacks.onChooseEdge(visit.visitId, next.id) }
+                                            enabled && pendingHolds.isEmpty() && next.targetStepId != null) { callbacks.onChooseEdge(visit.visitId, next.id) }
                                     }
                                 } else Text("从前面的有效访问重选路径，或从起点重选。旧参数保留到你明确确认。", color = ShellColors.Accent)
                                 TechnicalDisclosure("访问标识", "访问：${visit.visitId}\n步骤：${visit.stateId}\n动作：${visit.selectedEdgeId ?: "无"}")
@@ -382,14 +408,24 @@ fun DraftAiPlanContent(state: DraftAiPlanUiState, callbacks: DraftAiPlanCallback
         }
         ShellDivider()
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            if (pendingHolds.isNotEmpty()) TextButton(onClick = {
+                section = 0; visitDetails = pendingHolds.first().visitId; locateHold = visitDetails
+            }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("${pendingHolds.size} 处停留输入未应用 · 返回检查") }
             Text(if (config == null) "先完成步骤与起点" else "${config.visits.size} 次访问 · ${config.effects.size} 项效果 · ${if (state.dirty) "有未保存修改" else "已读取保存内容"}",
                 style = MaterialTheme.typography.labelMedium, color = ShellColors.Muted)
             if (state.saveOutcomeUnknown) Button(onClick = callbacks.onReadResult, enabled = !state.busy,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("重读保存结果") }
-            else Button(onClick = { callbacks.onSave(false) }, enabled = enabled && config != null,
+            else Button(onClick = { callbacks.onSave(false) }, enabled = enabled && config != null && pendingHolds.isEmpty(),
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (state.issues.isEmpty()) "检查并保存计划" else "保存待修复计划") }
         }
     }
+    if (discardHoldRequested) AlertDialog(onDismissRequest = { discardHoldRequested = false }, title = { Text("停留帧数尚未应用") },
+        text = { Text("${pendingHolds.size} 处输入尚未写入计划。继续编辑并应用后再保存；放弃输入不会丢弃已经应用的其他修改。") },
+        confirmButton = { TextButton(onClick = { discardHoldRequested = false }) { Text("继续编辑") } },
+        dismissButton = { TextButton(onClick = {
+            discardHoldRequested = false; holdInputs = hashMapOf()
+            if (state.dirty || state.saveOutcomeUnknown) exitRequested = true else callbacks.onBack()
+        }) { Text("放弃输入并返回") } })
     if (exitRequested) AlertDialog(onDismissRequest = { exitRequested = false }, title = { Text("保留动画计划修改？") },
         text = { Text(if (state.saveOutcomeUnknown) "保存结果尚未确定。先重读结果，避免覆盖已保存内容。" else "未保存的访问与效果修改还在本页。") },
         confirmButton = { TextButton(onClick = { exitRequested = false; if (state.saveOutcomeUnknown) callbacks.onReadResult() else callbacks.onSave(true) }, enabled = !state.busy) {
