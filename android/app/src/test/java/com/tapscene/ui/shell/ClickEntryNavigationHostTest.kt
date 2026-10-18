@@ -24,6 +24,7 @@ import com.tapscene.data.ReleaseStore
 import com.tapscene.ui.ReleaseWorkspace
 import kotlinx.coroutines.Dispatchers
 import com.tapscene.data.ProjectStore
+import com.tapscene.data.WorkspaceStore
 import com.tapscene.ui.ProjectWorkspace
 import com.tapscene.clickplan.ClickAction
 import com.tapscene.clickplan.ClickDevice
@@ -218,9 +219,39 @@ class ClickEntryNavigationHostTest {
         compose.waitForIdle()
         compose.onNodeWithContentDescription("返回").performClick()
         waitFor("其他创建方式")
-        compose.onNodeWithText(created.title).performClick()
-        waitFor("素材")
-        compose.onNodeWithText("素材").performClick()
+        val reopenedProjects = ViewModelProvider(compose.activity)[ProjectWorkspace::class.java]
+        val reopenedMedia = ViewModelProvider(compose.activity)[MediaWorkspace::class.java]
+        compose.waitUntil(30_000) {
+            compose.waitForIdle()
+            !reopenedProjects.state.value.busy && !reopenedMedia.state.value.busy
+        }
+        // Hold only the synthetic workspace read: openProject publishes STEPS before its
+        // final refresh completes. This deterministically exposes the busy tab window.
+        val refreshHeld = CountDownLatch(1)
+        val finishRefresh = CountDownLatch(1)
+        val refreshHolder = Thread {
+            WorkspaceStore.withProjectCopyLock { refreshHeld.countDown(); check(finishRefresh.await(90, TimeUnit.SECONDS)) }
+        }.apply { start() }
+        try {
+            check(refreshHeld.await(10, TimeUnit.SECONDS))
+            compose.onNodeWithText(created.title).performClick()
+            waitFor("素材")
+            assertEquals(created.id, reopenedProjects.state.value.project?.project?.id)
+            assertEquals(com.tapscene.ui.ProjectRoute.STEPS, reopenedProjects.state.value.route)
+            assertTrue(reopenedProjects.state.value.busy)
+            compose.onNodeWithText("素材").assertIsNotSelected().performClick()
+            compose.onNodeWithText("素材").assertIsNotSelected()
+            compose.onNodeWithText("悬浮编排").assertDoesNotExist()
+            println("HOST_PROJECT_TAB busy=${reopenedProjects.state.value.busy}; sources click retains Steps while refresh is blocked")
+            compose.onNodeWithText("素材").assertIsNotEnabled()
+        } finally {
+            finishRefresh.countDown(); refreshHolder.join(10_000)
+            check(!refreshHolder.isAlive)
+        }
+        compose.waitUntil(30_000) {
+            compose.onAllNodes(hasText("素材") and isEnabled()).fetchSemanticsNodes().size == 1
+        }
+        compose.onNodeWithText("素材").assertIsEnabled().performClick().assertIsSelected()
         compose.onNodeWithText("悬浮编排").performClick()
         waitFor("开启无障碍服务")
         assertEquals(listOf(created.id), ProjectStore(app).listProjects().map { it.id })

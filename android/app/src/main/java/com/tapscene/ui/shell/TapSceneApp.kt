@@ -1033,7 +1033,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                         state.route == ProjectRoute.STEPS -> ProjectWorkspaceFrame(
                             state.project?.project?.title.orEmpty(), tab, { if (!state.busy && !mediaState.busy) { connectionRepairStepId = null; tab = it } },
                             { if (!state.busy && !mediaState.busy) projects.back() }, { if (!unavailable) projects.startPreview() },
-                            { projectMore = true },
+                            { projectMore = true }, tabsEnabled = !state.busy && !mediaState.busy,
                         ) {
                             when (tab) {
                                 ProjectTab.STEPS -> StoryboardContent(state, projects::openStep, { tab = ProjectTab.SOURCES },

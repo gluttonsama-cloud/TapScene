@@ -42,3 +42,12 @@ fun SourceOptionsAtVideoLimitPreview() = HomeMaterialSurface {
 private fun HomeMaterialSurface(content: @Composable () -> Unit) {
     TapSceneTheme { Surface(Modifier.fillMaxSize(), color = ShellColors.Background, content = content) }
 }
+
+@PreviewTest
+@Preview(name = "project_sources_busy", widthDp = 320, heightDp = 568, fontScale = 1.3f, locale = "zh-rCN", showBackground = true)
+@Composable
+fun ProjectSourcesBusyPreview() = HomeMaterialSurface {
+    ProjectWorkspaceFrame("报名演示", ProjectTab.SOURCES, {}, {}, {}, {}, tabsEnabled = false) {
+        ProjectSourcesContent(ShellPreviewFixture.sources, true, false, {}, {}, {}, {}, {}, onClickPlan = {})
+    }
+}
