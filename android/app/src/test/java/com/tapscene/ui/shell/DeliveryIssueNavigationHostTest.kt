@@ -1,5 +1,6 @@
 package com.tapscene.ui.shell
 
+import android.graphics.BitmapFactory
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.lifecycle.ViewModelProvider
@@ -11,11 +12,19 @@ import com.tapscene.data.HostFileSyncShadow
 import com.tapscene.data.HostSqlite
 import com.tapscene.data.ProjectNextAction
 import com.tapscene.data.ProjectStore
+import com.tapscene.data.RegionBox
+import com.tapscene.data.ReviewedStepInput
+import com.tapscene.data.StepOrigin
+import com.tapscene.media.OpaqueMask
+import com.tapscene.media.SafeMediaWriter
+import com.tapscene.packageformat.ViewerPackageCodec
 import com.tapscene.ui.MediaWorkspace
 import com.tapscene.ui.ProjectIssueCorrection
 import com.tapscene.ui.ProjectRoute
 import com.tapscene.ui.ProjectWorkspace
+import com.tapscene.ui.RegionWorkspace
 import com.tapscene.ui.ReleaseWorkspace
+import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
@@ -195,7 +204,7 @@ class DeliveryIssueNavigationHostTest {
         compose.onNodeWithText("此步已接入当前起点路径。").assertIsDisplayed()
         compose.onNodeWithText("选择接入步骤").assertDoesNotExist()
         compose.onNodeWithText("返回交付检查").assertIsDisplayed().performClick()
-        waitFor("当前本机结构检查未返回问题。")
+        waitFor("当前检查未返回待处理问题。")
         compose.onNodeWithText("检查与交付").assertIsSelected()
         compose.onNodeWithText(issue.message).assertDoesNotExist()
         compose.onNodeWithText("去修正").assertDoesNotExist()
@@ -333,7 +342,7 @@ class DeliveryIssueNavigationHostTest {
         compose.onNodeWithText("返回").performClick()
         waitFor("名称与讲解")
         compose.onNodeWithText("返回").performClick()
-        waitFor("当前本机结构检查未返回问题。")
+        waitFor("当前检查未返回待处理问题。")
         compose.onNodeWithText("检查与交付").assertIsSelected()
         compose.onNodeWithText(endingIssue(target.title)).assertDoesNotExist()
         compose.onNodeWithText("去修正").assertDoesNotExist()
@@ -349,6 +358,224 @@ class DeliveryIssueNavigationHostTest {
         // The imported plan still stops at a former terminal. Repairing this graph does not
         // silently rewrite that finite plan or establish candidate-generation readiness.
         println("HOST_DELIVERY_ENDING closed-loop/same-title-ID/explicit-end-save/old-actions/return-checks PASS; imported-plan repair required; candidate NOT_RUN; device NOT_RUN")
+    }
+
+    @Test fun regionPreflightTargetsExactCropAndRequiresExplicitGenerationAndReview() {
+        waitFor("悬浮编排")
+        val app = RuntimeEnvironment.getApplication()
+        val projects = ViewModelProvider(compose.activity)[ProjectWorkspace::class.java]
+        val releases = ViewModelProvider(compose.activity)[ReleaseWorkspace::class.java]
+        val media = ViewModelProvider(compose.activity)[MediaWorkspace::class.java]
+        val regions = ViewModelProvider(compose.activity)[RegionWorkspace::class.java]
+        val store = ProjectStore(app)
+        fun awaitIdle() = compose.waitUntil(30_000) {
+            compose.waitForIdle()
+            !projects.state.value.busy && !releases.state.value.busy &&
+                !media.state.value.busy && !regions.state.value.busy
+        }
+        awaitIdle()
+        val (before, targetStepId, staleStepId) = runBlocking(Dispatchers.IO) {
+            val fixture = AiDraftImportFixtures.complete(app)
+            val imports = AiDraftImportStore(app)
+            val input = fixture.zip.inputStream().use { imports.prepare(it) }
+            val projectId = checkNotNull(imports.commit(input.sessionId, input.previewDigest).projectId)
+            var snapshot = checkNotNull(store.readProject(projectId))
+            val start = snapshot.steps.single { it.id == snapshot.project.startStepId }
+            val regionName = start.regions.single().name
+            // Keep the imported crop unreviewed. Only fixture setup writes below establish
+            // the other readiness states; these calls are not UI or human review claims.
+            assertNull(start.regions.single().reviewedAt)
+            for (stepId in listOf(fixture.endId, fixture.branchId)) {
+                val step = snapshot.steps.single { it.id == stepId }
+                snapshot = store.saveStepDraft(projectId, stepId, start.title, step.description,
+                    step.isTerminal, step.hotspots, snapshot.project.revision, step.nextAction)
+            }
+            // Two same-name regions in one of the same-title steps prove exact region targeting.
+            for (order in 0..1) snapshot = store.saveRegion(projectId, fixture.endId, null,
+                regionName, null, RegionBox(2 + order, 3 + order, 8, 9), order, .5, .5,
+                snapshot.project.revision)
+            snapshot = store.saveRegion(projectId, fixture.branchId, null, regionName, null,
+                RegionBox(3, 4, 10, 12), 0, .5, .5, snapshot.project.revision)
+            val staleId = snapshot.steps.single { it.id == fixture.branchId }.regions.single().id
+            snapshot = store.generateRegion(projectId, staleId, snapshot.project.revision)
+            val oldCrop = checkNotNull(snapshot.steps.single { it.id == fixture.branchId }.regions.single().asset)
+            snapshot = store.reviewRegion(projectId, staleId, snapshot.project.revision, oldCrop.sha256)
+            val binding = snapshot.steps.single { it.id == fixture.branchId }.safeImageBinding(snapshot.project)
+            val bitmap = store.readSafeImageBase(binding)
+            val masks = listOf(OpaqueMask(.2f, .2f, .5f, .5f))
+            val output = try {
+                SafeMediaWriter(app).writePng(bitmap, masks, File(app.noBackupFilesDir, "region-base-${UUID.randomUUID()}"))
+            } finally { bitmap.recycle() }
+            snapshot = store.replaceReviewedStep(projectId, fixture.branchId, binding.revision,
+                ReviewedStepInput(output.file, output.sha256, output.width, output.height,
+                    StepOrigin.Image(binding), masks, UUID.randomUUID().toString()))
+            Triple(snapshot, fixture.endId, fixture.branchId)
+        }
+        val projectId = before.project.id
+        val imported = before.steps.single { it.id == before.project.startStepId }
+        val target = before.steps.single { it.id == targetStepId }
+        val stale = before.steps.single { it.id == staleStepId }
+        val chosen = target.regions[1]
+        val importedRegion = imported.regions.single()
+        assertEquals(3, before.steps.count { it.title == target.title })
+        assertEquals(2, target.regions.count { it.name == chosen.name })
+        assertTrue(ProjectWorkspace.graphIssues(before).isEmpty())
+        assertTrue(importedRegion.asset != null && importedRegion.reviewedAt == null && importedRegion.matchesBase(imported.asset))
+        assertTrue(target.regions.all { it.asset == null && it.reviewedAt == null && it.matchesBase(target.asset) })
+        assertFalse(stale.regions.single().matchesBase(stale.asset))
+        assertNull(stale.regions.single().asset)
+        val prefix = "步骤“${target.title}”的区域“${chosen.name}”"
+        val unreviewedMessage = "${prefix}尚未复核裁片，请查看并确认。"
+        val missingMessage = "${prefix}尚未生成裁片，请生成并复核。"
+        val staleMessage = "${prefix}底图已改变，请校正范围后重新生成并复核。"
+        fun savedFiles() = File(app.noBackupFilesDir, "project-assets/$projectId").walkTopDown()
+            .filter { it.isFile }.associate { it.name to ViewerPackageCodec.sha256(it) }
+        // Settle the fixture replacement's normal journal cleanup before freezing files.
+        assertEquals(before, store.readProject(projectId))
+        val filesBefore = savedFiles()
+        val planBefore = checkNotNull(store.readDraftAiConfig(projectId))
+
+        compose.runOnIdle { projects.reload() }
+        awaitIdle()
+        compose.onNodeWithText(before.project.title).performClick()
+        waitFor("分镜")
+        awaitIdle()
+        compose.onNodeWithText("检查与交付").performClick()
+        compose.waitForIdle()
+        assertEquals(listOf(unreviewedMessage, missingMessage, missingMessage, staleMessage),
+            projects.state.value.issues.map { it.message })
+        compose.onNodeWithText(unreviewedMessage).performScrollTo().assertIsDisplayed()
+        compose.onAllNodesWithText(missingMessage).assertCountEquals(2)
+        compose.onNodeWithText(staleMessage).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("生成待复核成品").performScrollTo().assertIsNotEnabled()
+
+        // Synthetic owner/busy boundary only; all project data and image files remain real.
+        @Suppress("UNCHECKED_CAST")
+        val regionState = RegionWorkspace::class.java.getDeclaredField("mutableState")
+            .apply { isAccessible = true }.get(regions) as
+            kotlinx.coroutines.flow.MutableStateFlow<com.tapscene.ui.RegionUiState>
+        val previousOwner = com.tapscene.ui.RegionUiState(projectId = projectId, stepId = stale.id,
+            snapshot = before, selectedId = stale.regions.single().id, busy = true,
+            stage = "Synthetic previous-owner boundary")
+        compose.runOnIdle { regionState.value = previousOwner }
+        // Opening correction waits at the injected busy boundary and preserves that owner state.
+        compose.onNodeWithText(unreviewedMessage).performScrollTo().performClick()
+        waitFor("读取区域")
+        compose.onNodeWithText("正在等待之前的区域处理完成，随后读取当前区域。").assertIsDisplayed()
+        compose.onNodeWithText("可见区域").assertDoesNotExist()
+        compose.onNodeWithText("复核实际裁片").assertDoesNotExist()
+        assertEquals(previousOwner, regions.state.value)
+        assertEquals(before, store.readProject(projectId))
+        assertEquals(filesBefore, savedFiles())
+        compose.runOnIdle { regionState.value = previousOwner.copy(busy = false, stage = null) }
+        waitFor("可见区域")
+        awaitIdle()
+        assertEquals(ProjectRoute.STEPS, projects.state.value.route)
+        assertEquals(projectId, regions.state.value.projectId)
+        assertEquals(imported.id, regions.state.value.stepId)
+        assertEquals(importedRegion.id, regions.state.value.selectedId)
+        assertNull(regions.state.value.cropBitmap)
+        compose.onNodeWithText("查看并复核").assertIsEnabled()
+        assertEquals(before, store.readProject(projectId))
+        assertEquals(filesBefore, savedFiles())
+        compose.onNodeWithContentDescription("返回").performClick()
+        waitFor(unreviewedMessage)
+        awaitIdle()
+        compose.onNodeWithText("检查与交付").assertIsSelected()
+
+        compose.onNodeWithText(staleMessage).performScrollTo().performClick()
+        waitFor("可见区域")
+        awaitIdle()
+        assertEquals(projectId, regions.state.value.projectId)
+        assertEquals(stale.id, regions.state.value.stepId)
+        assertEquals(stale.regions.single().id, regions.state.value.selectedId)
+        compose.onNodeWithText("底图已改变：先校正范围并保存，再重新生成。").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("生成裁片").assertIsNotEnabled()
+        assertEquals(before, store.readProject(projectId))
+        assertEquals(filesBefore, savedFiles())
+        compose.onNodeWithContentDescription("返回").performClick()
+        waitFor(missingMessage)
+        awaitIdle()
+
+        // A previous covered visit can retain this same step with a different selected region.
+        // A fresh issue click must apply its own ID rather than reuse that selection.
+        compose.runOnIdle { regionState.value = com.tapscene.ui.RegionUiState(
+            projectId = projectId, stepId = target.id, snapshot = before, selectedId = target.regions[0].id) }
+        // Choose the second identical issue, not the first matching title or region name.
+        compose.onAllNodesWithText(missingMessage)[1].performScrollTo().performClick()
+        waitFor("可见区域")
+        awaitIdle()
+        assertEquals(ProjectRoute.STEPS, projects.state.value.route)
+        assertEquals(projectId, regions.state.value.projectId)
+        assertEquals(target.id, regions.state.value.stepId)
+        assertEquals(chosen.id, regions.state.value.selectedId)
+        assertNull(regions.state.value.cropBitmap)
+        assertEquals(before, store.readProject(projectId))
+        assertEquals(filesBefore, savedFiles())
+        compose.onNodeWithText("生成裁片").assertIsEnabled().performClick()
+        waitForEnabled("确认实际裁片已复核")
+        awaitIdle()
+        compose.onNodeWithContentDescription("待检查的实际区域 PNG，未叠加标记或锚点").assertIsDisplayed()
+        val generated = checkNotNull(store.readProject(projectId))
+        val generatedRegion = generated.steps.single { it.id == target.id }.regions.single { it.id == chosen.id }
+        val cropAsset = checkNotNull(generatedRegion.asset)
+        assertEquals(before.project.revision + 1, generated.project.revision)
+        assertNull(generatedRegion.reviewedAt)
+        assertEquals(cropAsset.sha256, regions.state.value.cropSha256)
+        assertEquals(cropAsset.sha256, regions.state.value.displayedSha256)
+        assertEquals(cropAsset.sha256, ViewerPackageCodec.sha256(store.regionFile(projectId, chosen.id)))
+        val crop = checkNotNull(regions.state.value.cropBitmap)
+        val base = checkNotNull(BitmapFactory.decodeFile(store.resolveAsset(projectId, target.id).path))
+        try {
+            assertEquals(chosen.bbox.width, crop.width)
+            assertEquals(chosen.bbox.height, crop.height)
+            for (y in 0 until crop.height) for (x in 0 until crop.width)
+                assertEquals(base.getPixel(chosen.bbox.x + x, chosen.bbox.y + y), crop.getPixel(x, y))
+        } finally { base.recycle() }
+        // Existing same-owner reentry must preserve the exact displayed crop and selection.
+        val displayedState = regions.state.value
+        compose.runOnIdle { regions.open(projectId, target.id) }
+        compose.waitForIdle()
+        assertSame(displayedState, regions.state.value)
+        assertSame(crop, regions.state.value.cropBitmap)
+        compose.onNodeWithContentDescription("待检查的实际区域 PNG，未叠加标记或锚点").assertIsDisplayed()
+        compose.onNodeWithText("确认实际裁片已复核").assertIsEnabled()
+        assertEquals(generated, store.readProject(projectId))
+        compose.onNodeWithText("确认实际裁片已复核").performClick()
+        waitFor("已复核这张裁片")
+        awaitIdle()
+        val saved = checkNotNull(store.readProject(projectId))
+        val savedTarget = saved.steps.single { it.id == target.id }
+        val reviewed = savedTarget.regions.single { it.id == chosen.id }
+        assertEquals(before.project.revision + 2, saved.project.revision)
+        assertTrue(reviewed.reviewedAt != null)
+        assertEquals(generatedRegion, reviewed.copy(reviewedAt = null))
+        assertEquals(target, savedTarget.copy(regions = target.regions))
+        assertEquals(target.regions.filter { it.id != chosen.id }, savedTarget.regions.filter { it.id != chosen.id })
+        assertEquals(before.steps.filter { it.id != target.id }, saved.steps.filter { it.id != target.id })
+
+        compose.onNodeWithContentDescription("返回").performClick()
+        waitFor("可见区域")
+        compose.onNodeWithContentDescription("返回").performClick()
+        waitFor("3 项待处理")
+        awaitIdle()
+        compose.onNodeWithText("检查与交付").assertIsSelected()
+        assertEquals(ProjectRoute.STEPS, projects.state.value.route)
+        assertEquals(projectId, projects.state.value.project?.project?.id)
+        assertEquals(listOf(unreviewedMessage, missingMessage, staleMessage), projects.state.value.issues.map { it.message })
+        compose.onAllNodesWithText(missingMessage).assertCountEquals(1)
+        compose.onNodeWithText(unreviewedMessage).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(staleMessage).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("生成待复核成品").performScrollTo().assertIsNotEnabled()
+        assertEquals(saved, store.readProject(projectId))
+        val planAfter = checkNotNull(store.readDraftAiConfig(projectId))
+        assertEquals(DraftAiConfigCodec.encode(planBefore), DraftAiConfigCodec.encode(planAfter))
+        assertEquals(planBefore.boundRevision, planAfter.boundRevision)
+        assertTrue(planAfter.needsRepair)
+        assertTrue(store.draftAiIssues(projectId, planAfter).isNotEmpty())
+        assertNull(releases.state.value.candidate)
+        // Stop with the remaining region and imported-plan gates intact; no candidate is created.
+        println("HOST_DELIVERY_REGION missing/unreviewed/changed-base/exact-IDs/previous-owner-wait/no-auto-write/actual-PNG/same-owner-reentry/explicit-review/return-checks PASS; candidate NOT_RUN; device NOT_RUN")
     }
 
     private fun waitFor(text: String) {

@@ -149,6 +149,9 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     var exportPickerPending by rememberSaveable { mutableStateOf(false) }
     val projectId = state.project?.project?.id
     var connectionRepairStepId by rememberSaveable(projectId) { mutableStateOf<String?>(null) }
+    var regionCorrectionStepId by rememberSaveable(projectId) { mutableStateOf<String?>(null) }
+    var regionCorrectionId by rememberSaveable(projectId) { mutableStateOf<String?>(null) }
+    var regionCorrectionPending by rememberSaveable(projectId) { mutableStateOf(false) }
     var draftAiPendingHold by remember(projectId) { mutableStateOf(false) }
     LaunchedEffect(page) { if (page != "draft-ai") draftAiPendingHold = false }
     val draftAiTaskBlocked = page == "draft-ai" && (draftAiState.busy || draftAiState.dirty ||
@@ -338,7 +341,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
         releases.closePlayer(); pop()
     }
     LaunchedEffect(page, projectId, state.busy) {
-        if ((page == "transition" || page == "regions" || page == "path") && projectId == null && !state.busy) pop()
+        if ((page == "transition" || page == "regions" || page == "check-region" || page == "path") && projectId == null && !state.busy) pop()
     }
     val scopeReady = projectId != null && media.projectId == projectId && !retainedMedia
     val manualMediaProject = media.projectId.takeIf {
@@ -894,12 +897,37 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                             "task" -> TaskDetailsScreen(
                                 if (state.busy || mediaState.busy) ShellTaskInfo("本机处理", if (state.busy) state.stage.orEmpty() else mediaState.stage.orEmpty(), state.project?.project?.title) else null,
                                 pop, { pages.clear() }, { push("settings") })
-                            "regions" -> state.project?.let { snapshot -> state.selectedStepId?.let { stepId ->
-                                LaunchedEffect(snapshot.project.id, stepId) { regions.open(snapshot.project.id, stepId) }
-                                RegionEditorScreen(regions) {
-                                    projects.refreshAfterTransition(snapshot.project.id, stepId); pop()
+                            "regions", "check-region" -> state.project?.let { snapshot ->
+                                val fromChecks = page == "check-region"
+                                val requestedStep = if (fromChecks) regionCorrectionStepId else state.selectedStepId
+                                val requestedRegion = regionCorrectionId.takeIf { fromChecks }
+                                requestedStep?.let { stepId ->
+                                    val regionState by regions.state.collectAsStateWithLifecycle()
+                                    val regionReady = regionState.projectId == snapshot.project.id && regionState.stepId == stepId
+                                    LaunchedEffect(snapshot.project.id, stepId, requestedRegion, regionState.projectId, regionState.stepId, regionState.busy, regionCorrectionPending) {
+                                        if (!regionState.busy && (!regionReady || fromChecks && regionCorrectionPending)) {
+                                            val opened = regions.open(snapshot.project.id, stepId, requestedRegion,
+                                                freshEntry = fromChecks && regionCorrectionPending)
+                                            if (opened && fromChecks) regionCorrectionPending = false
+                                        }
+                                    }
+                                    if (regionReady && !(fromChecks && regionCorrectionPending)) RegionEditorScreen(regions) {
+                                        if (fromChecks) {
+                                            regionCorrectionStepId = null; regionCorrectionId = null; regionCorrectionPending = false
+                                            projects.reload()
+                                        } else projects.refreshAfterTransition(snapshot.project.id, stepId)
+                                        pop()
+                                    } else Column(Modifier.fillMaxSize()) {
+                                        ShellTopBar("读取区域", {
+                                            if (fromChecks) { regionCorrectionStepId = null; regionCorrectionId = null; regionCorrectionPending = false }
+                                            pop()
+                                        })
+                                        LinearProgressIndicator(Modifier.fillMaxWidth())
+                                        Text(if (regionState.busy) "正在等待之前的区域处理完成，随后读取当前区域。" else "正在读取当前区域。", Modifier.padding(16.dp),
+                                            style = MaterialTheme.typography.bodyMedium)
+                                    }
                                 }
-                            } }
+                            }
                             "transition" -> state.project?.let { snapshot -> state.selectedStepId?.let { stepId ->
                                 val edgeId = transitionEdgeId
                                 if (edgeId != null) {
@@ -970,9 +998,18 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 }
                                 ProjectTab.CHECKS -> DeliveryCheckScreen(state.project, state.issues, { tab = ProjectTab.STEPS },
                                     { issue -> if (!unavailable && !mediaState.busy) {
-                                        if (issue.correction == ProjectIssueCorrection.CONNECTION) {
-                                            connectionRepairStepId = issue.stepId; tab = ProjectTab.STEPS
-                                        } else issue.stepId?.let(projects::openStep) ?: run { tab = ProjectTab.STEPS }
+                                        when (issue.correction) {
+                                            ProjectIssueCorrection.REGION -> if (state.dirtyStepIds.isNotEmpty()) {
+                                                projects.message("先保存或放弃步骤修改，再处理区域裁片。")
+                                            } else if (issue.stepId != null && issue.regionId != null) {
+                                                regionCorrectionStepId = issue.stepId; regionCorrectionId = issue.regionId
+                                                regionCorrectionPending = true; push("check-region")
+                                            }
+                                            ProjectIssueCorrection.CONNECTION -> {
+                                                connectionRepairStepId = issue.stepId; tab = ProjectTab.STEPS
+                                            }
+                                            ProjectIssueCorrection.STEP_EDITOR -> issue.stepId?.let(projects::openStep) ?: run { tab = ProjectTab.STEPS }
+                                        }
                                     } },
                                     { projects.startPreview() }, openReleaseReview, { projectId?.let(releases::openProjectDelivery); push("delivery") }, showTopBar = false,
                                     onBuildCandidate = buildRelease, busy = unavailable || mediaState.busy,

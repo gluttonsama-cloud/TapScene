@@ -73,13 +73,15 @@ class RegionWorkspace(application: Application) : AndroidViewModel(application) 
     private var task: Job? = null
     private var generation = 0L
 
-    fun open(projectId: String, stepId: String) {
-        if (state.value.busy || task?.isActive == true) return
-        if (state.value.projectId == projectId && state.value.stepId == stepId && !state.value.failedToLoad) return
+    fun open(projectId: String, stepId: String, selectedRegionId: String? = null, freshEntry: Boolean = false): Boolean {
+        if (state.value.busy || task?.isActive == true) return false
+        // An explicit issue click reads its target afresh; a covered/restored visit keeps its crop.
+        if (!freshEntry && state.value.projectId == projectId && state.value.stepId == stepId && !state.value.failedToLoad) return true
         generation++
         clearImages()
-        mutableState.value = RegionUiState(projectId = projectId, stepId = stepId)
-        execute("读取安全步骤") { load(projectId, stepId, null) }
+        mutableState.value = RegionUiState(projectId = projectId, stepId = stepId, selectedId = selectedRegionId)
+        execute("读取安全步骤") { load(projectId, stepId, selectedRegionId) }
+        return true
     }
 
     fun reload() {

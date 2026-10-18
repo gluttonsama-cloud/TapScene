@@ -214,7 +214,7 @@ fun DeliveryCheckScreen(
                 ) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text("${issues.size} 项待处理", style = MaterialTheme.typography.titleLarge, color = ShellColors.Accent)
-                        Text("结构与路径", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                        Text("结构、路径与区域", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                     }
                     Button(shape = RoundedCornerShape(8.dp), onClick = { onIssue(firstIssue) }, modifier = Modifier.heightIn(min = 48.dp)) { Text("去修正") }
                 }
@@ -228,7 +228,7 @@ fun DeliveryCheckScreen(
                     )
                 }
             } else {
-                SectionHeader("结构与路径", if (project == null) "未选择项目。" else "当前本机结构检查未返回问题。")
+                SectionHeader("结构、路径与区域", if (project == null) "未选择项目。" else "当前检查未返回待处理问题。")
             }
             ShellDivider()
             ShellActionRow("试走点击路径", "确认每个动作到达预期画面或结束结果。", onClick = onPreview, enabled = project?.steps?.isNotEmpty() == true)
@@ -255,7 +255,7 @@ fun DeliveryCheckScreen(
                 when {
                     busy -> "正在生成固定候选，请稍候。"
                     !buildEnabled -> "先保存当前修改，再生成固定候选。"
-                    issues.isNotEmpty() -> "先修正结构与路径问题，再生成候选。"
+                    issues.isNotEmpty() -> "先修正以上问题，再生成候选。"
                     onBuildCandidate == null -> "生成入口尚不可用；已保存内容不受影响。"
                     else -> "固定当前图片与文字，完成逐项复核和实际试走后封存。"
                 },

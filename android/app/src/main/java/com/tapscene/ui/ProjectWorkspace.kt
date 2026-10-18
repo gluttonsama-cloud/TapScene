@@ -65,9 +65,9 @@ data class StepEditDraft(
     val conflicts: Set<String> = emptySet(),
 )
 
-enum class ProjectIssueCorrection { STEP_EDITOR, CONNECTION }
+enum class ProjectIssueCorrection { STEP_EDITOR, CONNECTION, REGION }
 data class ProjectIssue(val stepId: String?, val message: String,
-    val correction: ProjectIssueCorrection = ProjectIssueCorrection.STEP_EDITOR)
+    val correction: ProjectIssueCorrection = ProjectIssueCorrection.STEP_EDITOR, val regionId: String? = null)
 
 /** A durable receipt is acknowledged only after the production screen has shown this result. */
 data class ProjectCopyNotice(val operationId: String, val message: String)
@@ -1402,7 +1402,7 @@ class ProjectWorkspace internal constructor(application: Application,
         val selectedDraft = selectedId?.let { draftFor(project, stepsById.getValue(it)) }
         mutableState.update { old -> old.copy(project = project, selectedStepId = selectedId,
             route = if (old.route == ProjectRoute.EDIT && selectedId == null) ProjectRoute.STEPS else old.route,
-            stepDraft = selectedDraft, issues = graphIssues(project), dirtyStepIds = dirtyIds(project.project.id),
+            stepDraft = selectedDraft, issues = deliveryIssues(project), dirtyStepIds = dirtyIds(project.project.id),
             bitmap = if (current.project?.project?.id != project.project.id || current.selectedStepId != selectedId ||
                 current.selectedStep?.asset != selectedId?.let { stepsById[it]?.asset }) null else old.bitmap) }
     }
@@ -1652,6 +1652,19 @@ class ProjectWorkspace internal constructor(application: Application,
         private const val MAX_PNG_PIXELS = 12_000_000L
         private const val MAX_DISPLAY_PIXELS = 1080L * 2400
         private val PNG_SIGNATURE = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
+
+        /** Snapshot-level readiness only; generation still verifies the actual persisted assets. */
+        fun deliveryIssues(snapshot: ProjectSnapshot): List<ProjectIssue> = graphIssues(snapshot) +
+            snapshot.steps.flatMap { step -> step.regions.mapNotNull { region ->
+                val problem = when {
+                    !region.matchesBase(step.asset) -> "底图已改变，请校正范围后重新生成并复核。"
+                    region.asset == null -> "尚未生成裁片，请生成并复核。"
+                    region.reviewedAt == null -> "尚未复核裁片，请查看并确认。"
+                    else -> null
+                }
+                problem?.let { ProjectIssue(step.id, "步骤“${step.title}”的区域“${region.name}”$it",
+                    ProjectIssueCorrection.REGION, region.id) }
+            } }
 
         fun graphIssues(snapshot: ProjectSnapshot): List<ProjectIssue> {
             if (snapshot.steps.isEmpty()) return listOf(ProjectIssue(null, "项目还没有步骤，请添加已生成并复核的图片"))
