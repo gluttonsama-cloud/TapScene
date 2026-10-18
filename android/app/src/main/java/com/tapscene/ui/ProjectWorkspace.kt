@@ -1669,6 +1669,20 @@ class ProjectWorkspace internal constructor(application: Application,
                 (step.hotspots.mapNotNull { it.targetStepId } + listOfNotNull(step.nextAction?.targetStepId))
                     .filter { it in byId && it !in reached }.forEach(queue::addLast)
             }
+            // A reachable cycle is valid only when it can eventually reach an explicit ending.
+            val predecessors = mutableMapOf<String, MutableSet<String>>()
+            val reachesEnding = mutableSetOf<String>()
+            snapshot.steps.forEach { step ->
+                (step.hotspots.mapNotNull { it.targetStepId } + listOfNotNull(step.nextAction?.targetStepId))
+                    .filter { it in byId }.forEach { target -> predecessors.getOrPut(target) { mutableSetOf() }.add(step.id) }
+                if (step.isTerminal || step.hotspots.any { it.targetStepId == null && !it.endLabel.isNullOrBlank() })
+                    queue.addLast(step.id)
+            }
+            while (queue.isNotEmpty()) {
+                val id = queue.removeFirst()
+                if (!reachesEnding.add(id)) continue
+                predecessors[id].orEmpty().filter { it !in reachesEnding }.forEach(queue::addLast)
+            }
             snapshot.steps.forEach { step ->
                 if (start != null && start in byId && step.id !in reached) result += ProjectIssue(step.id,
                     "无法从起点到达“${step.title}”，请连接动作或调整起点", ProjectIssueCorrection.CONNECTION)
@@ -1685,6 +1699,11 @@ class ProjectWorkspace internal constructor(application: Application,
                 }
                 step.hotspots.filter { it.targetStepId != null && it.targetStepId !in byId }.forEach {
                     result += ProjectIssue(step.id, "热点“${it.label}”缺少目标，请重新选择目标或结束")
+                }
+                val targets = step.hotspots.mapNotNull { it.targetStepId } + listOfNotNull(step.nextAction?.targetStepId)
+                val missingTarget = targets.any { it !in byId } || step.nextAction?.targetStepId == null && step.nextAction != null
+                if (!step.isTerminal && step.id !in reachesEnding && targets.any { it in byId } && !missingTarget) {
+                    result += ProjectIssue(step.id, "从“${step.title}”无法到达结束，请连接终点或添加结束热点")
                 }
             }
             return result
