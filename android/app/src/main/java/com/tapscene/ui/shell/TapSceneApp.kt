@@ -909,13 +909,22 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                             "hosted" -> if (BuildConfig.HOSTED_ENABLED) LocalHostingContent(hostingState, hostingActions) else HostingAccountScreen(pop, { push("versions") })
                             "account" -> if (BuildConfig.HOSTED_ENABLED) LocalHostingContent(hostingState, hostingActions) else HostingAccountScreen(pop, { push("versions") })
                             "versions" -> if (BuildConfig.HOSTED_ENABLED) LocalHostingContent(hostingState, hostingActions) else HostedVersionsScreen(pop, { push("account") })
-                            "import" -> OfflineImportContent(releaseState, pop) {
+                            "import" -> OfflineImportContent(releaseState, pop, onChoose = {
                                 if (!releaseState.busy) {
                                     releases.clearImportResult(); releases.clearMessage()
                                     try { packagePicker.launch(arrayOf("*/*")) }
                                     catch (_: android.content.ActivityNotFoundException) { releases.message("系统没有可用的文件选择工具。") }
                                 }
-                            }
+                            }, onOpen = { id ->
+                                val current = releases.state.value
+                                if (pages.lastOrNull() == "import" && !current.busy && !exportPickerPending &&
+                                    current.exportFile == null && current.pendingShare == null && !current.shareChooserOpen &&
+                                    current.lastImportedId == id && current.releases.any { it.id == id }) {
+                                    releases.openRelease(id)
+                                    // Player exit returns to the library, including a failed read.
+                                    pages[pages.lastIndex] = "player"
+                                }
+                            })
                             "player" -> ReleasePlayerContent(releaseState, closeReleasePlayer,
                                 releases::tapPlayer, releases::chooseEdge, releases::previous, releases::restart, releases::dismissMatches,
                                 onVideoCompleted = releases::completePlayerTransition, onVideoFailed = releases::failPlayerTransition,

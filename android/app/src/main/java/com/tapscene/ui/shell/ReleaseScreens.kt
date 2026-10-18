@@ -528,7 +528,10 @@ fun ReleaseLibraryContent(
 }
 
 @Composable
-fun OfflineImportContent(state: ReleaseUiState, onBack: () -> Unit, onChoose: () -> Unit) {
+fun OfflineImportContent(
+    state: ReleaseUiState, onBack: () -> Unit, onChoose: () -> Unit,
+    onOpen: ((String) -> Unit)? = null,
+) {
     BackHandler(enabled = !state.busy) { onBack() }
     val imported = state.releases.firstOrNull { it.id == state.lastImportedId }
     Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
@@ -545,9 +548,15 @@ fun OfflineImportContent(state: ReleaseUiState, onBack: () -> Unit, onChoose: ()
                     SectionHeader("已加入演示库", imported.title)
                     ShellLabelValue("步骤", "${imported.stepCount} 个")
                     ShellLabelValue("包内文件", formatShellBytes(imported.byteLength))
+                    Text("版本 ${imported.id.take(12)}", style = MaterialTheme.typography.labelSmall, color = ShellColors.Muted)
                     StatusNote("文件完整性与内容结构校验通过。这不代表作者身份或图片、文字的隐私内容已获认证。")
+                    onOpen?.let { open ->
+                        Button(onClick = { open(imported.id) },
+                            enabled = state.exportFile == null && state.pendingShare == null && !state.shareChooserOpen,
+                            shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("立即观看") }
+                    }
+                    OutlinedButton(onClick = onBack, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("返回演示库") }
                     state.message?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted) }
-                    Button(onClick = onBack, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("返回演示库") }
                 }
                 state.message != null -> {
                     SectionHeader("导入未完成")
