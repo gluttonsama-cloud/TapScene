@@ -59,6 +59,15 @@ fun AuthoredPathScreen(
     }
     val expectedRevision by rememberSaveable(project.project.id) { mutableStateOf(project.project.revision) }
     val stepById = project.steps.associateBy { it.id }
+    val stepNumberById = project.steps.mapIndexed { index, step -> step.id to index + 1 }.toMap()
+    val stepLabel: (String?) -> String = { id ->
+        val step = stepById[id]
+        when {
+            id == null -> "未设置目标"
+            step == null -> "已移除步骤 · $id"
+            else -> "步骤 ${stepNumberById.getValue(id)} ${step.title}"
+        }
+    }
     val selected = selectedIds.map { stepById[it] }
     val missingIds = selectedIds.filter { it !in stepById }
     val last = selected.lastOrNull()
@@ -67,6 +76,11 @@ fun AuthoredPathScreen(
     val changedTargetCount = selectedIds.zipWithNext().count { (fromId, targetId) ->
         stepById[fromId]?.nextAction?.let { it.targetStepId != targetId } == true
     }
+    // Only rewritten adjacent next actions lose their bound transition. The last step and
+    // unselected actions stay unchanged, as do transitions on an unchanged target.
+    val removedTransitionIds = selectedIds.zipWithNext().filter { (fromId, targetId) ->
+        stepById[fromId]?.nextAction?.let { it.targetStepId != targetId && it.transition != null } == true
+    }.map { it.first }.toSet()
     val newActionCount = selectedIds.dropLast(1).count { stepById[it]?.nextAction == null && it in stepById }
     val totalEdges = project.steps.sumOf { it.hotspots.size + if (it.nextAction != null) 1 else 0 } + newActionCount
     val stale = expectedRevision != project.project.revision
@@ -97,7 +111,7 @@ fun AuthoredPathScreen(
             }
             itemsIndexed(selectedIds, key = { _, id -> "selected_$id" }) { index, id ->
                 val step = stepById[id]
-                val target = selectedIds.getOrNull(index + 1)?.let(stepById::get)
+                val targetId = selectedIds.getOrNull(index + 1)
                 val conflict = when {
                     step == null -> "步骤已不存在，请移出本次通路。"
                     id in intermediateTerminalIds -> "中间步骤是终点，请先取消终点。"
@@ -107,12 +121,12 @@ fun AuthoredPathScreen(
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(checked = true, onCheckedChange = { changeSelection(selectedIds - id) }, enabled = !busy,
-                            modifier = Modifier.semantics { contentDescription = "移出通路：${step?.title ?: "缺失步骤"}" })
+                            modifier = Modifier.semantics { contentDescription = "移出通路：${stepLabel(id)}" })
                         Column(Modifier.weight(1f).padding(horizontal = 4.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Text("${index + 1}  ${step?.title ?: "步骤已不存在"}", style = MaterialTheme.typography.bodyMedium,
+                            Text("通路 ${index + 1} · ${stepLabel(id)}", style = MaterialTheme.typography.bodyMedium,
                                 maxLines = 2, overflow = TextOverflow.Ellipsis)
                             Text(when {
-                                index < selectedIds.lastIndex -> "下一步 → ${target?.title ?: "目标已不存在"}"
+                                index < selectedIds.lastIndex -> "下一步 → ${stepLabel(targetId)}"
                                 markLastTerminal -> "末步 · 设为终点"
                                 step?.isTerminal == true -> "末步 · 已是终点"
                                 step?.nextAction != null -> "末步 · 保留下一步与热点"
@@ -120,11 +134,20 @@ fun AuthoredPathScreen(
                             }, style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         }
-                        PathMoveButton("↑", "上移 ${step?.title ?: "缺失步骤"}", !busy && index > 0) {
+                        PathMoveButton("↑", "上移 ${stepLabel(id)}", !busy && index > 0) {
                             changeSelection(selectedIds.toMutableList().apply { add(index - 1, removeAt(index)) })
                         }
-                        PathMoveButton("↓", "下移 ${step?.title ?: "缺失步骤"}", !busy && index < selectedIds.lastIndex) {
+                        PathMoveButton("↓", "下移 ${stepLabel(id)}", !busy && index < selectedIds.lastIndex) {
                             changeSelection(selectedIds.toMutableList().apply { add(index + 1, removeAt(index)) })
+                        }
+                    }
+                    if (id in removedTransitionIds) {
+                        Column(Modifier.fillMaxWidth().padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text("原下一步 → ${stepLabel(step?.nextAction?.targetStepId)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("原视频过渡将移除，需重新设置。", style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error)
                         }
                     }
                     if (conflict != null) Row(Modifier.fillMaxWidth().padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -145,7 +168,7 @@ fun AuthoredPathScreen(
                     .toggleable(value = false, enabled = !busy, role = Role.Checkbox,
                         onValueChange = { changeSelection(selectedIds + step.id) }), verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = false, onCheckedChange = null, enabled = !busy)
-                    Text(step.title, Modifier.weight(1f).padding(start = 4.dp), style = MaterialTheme.typography.bodyMedium,
+                    Text(stepLabel(step.id), Modifier.weight(1f).padding(start = 4.dp), style = MaterialTheme.typography.bodyMedium,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
                     if (step.isTerminal) Text("终点", style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -171,6 +194,10 @@ fun AuthoredPathScreen(
             Text(if (changedTargetCount > 0) "将改写 $changedTargetCount 个下一步目标；手动热点保留。"
                 else "按上方顺序连接；手动热点与分镜排序保留。",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (removedTransitionIds.isNotEmpty()) {
+                Text("将移除 ${removedTransitionIds.size} 个原视频过渡；生成后需重新设置。",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
             val blockingMessage = when {
                 stale -> "项目已有更新，请返回后重新打开。"
                 missingIds.isNotEmpty() -> "移出缺失步骤后再生成。"
