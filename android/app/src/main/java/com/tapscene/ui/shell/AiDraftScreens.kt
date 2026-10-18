@@ -63,7 +63,7 @@ fun AiDraftImportContent(
     var chooseBaseline by rememberSaveable(preview?.sessionId) { mutableStateOf(false) }
     var confirmCancel by rememberSaveable { mutableStateOf(false) }
     var technicalExpanded by rememberSaveable(preview?.sessionId) { mutableStateOf(false) }
-    val requestBack: () -> Unit = { if (state.busy) onCancel() else onBack() }
+    val requestBack: () -> Unit = { if (!state.busy) onBack() }
     BackHandler(onBack = requestBack)
     Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
         ShellTopBar(if (completed) "已导入待复核" else "导入 AI 包", requestBack)
@@ -72,7 +72,12 @@ fun AiDraftImportContent(
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
             state.message?.let { item { StatusNote(it) } }
-            if (state.busy) item { Text(state.stage ?: "正在处理", color = ShellColors.Muted) }
+            if (state.busy) item {
+                Text(state.stage ?: "正在处理", color = ShellColors.Muted)
+                Text(if (completed) "正在核对已提交结果，完成后可返回。已建立的草稿不会取消。"
+                    else "处理完成后可返回，已准备的导入会保留。要停止本次处理，请使用下方取消按钮。",
+                    style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+            }
             if (completed) {
                 item {
                     SectionHeader(preview?.scene?.title ?: "导入结果", if (state.result?.projectExists == true) "已建立独立的新项目；原草稿和旧成品保持不变。" else "这次导入记录已保留，新项目已不在本机。")
@@ -204,6 +209,7 @@ fun AiDraftImportContent(
         ShellDivider()
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             when {
+                state.busy && !completed -> OutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("取消处理并核对结果") }
                 state.outcomeUnknown -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (state.result?.status != "committed") OutlinedButton(onClick = onCancel, enabled = !state.busy,
                         modifier = Modifier.heightIn(min = 48.dp)) { Text("尝试取消") }
@@ -216,7 +222,6 @@ fun AiDraftImportContent(
                         enabled = !state.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("打开新草稿并复核") }
                     TextButton(onClick = onNewImport, enabled = !state.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("导入另一个包") }
                 }
-                state.busy -> OutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("取消处理并核对结果") }
                 preview != null -> {
                     Text(if (preview.issues.isEmpty()) "3  确认后建立独立新草稿，全部内容待复核" else "存在 ${preview.issues.size} 个阻断项，不能建立草稿", style = MaterialTheme.typography.labelMedium, color = ShellColors.Muted)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

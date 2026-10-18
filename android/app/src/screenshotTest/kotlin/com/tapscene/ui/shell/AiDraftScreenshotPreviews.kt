@@ -68,6 +68,13 @@ private object AiDraftPreviewFixture {
 fun AiImportReviewSmallPreview() = AiDraftSurface { ImportFixture(AiDraftPreviewFixture.importing) }
 
 @PreviewTest
+@Preview(name = "ai_import_busy_small", widthDp = 320, heightDp = 568, locale = "zh-rCN", showBackground = true)
+@Composable
+fun AiImportBusySmallPreview() = AiDraftSurface {
+    ImportFixture(AiDraftPreviewFixture.importing.copy(busy = true, stage = "恢复导入记录"))
+}
+
+@PreviewTest
 @Preview(name = "ai_import_text_landscape", widthDp = 740, heightDp = 360, locale = "zh-rCN", showBackground = true)
 @Composable
 fun AiImportTextLandscapePreview() = AiDraftSurface { ImportFixture(AiDraftPreviewFixture.importing, 1) }
