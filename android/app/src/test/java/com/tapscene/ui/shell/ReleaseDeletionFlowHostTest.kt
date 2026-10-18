@@ -102,12 +102,18 @@ class ReleaseDeletionFlowHostTest {
         compose.runOnIdle { workspace.reloadLibrary() }
         awaitIdle(workspace)
         compose.onNodeWithText("演示库").performClick()
+        // Entering the library starts its own refresh. Wait for the real action semantics,
+        // not the previous reload, before clicking a disabled-while-busy deletion control.
+        compose.waitUntil(30_000) {
+            compose.onAllNodes(hasText("删除本机副本") and isEnabled()).fetchSemanticsNodes().isNotEmpty()
+        }
         val summaries = workspace.state.value.releases
+        assertEquals(fixtures.size, summaries.size)
         val target = fixtures.single { it.summary.id == summaries.first().id }
         val other = fixtures.single { it.summary.id != target.summary.id }
         val before = hashes(storeRoot)
         fun openConfirmation() {
-            compose.onAllNodesWithText("删除本机副本")[0].performScrollTo().performClick()
+            compose.onAllNodesWithText("删除本机副本")[0].performScrollTo().assertIsEnabled().performClick()
             compose.onNodeWithText("删除本机副本？").assertIsDisplayed()
             compose.onNodeWithText("版本 ${target.summary.id}\n摘要 ${target.summary.contentDigest}")
                 .performScrollTo().assertIsDisplayed()
@@ -397,13 +403,19 @@ class ReleaseDeletionFlowHostTest {
     private fun jobs(workspace: ReleaseWorkspace) = listOfNotNull(job(workspace, "task"), job(workspace, "playerTask"))
     private fun job(workspace: ReleaseWorkspace, name: String) = ReleaseWorkspace::class.java.getDeclaredField(name)
         .apply { isAccessible = true }.get(workspace) as Job?
-    private fun awaitJobs(jobs: List<Job>) = compose.waitUntil(30_000) {
+    private fun awaitJobs(jobs: List<Job>) {
+        compose.waitUntil(30_000) {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            jobs.all { it.isCompleted }
+        }
         compose.waitForIdle()
-        jobs.all { it.isCompleted }
     }
-    private fun awaitIdle(workspace: ReleaseWorkspace) = compose.waitUntil(30_000) {
+    private fun awaitIdle(workspace: ReleaseWorkspace) {
+        compose.waitUntil(30_000) {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            !workspace.state.value.busy && jobs(workspace).none { it.isActive }
+        }
         compose.waitForIdle()
-        !workspace.state.value.busy && jobs(workspace).none { it.isActive }
     }
     @Suppress("UNCHECKED_CAST")
     private fun mutableState(workspace: ReleaseWorkspace) = ReleaseWorkspace::class.java.getDeclaredField("mutableState")

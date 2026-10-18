@@ -1,5 +1,6 @@
 package com.tapscene.ui.shell
 
+import android.os.Looper
 import androidx.activity.compose.setContent
 import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.mutableStateOf
@@ -8,7 +9,9 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.text.AnnotatedString
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
 import com.tapscene.MainActivity
+import com.tapscene.data.HostFileSyncShadow
 import com.tapscene.data.HostSqlite
 import com.tapscene.data.ReleaseSummary
 import com.tapscene.packageformat.RenderPlan
@@ -22,17 +25,21 @@ import com.tapscene.ui.ProjectUiState
 import com.tapscene.ui.ReleaseUiState
 import com.tapscene.ui.ReleaseWorkspace
 import java.util.UUID
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.ExternalResource
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
@@ -41,18 +48,35 @@ import org.robolectric.annotation.SQLiteMode
 
 /** Actual Compose with production plan edits and synthetic content; not device/picker evidence. */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35], qualifiers = "w320dp-h800dp-xhdpi")
+@Config(sdk = [35], qualifiers = "w320dp-h800dp-xhdpi", shadows = [HostFileSyncShadow::class])
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class AiAnnotationInputHostTest {
     @get:Rule(order = 0) val database = object : ExternalResource() {
-        override fun before() { resetFactory(); HostSqlite.configure() }
-        override fun after() { resetFactory() }
+        override fun before() {
+            resetFactory()
+            HostSqlite.configure()
+            // MainActivity reads the real library; its directory fsync needs the host FD bridge.
+            HostFileSyncShadow.begin(RuntimeEnvironment.getApplication().noBackupFilesDir)
+        }
+        override fun after() { try { HostFileSyncShadow.reset() } finally { resetFactory() } }
     }
     @get:Rule(order = 1) val compose = createAndroidComposeRule<MainActivity>()
     private val field = "画面标注（最多 240 字）"
     private val visit = id("visit")
+
+    @After fun finishReleaseWorkBeforeClosingHostDescriptors() {
+        val owner = ViewModelProvider(compose.activity)[ReleaseWorkspace::class.java]
+            .viewModelScope.coroutineContext[Job]!!
+        compose.runOnIdle { compose.activity.viewModelStore.clear() }
+        // Cancelling the owner does not finish its NonCancellable IO reconciliation.
+        compose.waitUntil(30_000) {
+            shadowOf(Looper.getMainLooper()).idle()
+            owner.isCompleted
+        }
+        compose.waitForIdle()
+    }
 
     @Test fun pendingTextSurvivesCollapseAndBothBacksButNeverLeaksToAnotherVersion() {
         val state = mutableStateOf(ReleaseUiState(aiConfiguration = configuration(false)))
@@ -294,8 +318,11 @@ class AiAnnotationInputHostTest {
             "0".repeat(64), 1, 1, 100, "local")
         fun openFromLibrary(config: AiPackageConfiguration) {
             settled()
-            compose.runOnIdle { releaseState.value = releaseState.value.copy(releases = listOf(summary(config)), message = null) }
-            compose.onNodeWithText("配置 AI 数据包").performScrollTo().performClick()
+            compose.runOnIdle {
+                assertFalse("The real library read must succeed before injecting its synthetic row", releaseState.value.libraryReadFailed)
+                releaseState.value = releaseState.value.copy(releases = listOf(summary(config)), message = null)
+            }
+            compose.onNodeWithText("配置 AI 数据包").performScrollTo().assertIsEnabled().performClick()
             compose.onNodeWithText("AI 动画配置").assertIsDisplayed()
             // The real button starts openAiPackage. Let its missing-fixture read finish before
             // injecting the synthetic plan; never replace a configuration while loading is busy.
@@ -412,6 +439,7 @@ class AiAnnotationInputHostTest {
             compose.onNodeWithText("检查并保存").assertIsEnabled()
             compose.onNodeWithText("1 处标注输入未应用 · 返回检查").assertDoesNotExist()
             assertRecordingUnchanged()
+            HostFileSyncShadow.assertDirectorySyncEvidence()
         } finally {
             try { compose.runOnIdle { releaseState.value = originalReleaseState; projectState.value = originalProjectState } }
             finally { runBlocking { recordingGate.withLock {

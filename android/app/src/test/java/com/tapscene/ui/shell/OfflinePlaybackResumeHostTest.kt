@@ -3,6 +3,7 @@ package com.tapscene.ui.shell
 import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.os.Looper
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.semantics.SemanticsActions
@@ -37,6 +38,7 @@ import org.junit.rules.ExternalResource
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.annotation.LooperMode
@@ -414,16 +416,18 @@ class OfflinePlaybackResumeHostTest {
         .performScrollTo().fetchSemanticsNode().config[SemanticsActions.OnClick].action)
     private fun awaitJobs(jobs: List<Job>) {
         compose.waitUntil(30_000) {
-            // PAUSED Robolectric Main must execute IO-return/cancellation continuations too.
-            compose.waitForIdle()
+            // Drive PAUSED Main continuations without nesting Compose/Espresso synchronization.
+            shadowOf(Looper.getMainLooper()).idle()
             jobs.all { it.isCompleted }
         }
+        compose.waitForIdle()
     }
     private fun awaitIdle(workspace: ReleaseWorkspace) {
         compose.waitUntil(30_000) {
-            compose.waitForIdle()
+            shadowOf(Looper.getMainLooper()).idle()
             !workspace.state.value.busy && listOfNotNull(job(workspace, "task"), job(workspace, "playerTask")).none { it.isActive }
         }
+        compose.waitForIdle()
     }
     private fun assertChoice(workspace: ReleaseWorkspace, fixture: Fixture, index: Int) {
         val choice = checkNotNull(workspace.state.value.playbackResume)
