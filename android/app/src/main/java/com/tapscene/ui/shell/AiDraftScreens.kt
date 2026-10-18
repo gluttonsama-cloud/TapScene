@@ -27,6 +27,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.tapscene.data.DraftAiEffect
+import com.tapscene.data.AiDraftImportPreview
 import com.tapscene.data.ProjectSnapshot
 import com.tapscene.data.ProjectStep
 import com.tapscene.packageformat.AiDraftImportPolicy
@@ -134,12 +135,7 @@ fun AiDraftImportContent(
                     if (preview.baselineReleaseId != null) {
                         item { SectionHeader("内容差异 ${preview.differences.size} 项", "比较文字、图、区域和图片身份；动画计划独立列示，不推断计划差异。") }
                         if (preview.differences.isEmpty()) item { Text("上述内容与选定对比版本一致；仍须重新复核。", color = ShellColors.Muted) }
-                        itemsIndexed(preview.differences) { index, difference -> AiPanel {
-                            Text("${index + 1}. ${differenceCategory(difference.category)} · ${differenceField(difference.field)}", style = MaterialTheme.typography.titleSmall)
-                            Text("对比版本：${differenceValue(preview.scene, difference.field, difference.before)}")
-                            Text("导入内容：${differenceValue(preview.scene, difference.field, difference.after)}")
-                            TechnicalDisclosure("差异定位", "分类：${difference.category}\n字段：${difference.field}\n对象：${difference.subjectId}\n对比版本原值：${difference.before ?: "（无）"}\n导入原值：${difference.after ?: "（无）"}")
-                        } }
+                        itemsIndexed(preview.differences) { index, difference -> AiImportDifferencePanel(preview, difference, index) }
                     }
                 }
                 1 -> {
@@ -640,13 +636,38 @@ private fun differenceField(value: String): String = when (value) {
     "cropImage" -> "区域裁片"; "sourceDimensions" -> "原图尺寸"; "bbox" -> "像素范围"; "zIndex" -> "叠放次序"; "anchor" -> "局部锚点"
     else -> "参数"
 }
-private fun differenceValue(scene: ViewerScene, field: String, value: String?): String {
+/** Resolve each side against its own frozen scene, including renamed or removed objects. */
+@Composable
+internal fun AiImportDifferencePanel(preview: AiDraftImportPreview, difference: AiDraftImportPolicy.Difference, index: Int) {
+    val baseline = preview.baselineScene?.takeIf { it.releaseId == preview.baselineReleaseId }
+    AiPanel {
+        Text("${index + 1}. ${differenceCategory(difference.category)} · ${differenceField(difference.field)}", style = MaterialTheme.typography.titleSmall)
+        Text("对比版本：${differenceValue(baseline, difference.field, difference.before, "对比版本")}")
+        Text("导入内容：${differenceValue(preview.scene, difference.field, difference.after, "导入内容")}")
+        TechnicalDisclosure("差异定位", "分类：${difference.category}\n字段：${difference.field}\n对象：${difference.subjectId}\n对比版本原值：${difference.before ?: "（无）"}\n导入原值：${difference.after ?: "（无）"}")
+    }
+}
+
+private fun differenceStepLabel(scene: ViewerScene, id: String): String? {
+    val index = scene.states.indexOfFirst { it.id == id }
+    return if (index < 0) null else "步骤 ${index + 1} · ${scene.states[index].title}"
+}
+
+private fun differenceValue(scene: ViewerScene?, field: String, value: String?, side: String): String {
     if (value == null) return "（无）"
+    if (scene == null && field in setOf("startStateId", "stateId", "fromStateId", "toStateId", "hotspotId", "order")) {
+        return "${side}对象信息不可用，标识可展开查看"
+    }
     return when (field) {
         "image", "baseImage", "cropImage", "transition" -> "已记录图片内容与尺寸，精确摘要可展开查看"
-        "startStateId", "stateId", "fromStateId", "toStateId" -> scene.states.firstOrNull { it.id == value }?.title ?: "导入内容中不存在的步骤，标识可展开查看"
-        "hotspotId" -> scene.hotspots.firstOrNull { it.id == value }?.label ?: "导入内容中不存在的热点，标识可展开查看"
-        "order" -> value.split(',').mapIndexed { index, id -> "${index + 1}. ${scene.states.firstOrNull { it.id == id }?.title ?: "未纳入导入内容的步骤"}" }.joinToString("\n")
+        "startStateId", "stateId", "fromStateId", "toStateId" -> differenceStepLabel(checkNotNull(scene), value)
+            ?: "${side}中未找到此步骤，标识可展开查看"
+        "hotspotId" -> checkNotNull(scene).hotspots.firstOrNull { it.id == value }?.let { hotspot ->
+            val index = scene.hotspots.filter { it.stateId == hotspot.stateId }.indexOfFirst { it.id == value }
+            "${differenceStepLabel(scene, hotspot.stateId) ?: "所属步骤未找到"} / 热点 ${index + 1} · ${hotspot.label}"
+        } ?: "${side}中未找到此热点，标识可展开查看"
+        "order" -> value.split(',').joinToString("\n") { id -> differenceStepLabel(checkNotNull(scene), id)
+            ?: "${side}中未找到此步骤，标识可展开查看" }
         "terminal" -> if (value == "true") "可结束" else "非结束步骤"
         "trigger" -> when (value) { "tap" -> "点击画面热点"; "continue" -> "画布外下一步按钮"; else -> "其他方式，原值可展开查看" }
         "sourceKindDeclaration" -> when (value) { "recorded" -> "声称来自录制"; "authored" -> "声称由作者编排"; "imported" -> "声称来自导入"; else -> "其他声明，原值可展开查看" }

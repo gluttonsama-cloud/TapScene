@@ -46,6 +46,7 @@ object AiDraftImportChecks {
         AiDraftImportFixtures.reviewDraftRegions(projects, originalId)
         val original = checkNotNull(projects.readProject(originalId))
         val baseline = AiDraftImportFixtures.sealFixture(context, originalId, originalFixture)
+        val baselineSceneBytes = ViewerPackageCodec.writeScene(releases.loadRelease(baseline.id))
         val editorSession = projects.beginEditorDraftSession(originalId)
         val originalStep = original.steps.first()
         val editorDraft = StoredEditorDraft(original.project.revision, originalStep.editorFields(),
@@ -84,7 +85,10 @@ object AiDraftImportChecks {
         val pending = fixture.zip.inputStream().use { imports.prepare(it, baseline.id) }
         imports = AiDraftImportFixtures.importStore(context) // A new instance must resume the durable exact preview.
         check(pending.sessionId in imports.pending())
-        check(checkNotNull(imports.readPrepared(pending.sessionId)).previewDigest == pending.previewDigest)
+        val resumed = checkNotNull(imports.readPrepared(pending.sessionId))
+        check(resumed.previewDigest == pending.previewDigest)
+        check(ViewerPackageCodec.writeScene(checkNotNull(pending.baselineScene)).contentEquals(baselineSceneBytes))
+        check(ViewerPackageCodec.writeScene(checkNotNull(resumed.baselineScene)).contentEquals(baselineSceneBytes))
         check(pending.scene.states.size == 3 && pending.plan.visits.size == 3)
         check(pending.plan.visits.count { it.stateId == fixture.startId } == 2)
         check(pending.scene.states.any { it.id == fixture.branchId } && pending.plan.visits.none { it.stateId == fixture.branchId })
@@ -101,6 +105,7 @@ object AiDraftImportChecks {
         check(pending.plan.toBytes().contentEquals(fixture.plan.toBytes()))
         val noBaseline = imports.preview(pending.sessionId, null)
         check(noBaseline.previewDigest != pending.previewDigest && noBaseline.baselineReleaseId == null)
+        check(noBaseline.baselineScene == null)
         rejected { imports.commit(pending.sessionId, pending.previewDigest) }
         check(projects.readProject(pending.newProjectId) == null)
         coroutineScope {
@@ -118,6 +123,7 @@ object AiDraftImportChecks {
         // Re-select the explicit local baseline and acknowledge this exact complete comparison.
         val confirmed = imports.preview(pending.sessionId, baseline.id)
         check(confirmed.previewDigest == pending.previewDigest && confirmed.baselineReleaseId == baseline.id)
+        check(ViewerPackageCodec.writeScene(checkNotNull(confirmed.baselineScene)).contentEquals(baselineSceneBytes))
         rejected { imports.commit(noBaseline.sessionId, noBaseline.previewDigest) }
         val result = imports.commit(confirmed.sessionId, confirmed.previewDigest)
         val newId = checkNotNull(result.projectId)

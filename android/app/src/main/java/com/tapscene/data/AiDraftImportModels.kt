@@ -18,6 +18,8 @@ data class AiDraftImportPreview(
     val summary: String,
     val trustNotice: String,
     val expandedByteLength: Long,
+    /** The exact comparison snapshot already bound into previewDigest, not a live draft. */
+    val baselineScene: ViewerScene? = null,
 )
 
 data class AiDraftImportResult(val sessionId: String, val status: String, val projectId: String?, val projectExists: Boolean)
