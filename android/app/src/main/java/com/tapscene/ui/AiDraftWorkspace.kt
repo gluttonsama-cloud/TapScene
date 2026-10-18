@@ -338,6 +338,9 @@ class AiDraftWorkspace(application: Application, private val savedState: SavedSt
             catch (error: Exception) { importMessage(safeError(error, "$label 未完成，请重试。")) }
             finally {
                 withContext(NonCancellable) {
+                    // Keep the cancellation decision after the last unrelated suspension: an
+                    // explicit stop during list refresh must still reach the durable receipt.
+                    runCatching { refreshImportLists() }
                     val id = importState.value.sessionId
                     if (id != null && (mayCommit || cancelRequested)) {
                         try {
@@ -347,6 +350,7 @@ class AiDraftWorkspace(application: Application, private val savedState: SavedSt
                             if (cancelRequested && actual.status != "committed") {
                                 withContext(Dispatchers.IO) { importAccess.cancel(id) }
                                 acceptResult(withContext(Dispatchers.IO) { importAccess.result(id) })
+                                runCatching { refreshImportLists() }
                             }
                         } catch (_: Exception) {
                             mutableImport.update { it.copy(outcomeUnknown = true,
@@ -354,7 +358,6 @@ class AiDraftWorkspace(application: Application, private val savedState: SavedSt
                         }
                     }
                     // prepare may have persisted a session before cancellation returned its ID.
-                    runCatching { refreshImportLists() }
                     if (id == null && cancelRequested) importMessage("已停止读取。若已有隔离副本，可从未完成导入继续核对或取消。")
                     cancelRequested = false
                     mutableImport.update { it.copy(busy = false, stage = null) }
