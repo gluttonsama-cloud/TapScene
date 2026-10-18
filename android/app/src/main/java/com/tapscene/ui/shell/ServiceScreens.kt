@@ -1,5 +1,6 @@
 package com.tapscene.ui.shell
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
@@ -14,6 +15,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -383,6 +386,8 @@ fun AiPackageScreen(
     onHold: (String, Int) -> Unit = { _, _ -> },
     onEffect: (String, String, String?, String?) -> Unit = { _, _, _, _ -> },
     onExport: () -> Unit = {},
+    onApplyAnnotation: (String, String) -> Unit = { _, _ -> },
+    onRemoveAnnotation: (String) -> Unit = {},
 ) {
     val config = state.aiConfiguration
     val resolved = remember(config) { config?.let { runCatching { it.resolve() } } }
@@ -390,12 +395,30 @@ fun AiPackageScreen(
     var confirmExport by remember(config) { mutableStateOf(false) }
     var chooseSource by rememberSaveable { mutableStateOf(false) }
     var chooseNext by remember(config) { mutableStateOf(false) }
+    var annotationInputs by rememberSaveable(config?.scene?.releaseId) { mutableStateOf(hashMapOf<String, String>()) }
+    var expandedEffects by rememberSaveable(config?.scene?.releaseId) { mutableStateOf(hashSetOf<String>()) }
+    var annotationToLocate by remember(config?.scene?.releaseId) { mutableStateOf<String?>(null) }
+    var discardAnnotationRequested by rememberSaveable(config?.scene?.releaseId) { mutableStateOf(false) }
+    val annotations = config?.effects.orEmpty().filter { it.type == "annotation" }.groupBy { it.visitId }
+    val pendingAnnotations = config?.visits.orEmpty().filter { visit ->
+        config?.fromDraft == false && annotations[visit.visitId].orEmpty().size <= 1 &&
+            annotationInputs[visit.visitId]?.let { it != annotations[visit.visitId]?.singleOrNull()?.text.orEmpty() } == true
+    }
+    LaunchedEffect(config) {
+        val visits = config?.visits.orEmpty().map { it.visitId }.toSet()
+        annotationInputs = HashMap(annotationInputs.filter { (id, text) -> id in visits && text != annotations[id]?.singleOrNull()?.text.orEmpty() })
+    }
+    val requestBack: () -> Unit = {
+        if (pendingAnnotations.isNotEmpty()) discardAnnotationRequested = true else onBack()
+    }
+    // Other routes' cancellation and system-picker owners retain their existing Back handling.
+    BackHandler(enabled = pendingAnnotations.isNotEmpty(), onBack = requestBack)
     val last = config?.visits?.lastOrNull()
     val lastStep = config?.scene?.states?.firstOrNull { it.id == last?.stateId }
     val needsNext = last != null && last.selectedEdgeId == null && lastStep?.terminal == false
     val selectedFrames = remember(config) { config?.let { runCatching { aiSelectedDurationFrames(it) }.getOrNull() } }
     Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
-        ShellTopBar("AI 动画配置", onBack)
+        ShellTopBar("AI 动画配置", requestBack)
         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp)) {
@@ -410,7 +433,7 @@ fun AiPackageScreen(
                 } else {
                     ShellLabelValue("版本", config.scene.title)
                     Text("${config.scene.states.size} 个步骤 · ${config.scene.regions.size} 个可用区域", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-                    TextButton(onClick = { chooseSource = true }, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("换一个版本") }
+                    TextButton(onClick = { chooseSource = true }, enabled = !state.busy && pendingAnnotations.isEmpty(), modifier = Modifier.heightIn(min = 48.dp)) { Text("换一个版本") }
                 }
             }
             if (config != null && !chooseSource) {
@@ -426,8 +449,11 @@ fun AiPackageScreen(
                         val step = config.scene.states.single { it.id == visit.stateId }
                         val edge = config.scene.edges.firstOrNull { it.id == visit.selectedEdgeId }
                         val effects = config.effects.filter { it.visitId == visit.visitId }
-                        var showEffects by rememberSaveable(visit.visitId) { mutableStateOf(false) }
-                        var annotation by rememberSaveable(visit.visitId) { mutableStateOf(effects.firstOrNull { it.type == "annotation" }?.text.orEmpty()) }
+                        val showEffects = visit.visitId in expandedEffects
+                        val existingAnnotations = annotations[visit.visitId].orEmpty()
+                        val annotation = annotationInputs[visit.visitId] ?: existingAnnotations.singleOrNull()?.text.orEmpty()
+                        val annotationPending = pendingAnnotations.any { it.visitId == visit.visitId }
+                        val annotationLocation = remember(visit.visitId) { BringIntoViewRequester() }
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text("${index + 1}. ${step.title}", style = MaterialTheme.typography.titleSmall)
                             Text(edge?.let { "接着：${it.label}" } ?: if (step.terminal) "播放到这里结束" else "请选择下一步", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
@@ -437,8 +463,9 @@ fun AiPackageScreen(
                                 OutlinedButton(onClick = { onHold(visit.visitId, minOf(RenderPlan.MAX_HOLD_FRAMES, visit.holdFrames + 30)) }, enabled = !state.busy && !config.fromDraft && visit.holdFrames < RenderPlan.MAX_HOLD_FRAMES, modifier = Modifier.heightIn(min = 48.dp)) { Text("+ 1 秒") }
                             }
                             effects.forEach { Text(aiEffectLabel(config, it), style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted) }
-                            TextButton(onClick = { showEffects = !showEffects }, enabled = !config.fromDraft, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (showEffects) "收起效果" else if (effects.isEmpty()) "添加效果" else "调整效果") }
-                            if (showEffects) {
+                            TextButton(onClick = { expandedEffects = HashSet(expandedEffects).apply { if (showEffects) remove(visit.visitId) else add(visit.visitId) } },
+                                enabled = !config.fromDraft, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (showEffects) "收起效果" else if (effects.isEmpty()) "添加效果" else "调整效果") }
+                            if (showEffects && !config.fromDraft) {
                                 if (edge?.hotspotId != null) TextButton(onClick = { onEffect(visit.visitId, "click", null, null) }, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("${if (effects.any { it.type == "click" }) "✓ " else ""}点击提示") }
                                 if (edge?.toStateId != null && edge.transitionAssetId == null) TextButton(onClick = { onEffect(visit.visitId, "transition", null, null) }, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("${if (effects.any { it.type == "transition" }) "✓ " else ""}平滑切换到下一步") }
                                 config.scene.regions.filter { it.stateId == visit.stateId }.forEach { region ->
@@ -449,17 +476,28 @@ fun AiPackageScreen(
                                         }
                                     }
                                 }
-                                OutlinedTextField(value = annotation, onValueChange = { if (it.length <= 240) annotation = it }, enabled = !state.busy,
-                                    label = { Text("画面标注（最多 240 字）") }, modifier = Modifier.fillMaxWidth())
-                                TextButton(onClick = { onEffect(visit.visitId, "annotation", null, annotation) }, enabled = !state.busy && (annotation.isNotBlank() || effects.any { it.type == "annotation" }), modifier = Modifier.heightIn(min = 48.dp)) { Text(if (effects.any { it.type == "annotation" }) "移除已有标注" else "加入标注") }
+                                LaunchedEffect(annotationToLocate) {
+                                    if (annotationToLocate == visit.visitId) { annotationLocation.bringIntoView(); annotationToLocate = null }
+                                }
+                                if (existingAnnotations.size > 1) Text("此访问包含多条标注，请回草稿逐项编辑后重新封存。", color = ShellColors.Accent)
+                                else {
+                                    AiAnnotationEditor(annotation, annotationPending, !state.busy, existingAnnotations.isNotEmpty(),
+                                        onText = { text -> annotationInputs = HashMap(annotationInputs).apply { put(visit.visitId, text) } },
+                                        onApply = { onApplyAnnotation(visit.visitId, annotation) },
+                                        onRestore = { annotationInputs = HashMap(annotationInputs).apply { remove(visit.visitId) } },
+                                        onRemove = {
+                                            onRemoveAnnotation(visit.visitId)
+                                            annotationInputs = HashMap(annotationInputs).apply { remove(visit.visitId) }
+                                        }, fieldModifier = Modifier.bringIntoViewRequester(annotationLocation))
+                                }
                             }
                         }
                         ShellDivider()
                     }
                     if (!needsNext) Text("已选好播放顺序", color = ShellColors.Accent)
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        TextButton(onClick = onPrevious, enabled = !state.busy && !config.fromDraft && (config.visits.size > 1 || last?.selectedEdgeId != null), modifier = Modifier.heightIn(min = 48.dp)) { Text("撤回最后一步") }
-                        TextButton(onClick = onReset, enabled = !state.busy && !config.fromDraft, modifier = Modifier.heightIn(min = 48.dp)) { Text("重新选择") }
+                        TextButton(onClick = onPrevious, enabled = !state.busy && !config.fromDraft && pendingAnnotations.isEmpty() && (config.visits.size > 1 || last?.selectedEdgeId != null), modifier = Modifier.heightIn(min = 48.dp)) { Text("撤回最后一步") }
+                        TextButton(onClick = onReset, enabled = !state.busy && !config.fromDraft && pendingAnnotations.isEmpty(), modifier = Modifier.heightIn(min = 48.dp)) { Text("重新选择") }
                     }
                 }
                 DetailSection("保存前检查") {
@@ -474,17 +512,27 @@ fun AiPackageScreen(
         if (config != null && !chooseSource) {
             ShellDivider()
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (pendingAnnotations.isNotEmpty()) TextButton(onClick = {
+                    val id = pendingAnnotations.first().visitId
+                    expandedEffects = HashSet(expandedEffects).apply { add(id) }; annotationToLocate = id
+                }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("${pendingAnnotations.size} 处标注输入未应用 · 返回检查") }
                 Text("${config.visits.size} 步 / ${if (plan != null) "总时长" else "当前时长"} ${
                     (plan?.totalFrames ?: selectedFrames)?.let { "约 ${aiSeconds(it)} 秒" } ?: "待检查"
                 }", style = MaterialTheme.typography.labelMedium, color = ShellColors.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Button(onClick = { if (needsNext) chooseNext = true else confirmExport = true },
-                    enabled = !state.busy && (needsNext || plan != null), shape = RoundedCornerShape(8.dp),
+                    enabled = !state.busy && pendingAnnotations.isEmpty() && (needsNext || plan != null), shape = RoundedCornerShape(8.dp),
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                     Text(if (needsNext) "接着播放" else "检查并保存")
                 }
             }
         }
     }
+    if (discardAnnotationRequested) AlertDialog(onDismissRequest = { discardAnnotationRequested = false },
+        title = { Text("标注文字尚未应用") }, text = { Text("继续编辑并应用后再保存。放弃输入不会修改已经应用的标注和其他效果。") },
+        confirmButton = { TextButton(onClick = { discardAnnotationRequested = false }) { Text("继续编辑") } },
+        dismissButton = { TextButton(onClick = {
+            discardAnnotationRequested = false; annotationInputs = hashMapOf(); onBack()
+        }) { Text("放弃标注输入并返回") } })
     if (chooseNext && config != null && last != null && needsNext) AlertDialog(
         onDismissRequest = { chooseNext = false }, title = { Text("接着播放") },
         text = {
@@ -506,6 +554,27 @@ fun AiPackageScreen(
         confirmButton = { TextButton(onClick = { confirmExport = false; onExport() }) { Text("选择保存位置") } },
         dismissButton = { TextButton(onClick = { confirmExport = false }) { Text("返回调整") } },
     )
+}
+
+/** Shared production editor body so pending and invalid states can be inspected in host layouts. */
+@Composable
+internal fun AiAnnotationEditor(
+    text: String, pending: Boolean, enabled: Boolean, hasAnnotation: Boolean,
+    onText: (String) -> Unit, onApply: () -> Unit, onRestore: () -> Unit, onRemove: () -> Unit,
+    fieldModifier: Modifier = Modifier,
+) {
+    val valid = text.isNotBlank() && text.length <= 240
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        OutlinedTextField(value = text, onValueChange = onText, enabled = enabled, isError = pending && !valid,
+            supportingText = { Text(if (pending && !valid) "请输入 1–240 字；删除请用“移除标注”。" else if (pending) "尚未应用；保存前请先应用或还原输入。" else "应用文字时保留原标注的时段和位置。") },
+            label = { Text("画面标注（最多 240 字）") }, modifier = fieldModifier.fillMaxWidth())
+        TextButton(onClick = onApply, enabled = enabled && valid && pending,
+            modifier = Modifier.heightIn(min = 48.dp)) { Text("应用标注文字") }
+        if (pending) TextButton(onClick = onRestore, enabled = enabled,
+            modifier = Modifier.heightIn(min = 48.dp)) { Text("还原文字输入") }
+        if (hasAnnotation) TextButton(onClick = onRemove, enabled = enabled,
+            modifier = Modifier.heightIn(min = 48.dp)) { Text("移除标注") }
+    }
 }
 
 /** Informational duration of the explicit visits only; it never makes an unfinished plan exportable. */

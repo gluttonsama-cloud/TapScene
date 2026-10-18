@@ -67,6 +67,32 @@ data class AiPackageConfiguration(
     val fromDraft: Boolean = false,
 ) {
     fun resolve(): RenderPlan = RenderPlan.build(scene, width, height, visits, effects)
+
+    fun withAnnotation(visitId: String, text: String): AiPackageConfiguration {
+        check(!fromDraft) { "此计划随草稿封存，请回项目的动画计划调整后重新封存。" }
+        check(text.isNotBlank() && text.length <= 240) { "标注须为 1 至 240 字的非空白文字。" }
+        val visit = visits.singleOrNull { it.visitId == visitId } ?: error("播放顺序中没有这一步。")
+        val annotations = effects.filter { it.visitId == visitId && it.type == "annotation" }
+        check(annotations.size <= 1) { "此访问有多条标注，无法单独调整。" }
+        val existing = annotations.singleOrNull()
+        if (existing != null) {
+            val updated = RenderPlan.Effect(existing.type, existing.visitId, existing.startFrame, existing.durationFrames,
+                existing.hotspotId, existing.regionId, text, existing.rect)
+            return copy(effects = effects.map { if (it === existing) updated else it })
+        }
+        check(effects.size < RenderPlan.MAX_EFFECTS) { "最多 256 个效果。" }
+        return copy(effects = effects + RenderPlan.Effect("annotation", visitId, 0, visit.holdFrames,
+            null, null, text, ViewerScene.Rect(.08, .08, .84, .14)))
+    }
+
+    fun withoutAnnotation(visitId: String): AiPackageConfiguration {
+        check(!fromDraft) { "此计划随草稿封存，请回项目的动画计划调整后重新封存。" }
+        check(visits.singleOrNull { it.visitId == visitId } != null) { "播放顺序中没有这一步。" }
+        val annotations = effects.filter { it.visitId == visitId && it.type == "annotation" }
+        check(annotations.size <= 1) { "此访问有多条标注，无法单独调整。" }
+        val existing = annotations.singleOrNull() ?: return this
+        return copy(effects = effects.filterNot { it === existing })
+    }
 }
 
 /** A deliberate delivery choice, independent from the last seal operation's result. */
@@ -682,6 +708,8 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         check(index >= 0) { "播放顺序中没有这一步。" }
         config.copy(visits = config.visits.map { if (it.visitId == visitId) RenderPlan.Visit(it.visitId, it.stateId, it.selectedEdgeId, frames) else it })
     }
+    fun applyAiAnnotation(visitId: String, text: String) = editAi { it.withAnnotation(visitId, text) }
+    fun removeAiAnnotation(visitId: String) = editAi { it.withoutAnnotation(visitId) }
     fun toggleAiEffect(visitId: String, type: String, regionId: String? = null, text: String? = null) = editAi { config ->
         val visit = config.visits.single { it.visitId == visitId }
         val existing = config.effects.any { it.visitId == visitId && it.type == type && it.regionId == regionId }

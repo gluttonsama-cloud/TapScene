@@ -13,6 +13,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -52,6 +53,16 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
         save = { it.toList() }, restore = { it.toMutableStateList() },
     )) { mutableStateListOf<String>() }
     val page = pages.lastOrNull()
+    // A task banner may temporarily cover AI configuration. Retain its unapplied input only
+    // while that route remains on the stack, and never restore it into another fixed version.
+    val aiRouteState = rememberSaveableStateHolder()
+    val aiStateKey = "ai:${releaseState.aiConfiguration?.scene?.releaseId.orEmpty()}"
+    val aiInStack = "ai" in pages
+    var retainedAiStateKey by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(aiInStack, aiStateKey) {
+        if (!aiInStack || retainedAiStateKey != aiStateKey) retainedAiStateKey?.let(aiRouteState::removeState)
+        retainedAiStateKey = if (aiInStack) aiStateKey else null
+    }
     val push: (String) -> Unit = { if (pages.lastOrNull() != it) pages.add(it) }
     val pop: () -> Unit = { if (pages.isNotEmpty()) pages.removeAt(pages.lastIndex) }
     val openCreatedProject: (String) -> Unit = { id ->
@@ -823,9 +834,12 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 onChangeEffect = aiDrafts::changeEffect, onDeleteEffect = aiDrafts::deleteEffect,
                                 onSave = aiDrafts::savePlan, onReadResult = aiDrafts::reconcilePlan,
                                 onReload = { projectId?.let(aiDrafts::openPlan) }))
-                            "ai" -> AiPackageScreen(pop, releaseState, releases::openAiPackage, releases::chooseAiEdge,
-                                releases::previousAiVisit, releases::resetAiPath, releases::setAiCanvas, releases::setAiHold,
-                                releases::toggleAiEffect, releases::prepareAiExport)
+                            "ai" -> aiRouteState.SaveableStateProvider(aiStateKey) {
+                                AiPackageScreen(pop, releaseState, releases::openAiPackage, releases::chooseAiEdge,
+                                    releases::previousAiVisit, releases::resetAiPath, releases::setAiCanvas, releases::setAiHold,
+                                    releases::toggleAiEffect, releases::prepareAiExport,
+                                    onApplyAnnotation = releases::applyAiAnnotation, onRemoveAnnotation = releases::removeAiAnnotation)
+                            }
                             "hosted" -> if (BuildConfig.HOSTED_ENABLED) LocalHostingContent(hostingState, hostingActions) else HostingAccountScreen(pop, { push("versions") })
                             "account" -> if (BuildConfig.HOSTED_ENABLED) LocalHostingContent(hostingState, hostingActions) else HostingAccountScreen(pop, { push("versions") })
                             "versions" -> if (BuildConfig.HOSTED_ENABLED) LocalHostingContent(hostingState, hostingActions) else HostedVersionsScreen(pop, { push("account") })
