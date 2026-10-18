@@ -265,7 +265,9 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 114, f"Expected one hundred fourteen Compose review images, found {len(images)}"
+          assert len(images) == 116, f"Expected one hundred sixteen Compose review images, found {len(images)}"
+          project_source_images = [image for image in images if "ProjectSourceStorageScreenshotPreviewsKt" in str(image)]
+          assert len(project_source_images) == 2, f"Expected two project source storage images, found {len(project_source_images)}"
           offline_import_images = [image for image in images if "OfflineImportPlaybackScreenshotPreviewsKt" in str(image)]
           assert len(offline_import_images) == 1, f"Expected one offline import playback image, found {len(offline_import_images)}"
           ai_configuration_images = [image for image in images if "AiConfigurationExitScreenshotPreviewsKt" in str(image)]
@@ -439,6 +441,7 @@ jobs:
             --tests com.tapscene.ui.shell.AuthoredPathImpactHostTest \
             --tests com.tapscene.ui.ReleasePlayerCancellationHostTest \
             --tests com.tapscene.ui.shell.OfflineImportPlaybackHostTest \
+            --tests com.tapscene.ui.shell.ProjectStorageNavigationHostTest \
             --tests com.tapscene.ui.shell.ReleasePlayerFeedbackHostTest \
             --tests com.tapscene.ui.shell.AiImportNavigationHostTest \
             --tests com.tapscene.ui.shell.AiImportDifferenceIdentityHostTest \
@@ -701,6 +704,8 @@ jobs:
               ("com.tapscene.ui.AiAnnotationEditsTest", "draftBoundPlanRejectsAddUpdateAndRemovalIncludingNoOpRemoval"): 1,
               ("com.tapscene.ui.AiAnnotationEditsTest", "multipleAnnotationsOnOneVisitRejectApplyAndRemovalDespiteDifferentRegions"): 1,
               ("com.tapscene.ui.AiAnnotationEditsTest", "effectLimitBlocksOnlyAdditionNotTextUpdatesOrRemoval"): 1,
+              ("com.tapscene.ui.shell.ProjectStorageNavigationHostTest", "sameTitleProjectsOpenTheirOwnSourcesAndLateCallbacksDoNotReopenOrStackNavigation"): 1,
+              ("com.tapscene.ui.shell.ProjectStorageNavigationHostTest", "unreadableUsageStillOpensOwningProjectSourcesAndExplicitReloadRecoversOriginalRecord"): 1,
               ("com.tapscene.ui.shell.OfflineImportPlaybackHostTest", "repeatedOlderSameTitleImportOpensExactVersionAndExitBackAndReadFailureReturnToLibrary"): 1,
               ("com.tapscene.ui.shell.OfflineImportPlaybackHostTest", "repeatedLocalPackageRetainsProvenanceAndBackCancelsBlockedPlayerRead"): 1,
               ("com.tapscene.ui.shell.OfflineImportPlaybackHostTest", "importBranchesOnlyExposeCurrentSuccessfulIdAndReselectionClearsSuccess"): 1,

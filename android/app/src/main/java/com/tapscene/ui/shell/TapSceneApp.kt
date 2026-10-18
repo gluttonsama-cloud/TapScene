@@ -717,9 +717,36 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                         { push("account") }, { push("versions") }, { projects.reload(); push("sources") })
                                 }
                             }
-                            "sources" -> RetainedSourcesScreen(state, onBack = pop) { id ->
-                                if (media.activateProject(id)) retainedMedia = true
-                                else projects.message(media.state.value.message ?: "请先完成当前素材处理。")
+                            "sources" -> {
+                                val projectSources by produceState<List<ProjectSourceUsage>?>(null, state.projects, mediaState.drafts) {
+                                    value = null
+                                    value = withContext(Dispatchers.IO) {
+                                        state.projects.mapNotNull { project ->
+                                            try {
+                                                val sources = WorkspaceStore(context, project.id).read().distinctBy { it.source.sourceId }
+                                                if (sources.isEmpty()) null else ProjectSourceUsage(project.id, project.title,
+                                                    sources.size, sources.sumOf { it.source.metadata.byteLength })
+                                            } catch (cancelled: CancellationException) { throw cancelled }
+                                            catch (_: Exception) { ProjectSourceUsage(project.id, project.title, null, null) }
+                                        }
+                                    }
+                                }
+                                RetainedSourcesScreen(state, projectSources, mediaState.busy, onBack = pop,
+                                    onOpenProject = { id ->
+                                        val current = projects.state.value
+                                        if (pages.lastOrNull() == "sources" && !current.busy && !current.loadFailed &&
+                                            current.projects.any { it.id == id } && !retainAiChanges(aiNavigationNote)) {
+                                            // Check that the current workbench can leave without switching owners yet.
+                                            // The existing project effect activates the target only after its read succeeds.
+                                            if (media.activateProject(media.projectId)) {
+                                                pages.clear(); library = false; tab = ProjectTab.SOURCES
+                                                projects.openProject(id)
+                                            } else projects.message(media.state.value.message ?: "请先完成当前素材处理。")
+                                        }
+                                    }, onOpen = { id ->
+                                        if (media.activateProject(id)) retainedMedia = true
+                                        else projects.message(media.state.value.message ?: "请先完成当前素材处理。")
+                                    })
                             }
                             "candidates" -> CandidateSelectionScreen(candidateState,
                                 if (scopeReady) mediaState.drafts else emptyList(), candidates,
@@ -1242,15 +1269,30 @@ private fun ConfirmDelete(title: String, message: String, enabled: Boolean, onDi
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }
 
+internal data class ProjectSourceUsage(val projectId: String, val title: String, val sourceCount: Int?, val byteLength: Long?)
+
 @Composable
-private fun RetainedSourcesScreen(state: ProjectUiState, onBack: () -> Unit, onOpen: (String?) -> Unit) {
+internal fun RetainedSourcesScreen(state: ProjectUiState, projectSources: List<ProjectSourceUsage>?, mediaBusy: Boolean,
+    onBack: () -> Unit, onOpenProject: (String) -> Unit, onOpen: (String?) -> Unit) {
     Column(Modifier.fillMaxSize()) {
         ShellTopBar("本机保留素材", onBack)
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("项目中的素材从项目页管理。这里保留旧工作台及已删除项目的原录屏。", style = MaterialTheme.typography.bodySmall)
-            if (state.retainedMediaWorkspaces.isEmpty()) ScreenEmpty("没有保留素材", "项目仍在使用的素材不会列在这里。")
+            SectionHeader("项目中的原录屏", "打开项目素材页，进入“手动校正”后，可从“素材”菜单管理原片。")
+            when {
+                projectSources == null -> StatusNote("正在读取项目素材占用。")
+                projectSources.isEmpty() -> Text("项目中没有保留原录屏。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                else -> projectSources.forEach { item ->
+                    val usage = if (item.sourceCount != null && item.byteLength != null)
+                        "${item.sourceCount} 段原录屏 · ${formatShellBytes(item.byteLength)}" else "占用暂时无法读取"
+                    ShellActionRow(item.title, "$usage\n项目 ${item.projectId.take(12)}", onClick = { onOpenProject(item.projectId) },
+                        enabled = !state.busy && !state.loadFailed && !mediaBusy)
+                    ShellDivider()
+                }
+            }
+            SectionHeader("其他保留原录屏", "旧工作台及已删除项目的素材，仍保存在这台设备。")
+            if (state.retainedMediaWorkspaces.isEmpty()) Text("没有其他保留素材。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
             state.retainedMediaWorkspaces.forEach { item ->
-                ShellActionRow(item.label, "${item.sourceCount} 段原录屏", onClick = { onOpen(item.projectId) }, enabled = !state.busy && !state.loadFailed)
+                ShellActionRow(item.label, "${item.sourceCount} 段原录屏", onClick = { onOpen(item.projectId) }, enabled = !state.busy && !state.loadFailed && !mediaBusy)
                 ShellDivider()
             }
         }
