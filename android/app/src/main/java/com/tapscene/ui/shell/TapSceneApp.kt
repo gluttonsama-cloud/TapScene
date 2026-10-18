@@ -148,6 +148,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     var discardingCandidate by remember { mutableStateOf<ReleaseCandidate?>(null) }
     var exportPickerPending by rememberSaveable { mutableStateOf(false) }
     val projectId = state.project?.project?.id
+    var connectionRepairStepId by rememberSaveable(projectId) { mutableStateOf<String?>(null) }
     var draftAiPendingHold by remember(projectId) { mutableStateOf(false) }
     LaunchedEffect(page) { if (page != "draft-ai") draftAiPendingHold = false }
     val draftAiTaskBlocked = page == "draft-ai" && (draftAiState.busy || draftAiState.dirty ||
@@ -930,7 +931,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 onVideoRetry = projects::retryPreviewTransition, onVideoSkip = projects::skipPreviewTransition)
                         } }
                         state.route == ProjectRoute.STEPS -> ProjectWorkspaceFrame(
-                            state.project?.project?.title.orEmpty(), tab, { if (!state.busy && !mediaState.busy) tab = it },
+                            state.project?.project?.title.orEmpty(), tab, { if (!state.busy && !mediaState.busy) { connectionRepairStepId = null; tab = it } },
                             { if (!state.busy && !mediaState.busy) projects.back() }, { if (!unavailable) projects.startPreview() },
                             { projectMore = true },
                         ) {
@@ -938,7 +939,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 ProjectTab.STEPS -> StoryboardContent(state, projects::openStep, { tab = ProjectTab.SOURCES },
                                     projects::setStart, projects::moveStep, { deletingStep = it },
                                     stepThumbnail = { asset -> ReviewedThumbnail(projects, state.project, asset) }, onBuildPath = openPath, onAiPlan = openDraftAi,
-                                    onCopyStep = projects::copySavedStep)
+                                    onCopyStep = projects::copySavedStep, connectionRepairStepId = connectionRepairStepId,
+                                    onReturnToChecks = { connectionRepairStepId = null; tab = ProjectTab.CHECKS })
                                 ProjectTab.SOURCES -> Column(Modifier.fillMaxSize()) {
                                     if (scopeReady && mediaState.loadFailed) Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                                         Text("素材暂时无法读取。", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
@@ -957,7 +959,11 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                     }, onImportScreenshot = requestScreenshot, onClickPlan = { push("click-plan") })
                                 }
                                 ProjectTab.CHECKS -> DeliveryCheckScreen(state.project, state.issues, { tab = ProjectTab.STEPS },
-                                    { issue -> issue.stepId?.let(projects::openStep) ?: run { tab = ProjectTab.STEPS } },
+                                    { issue -> if (!unavailable && !mediaState.busy) {
+                                        if (issue.correction == ProjectIssueCorrection.CONNECTION) {
+                                            connectionRepairStepId = issue.stepId; tab = ProjectTab.STEPS
+                                        } else issue.stepId?.let(projects::openStep) ?: run { tab = ProjectTab.STEPS }
+                                    } },
                                     { projects.startPreview() }, openReleaseReview, { projectId?.let(releases::openProjectDelivery); push("delivery") }, showTopBar = false,
                                     onBuildCandidate = buildRelease, busy = unavailable || mediaState.busy,
                                     buildEnabled = state.dirtyStepIds.isEmpty())

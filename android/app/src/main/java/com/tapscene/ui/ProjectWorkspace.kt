@@ -65,7 +65,9 @@ data class StepEditDraft(
     val conflicts: Set<String> = emptySet(),
 )
 
-data class ProjectIssue(val stepId: String?, val message: String)
+enum class ProjectIssueCorrection { STEP_EDITOR, CONNECTION }
+data class ProjectIssue(val stepId: String?, val message: String,
+    val correction: ProjectIssueCorrection = ProjectIssueCorrection.STEP_EDITOR)
 
 /** A durable receipt is acknowledged only after the production screen has shown this result. */
 data class ProjectCopyNotice(val operationId: String, val message: String)
@@ -1668,7 +1670,8 @@ class ProjectWorkspace internal constructor(application: Application,
                     .filter { it in byId && it !in reached }.forEach(queue::addLast)
             }
             snapshot.steps.forEach { step ->
-                if (start != null && start in byId && step.id !in reached) result += ProjectIssue(step.id, "无法从起点到达“${step.title}”，请连接动作或调整起点")
+                if (start != null && start in byId && step.id !in reached) result += ProjectIssue(step.id,
+                    "无法从起点到达“${step.title}”，请连接动作或调整起点", ProjectIssueCorrection.CONNECTION)
                 if (!step.isTerminal && step.hotspots.isEmpty() && step.nextAction == null) {
                     result += ProjectIssue(step.id, "“${step.title}”尚无动作，请添加下一步、热点或设为终点")
                 }
