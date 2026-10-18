@@ -412,6 +412,7 @@ jobs:
           gradle -p android --no-daemon --max-workers=2 -PcompatibilityPreview=true -PtapsceneAbi=arm64-v8a \
             :app:testDebugUnitTest \
             --tests com.tapscene.data.ProjectStoreHostTest \
+            --tests com.tapscene.media.SourceCapacityHostTest \
             --tests com.tapscene.ui.ProjectWorkspaceHostTest \
             --tests com.tapscene.data.AiRoundTripHostTest \
             --tests com.tapscene.data.SavedStepCopyHostTest \
@@ -469,6 +470,9 @@ jobs:
           root = Path("android/app/build/test-results/testDebugUnitTest")
           files = sorted(root.glob("TEST-*.xml"))
           expected = {
+              ("com.tapscene.media.SourceCapacityHostTest", "aggregateLimitsRejectBeforeWriteAndAcceptExactBoundary"): 1,
+              ("com.tapscene.media.SourceCapacityHostTest", "capacityMappingIsClosedAndUnknownFailuresStayPrivate"): 1,
+              ("com.tapscene.media.SourceCapacityHostTest", "interruptedProviderReadCleansOnlyItsUnregisteredCopy"): 1,
               ("com.tapscene.clickplan.InitialFrameAdmissionEngineTest", "pendingLeavesReadyWithoutStartedIntentOrGestureAndNeverBeginsTwice"): 1,
               ("com.tapscene.clickplan.InitialFrameAdmissionEngineTest", "preparationPredicatesAndBeginCannotReopenAReentrantlyCancelledRun"): 1,
               ("com.tapscene.clickplan.InitialFrameAdmissionEngineTest", "synchronousForeignThreadAndDuplicateNotificationsOnlyEnqueueOneStartAndOneCall"): 1,

@@ -561,6 +561,8 @@ fun ProjectSourcesContent(
         item(key = "source_summary") {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 WorkspaceSectionTitle("本机原录屏", "${drafts.size} / 3 段")
+                Text("录屏合计上限：5 分钟 / 500 MiB", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (drafts.isNotEmpty()) Text(
                     "合计 ${formatSourceDuration(drafts.sumOf { it.source.metadata.durationUs })} · ${formatSourceBytes(drafts.sumOf { it.source.metadata.byteLength })}",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -608,6 +610,9 @@ internal fun SourceAddOptionsContent(
     val enabled = !busy && !loadFailed
     Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 12.dp)) {
         Text("添加素材", style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
+        Text("单段录屏最多 3 分钟、200 MiB；项目合计最多 5 分钟、500 MiB。",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 8.dp, bottom = 8.dp))
         TextButton(onClick = onRecord, enabled = enabled,
             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("手动录屏") }
         TextButton(onClick = onImportVideo, enabled = enabled && sourceCount < 3,

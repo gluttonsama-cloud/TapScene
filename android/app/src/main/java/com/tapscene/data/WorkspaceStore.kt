@@ -28,6 +28,16 @@ data class SourceDraft(
 class WorkspaceDurabilityException(cause: Exception) :
     IOException("素材记录已写入，但持久化确认未完成。请保留原片并重试。", cause)
 
+/** Closed reasons only: these messages may be shown after a rejected, uncommitted import. */
+internal enum class WorkspaceCapacityLimit(val userMessage: String) {
+    SOURCE_COUNT("当前项目最多保留 3 段录屏。请在新项目中导入。"),
+    TOTAL_BYTES("当前项目录屏合计不能超过 500 MiB。请选择更小的录屏，或在新项目中导入。"),
+    TOTAL_DURATION("当前项目录屏合计不能超过 5 分钟。请选择更短的录屏，或在新项目中导入。"),
+}
+
+internal class WorkspaceCapacityException(val limit: WorkspaceCapacityLimit) :
+    IllegalArgumentException(limit.userMessage)
+
 /** Media workbench state only. This is not the project's future graph database. */
 class WorkspaceStore(context: Context, projectId: String? = null) {
     private val root = context.noBackupFilesDir
@@ -147,15 +157,15 @@ class WorkspaceStore(context: Context, projectId: String? = null) {
 
     /** Whole-workspace replacement is for initialization only; live callers use update/append. */
     fun write(drafts: List<SourceDraft>): Unit = synchronized(lock) {
-        require(drafts.size <= 3) { "最多保留 3 段录屏" }
+        if (drafts.size > 3) throw WorkspaceCapacityException(WorkspaceCapacityLimit.SOURCE_COUNT)
         require(drafts.map { it.source.sourceId }.distinct().size == drafts.size) { "素材标识重复" }
         require(drafts.all { it.source.metadata.byteLength in 1..200L * 1024 * 1024 &&
             it.source.metadata.durationUs in 1..180_000_000L }) { "单段录屏超过时长或大小限额" }
-        require(drafts.sumOf { it.source.metadata.byteLength } <= 500L * 1024 * 1024) {
-            "全部录屏不能超过 500 MiB"
+        if (drafts.sumOf { it.source.metadata.byteLength } > 500L * 1024 * 1024) {
+            throw WorkspaceCapacityException(WorkspaceCapacityLimit.TOTAL_BYTES)
         }
-        require(drafts.sumOf { it.source.metadata.durationUs } <= 300_000_000L) {
-            "全部录屏不能超过 5 分钟"
+        if (drafts.sumOf { it.source.metadata.durationUs } > 300_000_000L) {
+            throw WorkspaceCapacityException(WorkspaceCapacityLimit.TOTAL_DURATION)
         }
         val items = JSONArray()
         drafts.forEach { draft ->
