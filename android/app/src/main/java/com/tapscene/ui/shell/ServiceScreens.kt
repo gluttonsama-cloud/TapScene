@@ -305,6 +305,7 @@ fun DeliveryOptionsScreen(
     busy: Boolean = false,
     onHosting: (() -> Unit)? = null,
     onOpenSealed: (() -> Unit)? = null,
+    onChooseVersion: (() -> Unit)? = null,
 ) {
     var showVersionDetails by rememberSaveable(sealedSummary?.id) { mutableStateOf(false) }
     ServicePage("交付方式", onBack) {
@@ -341,6 +342,9 @@ fun DeliveryOptionsScreen(
                 Button(shape = RoundedCornerShape(8.dp), onClick = onReview, enabled = !busy,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("继续成品复核") }
             }
+        }
+        onChooseVersion?.let { choose ->
+            ShellActionRow("从演示库选择版本", "打开已有封存版本，保存或系统分享。", enabled = !busy, onClick = choose)
         }
         Column {
             ShellDivider()

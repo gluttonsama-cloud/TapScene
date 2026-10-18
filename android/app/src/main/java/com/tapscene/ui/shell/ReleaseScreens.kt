@@ -442,6 +442,7 @@ fun ReleaseLibraryContent(
     onDiscardCandidate: (ReleaseCandidate) -> Unit = {},
     onAi: ((String) -> Unit)? = null,
     onHosting: (() -> Unit)? = null,
+    onDelivery: ((String) -> Unit)? = null,
 ) {
     Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
         ShellTopBar("演示库", actions = {
@@ -490,6 +491,11 @@ fun ReleaseLibraryContent(
                         style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                     Text("版本 ${release.id.take(12)}", style = MaterialTheme.typography.labelSmall, color = ShellColors.Muted)
                     if (release.origin != "local") Text("完整性校验不代表作者身份或隐私内容已获认证。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    if (release.origin == "local" && onDelivery != null) OutlinedButton(
+                        onClick = { onDelivery(release.id) }, enabled = !state.busy,
+                        shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                        Text("交付此版本")
+                    }
                     if (onAi != null) TextButton(onClick = { onAi(release.id) }, enabled = !state.busy,
                         modifier = Modifier.heightIn(min = 48.dp)) { Text("配置 AI 数据包") }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {

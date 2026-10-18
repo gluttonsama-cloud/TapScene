@@ -288,9 +288,9 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
         exportPickerPending = false
         if (uri != null) releases.saveExport(uri) else releases.cancelExportPicker()
     }
-    LaunchedEffect(releaseState.exportFile, releaseState.busy) {
+    LaunchedEffect(releaseState.exportFile, releaseState.busy, page) {
         val ready = releaseState.exportFile
-        if (ready != null && !releaseState.busy && !exportPickerPending && releases.beginExportPicker()) {
+        if (ready != null && !releaseState.busy && !exportPickerPending && releases.beginExportPicker(deliveryPageVisible = page == "delivery")) {
             exportPickerPending = true
             try { packageSaver.launch("TapScene-${ready.name}") }
             catch (_: android.content.ActivityNotFoundException) {
@@ -299,13 +299,13 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
             }
         }
     }
-    LaunchedEffect(page) { if (page != "delivery") releases.leaveSharePage() }
+    LaunchedEffect(page) { if (page != "delivery") releases.leaveDeliveryPage() }
     val packageSharer = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         releases.finishShareChooser()
     }
-    LaunchedEffect(releaseState.pendingShare, releaseState.busy, page, releaseState.lastSealedId) {
+    LaunchedEffect(releaseState.pendingShare, releaseState.busy, page, releaseState.deliverySelection) {
         if (releaseState.pendingShare != null && !releaseState.busy) {
-            val share = releases.beginShareChooser(releaseState.lastSealedId.takeIf { page == "delivery" })
+            val share = releases.beginShareChooser(releaseState.deliveryRelease?.id.takeIf { page == "delivery" })
             if (share != null) {
                 try {
                     packageSharer.launch(offlineShareChooser(share))
@@ -516,8 +516,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
             }
         }
     }
-    BackHandler(enabled = page != null && !retainedMedia) { pop() }
-    BackHandler(enabled = page in setOf("review", "delivery", "import") && releaseState.busy) { releases.cancel() }
+    BackHandler(enabled = page != null && !retainedMedia) { if (page == "delivery") releases.leaveDeliveryPage(); pop() }
+    BackHandler(enabled = page in setOf("review", "import") && releaseState.busy) { releases.cancel() }
     BackHandler(enabled = page == "review" && reviewSourceStepId != null && state.route != ProjectRoute.EDIT) {
         projects.cancel(); reviewSourceStepId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
     }
@@ -541,7 +541,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                         TextButton(onClick = releases::cancel) { Text("取消") }
                     }
                 }
-                releaseState.message?.takeIf { page !in setOf("review", "player", "import") && !library }?.let { text ->
+                releaseState.message?.takeIf { page !in setOf("review", "player", "import") && (!library || page == "delivery") }?.let { text ->
                     Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text(text, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = ShellColors.Accent)
                         TextButton(onClick = releases::clearMessage) { Text("关闭") }
@@ -790,13 +790,18 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 onBackToChecks = if (state.route == ProjectRoute.STEPS) ({ pages.clear(); library = false; tab = ProjectTab.CHECKS }) else null)
                             }
                             "delivery" -> {
-                                val sealed = releaseState.releases.firstOrNull { it.id == releaseState.lastSealedId }
-                                DeliveryOptionsScreen(pop, openReleaseReview, { if (sealed != null) releases.openAiPackage(sealed.id) else releases.clearAiConfiguration(); push("ai") }, { push("account") }, { push("versions") },
-                                    sealedSummary = sealed, onExport = sealed?.let { item -> { releases.prepareExport(item.id) } },
+                                val sealed = releaseState.deliveryRelease
+                                DeliveryOptionsScreen({ releases.leaveDeliveryPage(); pop() }, openReleaseReview, { if (sealed != null) releases.openAiPackage(sealed.id) else releases.clearAiConfiguration(); push("ai") }, { push("account") }, { push("versions") },
+                                    sealedSummary = sealed, onExport = sealed?.let { { releases.prepareDeliveryExport() } },
                                     onShare = sealed?.takeIf { it.origin == "local" }?.let { item -> { releases.prepareOfflineShare(item.id) } },
                                     busy = releaseState.busy || releaseState.shareChooserOpen || releaseState.pendingShare != null || releaseState.exportFile != null || exportPickerPending,
                                     onHosting = if (BuildConfig.HOSTED_ENABLED) ({ push("hosted") }) else null,
-                                    onOpenSealed = sealed?.let { item -> { releases.openRelease(item.id); push("player") } })
+                                    onOpenSealed = sealed?.let { item -> { releases.openRelease(item.id); push("player") } },
+                                    onChooseVersion = {
+                                        releases.leaveDeliveryPage(); pages.clear(); library = true
+                                        if (state.route == ProjectRoute.STEPS) projects.back()
+                                        releases.reloadLibrary()
+                                    })
                             }
                             "ai-import" -> AiDraftImportContent(aiImportState,
                                 onBack = { if (!aiImportState.busy) { aiPickerRequested = false; pop(); projects.reload() } },
@@ -913,7 +918,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 }
                                 ProjectTab.CHECKS -> DeliveryCheckScreen(state.project, state.issues, { tab = ProjectTab.STEPS },
                                     { issue -> issue.stepId?.let(projects::openStep) ?: run { tab = ProjectTab.STEPS } },
-                                    { projects.startPreview() }, openReleaseReview, { push("delivery") }, showTopBar = false,
+                                    { projects.startPreview() }, openReleaseReview, { projectId?.let(releases::openProjectDelivery); push("delivery") }, showTopBar = false,
                                     onBuildCandidate = buildRelease, busy = unavailable || mediaState.busy,
                                     buildEnabled = state.dirtyStepIds.isEmpty())
                             }
@@ -925,6 +930,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 onReviewCandidate = { id -> reviewCandidateId = id; push("review") },
                                 onDiscardCandidate = { discardingCandidate = it },
                                 onAi = { id -> releases.openAiPackage(id); push("ai") },
+                                onDelivery = { id -> if (releases.selectDeliveryRelease(id)) push("delivery") },
                                 onHosting = if (BuildConfig.HOSTED_ENABLED) ({ push("hosted") }) else null) }
                             GlobalNavigation(true, { library = false }, {})
                         }

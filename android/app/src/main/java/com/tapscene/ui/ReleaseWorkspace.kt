@@ -69,6 +69,9 @@ data class AiPackageConfiguration(
     fun resolve(): RenderPlan = RenderPlan.build(scene, width, height, visits, effects)
 }
 
+/** A deliberate delivery choice, independent from the last seal operation's result. */
+data class DeliverySelection(val releaseId: String, val contentDigest: String, val projectId: String)
+
 data class ReleaseUiState(
     val releases: List<ReleaseSummary> = emptyList(),
     val pendingCandidates: List<ReleaseCandidate> = emptyList(),
@@ -84,12 +87,17 @@ data class ReleaseUiState(
     val stage: String? = null,
     val message: String? = null,
     val lastSealedId: String? = null,
+    val deliverySelection: DeliverySelection? = null,
     val lastImportedId: String? = null,
     val exportFile: File? = null,
     val pendingShare: OfflineShare? = null,
     val shareChooserOpen: Boolean = false,
     val aiConfiguration: AiPackageConfiguration? = null,
-)
+) {
+    val deliveryRelease: ReleaseSummary? get() = deliverySelection?.let { selected ->
+        releases.singleOrNull { it.id == selected.releaseId && it.contentDigest == selected.contentDigest && it.origin == "local" }
+    }
+}
 
 /**
  * Fixed candidate/release IO is independent from mutable draft state. Only validated derived
@@ -111,6 +119,9 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     private var pendingExportFile: File? = null
     private var savePickerPending = false
     private var sharePreparationActive = false
+    private var deliverySelectionActive = false
+    private var deliveryExportActive = false
+    private var exportDeliverySelection: DeliverySelection? = null
     private var cancellationNote: String? = null
 
     init { reloadLibrary() }
@@ -118,7 +129,10 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     fun reloadLibrary() = execute("读取演示库") {
         val items = withContext(Dispatchers.IO) { store.listReleases() }
         val candidates = withContext(Dispatchers.IO) { store.listCandidates() }
-        mutableState.update { it.copy(releases = items, pendingCandidates = candidates) }
+        mutableState.update { current -> current.copy(releases = items, pendingCandidates = candidates,
+            deliverySelection = current.deliverySelection?.takeIf { selected -> items.any {
+                it.id == selected.releaseId && it.contentDigest == selected.contentDigest && it.origin == "local"
+            } }) }
     }
 
     fun openReview(projectId: String) = execute("读取待复核成品") {
@@ -296,7 +310,8 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         execute("重检并封存固定版本") {
             val sealed = withContext(Dispatchers.IO) { store.seal(candidate.id, candidate.contentDigest) }
             val items = withContext(Dispatchers.IO) { store.listReleases() }
-            mutableState.update { it.copy(releases = items, lastSealedId = sealed.id, candidate = null,
+            mutableState.update { it.copy(releases = items, lastSealedId = sealed.id,
+                deliverySelection = DeliverySelection(sealed.id, sealed.contentDigest, candidate.projectId), candidate = null,
                 reviewStateId = null, reviewBitmap = null, reviewRegionId = null, reviewRegionBitmap = null, player = null, playerBitmap = null) }
             message("版本已封存，可保存离线观看包")
         }
@@ -521,21 +536,62 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
             player = it.player?.takeUnless { player -> player.candidateId == null && player.scene.releaseId == id },
             playerBitmap = it.playerBitmap.takeUnless { _ -> it.player?.scene?.releaseId == id },
             lastSealedId = it.lastSealedId?.takeUnless { selected -> selected == id },
+            deliverySelection = it.deliverySelection?.takeUnless { selected -> selected.releaseId == id },
             aiConfiguration = it.aiConfiguration?.takeUnless { config -> config.scene.releaseId == id }) }
     }
 
-    fun prepareExport(id: String) = execute("生成并验证离线观看包") {
+    /** Project entry must not inherit another project's previous delivery choice. */
+    fun openProjectDelivery(projectId: String) {
+        leaveDeliveryPage()
+        mutableState.update { it.copy(deliverySelection = it.deliverySelection?.takeIf { selected -> selected.projectId == projectId }) }
+    }
+
+    /** Read retained sealed provenance; source projects may have been renamed or deleted. */
+    fun selectDeliveryRelease(id: String): Boolean {
+        if (state.value.busy || savePickerPending || state.value.shareChooserOpen || state.value.pendingShare != null || state.value.exportFile != null) return false
+        mutableState.update { it.copy(deliverySelection = null) }
+        execute("读取封存版本") {
+            deliverySelectionActive = true
+            try {
+                val summary = state.value.releases.singleOrNull { it.id == id && it.origin == "local" }
+                    ?: error("请选择已复核封存的本机版本。")
+                val binding = withContext(Dispatchers.IO) { store.readHostedRelease(id, summary.contentDigest) }
+                currentCoroutineContext().ensureActive()
+                mutableState.update { it.copy(deliverySelection = DeliverySelection(id, summary.contentDigest, binding.projectId)) }
+            } finally { deliverySelectionActive = false }
+        }
+        return true
+    }
+
+    fun prepareDeliveryExport() {
+        val selection = state.value.deliverySelection ?: return
+        if (state.value.deliveryRelease == null) return
+        prepareExport(selection.releaseId, selection)
+    }
+
+    fun prepareExport(id: String) = prepareExport(id, null)
+
+    private fun prepareExport(id: String, selection: DeliverySelection?) = execute("生成并验证离线观看包") {
         exportDigest = null; exportLength = null; pendingExportFile = null
+        exportDeliverySelection = selection
+        deliveryExportActive = selection != null
         mutableState.update { it.copy(exportFile = null) }
-        val file = withContext(Dispatchers.IO) { store.exportRelease(id) }
-        val digest = withContext(Dispatchers.IO) { ViewerPackageCodec.sha256(file) }
-        exportDigest = digest; exportLength = file.length()
-        mutableState.update { it.copy(exportFile = file) }
+        try {
+            if (selection != null) withContext(Dispatchers.IO) { store.readHostedRelease(id, selection.contentDigest) }
+            val file = withContext(Dispatchers.IO) { store.exportRelease(id) }
+            val digest = withContext(Dispatchers.IO) { ViewerPackageCodec.sha256(file) }
+            currentCoroutineContext().ensureActive()
+            check(selection == null || (state.value.deliverySelection == selection && state.value.deliveryRelease != null)) {
+                "交付版本已改变，请重新选择保存。"
+            }
+            exportDigest = digest; exportLength = file.length()
+            mutableState.update { it.copy(exportFile = file) }
+        } finally { deliveryExportActive = false }
     }
 
     fun prepareOfflineShare(id: String) {
         val selected = state.value.releases.singleOrNull { it.id == id && it.origin == "local" }
-        if (selected == null || state.value.lastSealedId != id) {
+        if (selected == null || state.value.deliveryRelease != selected) {
             message("请选择当前已复核封存的本机版本。")
             return
         }
@@ -556,14 +612,20 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         if (current.busy || current.shareChooserOpen || savePickerPending) return null
         val share = current.pendingShare ?: return null
         mutableState.update { it.copy(pendingShare = null) }
-        if (visibleReleaseId != share.releaseId || current.lastSealedId != share.releaseId ||
-            current.releases.none { it.id == share.releaseId && it.origin == "local" }) return null
+        if (visibleReleaseId != share.releaseId || current.deliveryRelease?.id != share.releaseId) return null
         if (System.currentTimeMillis() >= share.expiresAt) {
             message("分享副本已过期，请重新点击系统分享。")
             return null
         }
         mutableState.update { it.copy(shareChooserOpen = true) }
         return share
+    }
+
+    /** Cancel only this page's preparation, never library/AI exports or a file already being saved. */
+    fun leaveDeliveryPage() {
+        if (deliverySelectionActive || deliveryExportActive) task?.cancel()
+        if (deliveryExportActive || (exportDeliverySelection != null && state.value.exportFile != null)) cancelExportPicker()
+        leaveSharePage()
     }
 
     fun leaveSharePage() {
@@ -655,14 +717,19 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     fun prepareAiExport() = execute("生成并回读验证 AI 数据包") {
         val config = state.value.aiConfiguration ?: error("请先选择固定版本。")
         val plan = config.resolve()
-        exportDigest = null; exportLength = null; pendingExportFile = null
+        exportDigest = null; exportLength = null; pendingExportFile = null; exportDeliverySelection = null
         mutableState.update { it.copy(exportFile = null) }
         val file = withContext(Dispatchers.IO) { store.exportAiRelease(config.scene.releaseId, plan) }
         exportDigest = withContext(Dispatchers.IO) { ViewerPackageCodec.sha256(file) }; exportLength = file.length()
         mutableState.update { it.copy(exportFile = file) }
     }
 
-    fun beginExportPicker(): Boolean {
+    fun beginExportPicker(deliveryPageVisible: Boolean = true): Boolean {
+        val selected = exportDeliverySelection
+        if (selected != null && (!deliveryPageVisible || state.value.deliverySelection != selected || state.value.deliveryRelease == null)) {
+            cancelExportPicker()
+            return false
+        }
         if (state.value.busy || savePickerPending || state.value.shareChooserOpen || state.value.pendingShare != null || state.value.exportFile == null || exportDigest == null) return false
         savePickerPending = true
         pendingExportFile = state.value.exportFile
@@ -671,7 +738,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     fun cancelExportPicker() {
-        savePickerPending = false; exportDigest = null; exportLength = null; pendingExportFile = null
+        savePickerPending = false; exportDigest = null; exportLength = null; pendingExportFile = null; exportDeliverySelection = null
         mutableState.update { it.copy(exportFile = null) }
     }
 
@@ -766,7 +833,11 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         history = next.history, ended = next.ended, endLabel = next.endLabel, endEdgeId = next.endEdgeId,
         matchingHotspotIds = emptyList(), visitedEdgeIds = next.visitedEdgeIds, completedFromStart = next.completedFromStart)
 
-    fun cancel() { task?.cancel(); mutableState.update { it.copy(pendingShare = null) } }
+    fun cancel() {
+        if (deliveryExportActive || (exportDeliverySelection != null && state.value.exportFile != null)) cancelExportPicker()
+        task?.cancel()
+        mutableState.update { it.copy(pendingShare = null) }
+    }
     fun message(text: String) { mutableState.update { it.copy(message = text) } }
     fun clearMessage() { mutableState.update { it.copy(message = null) } }
 
@@ -792,10 +863,15 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
                 // A cancellation can arrive after an atomic commit. Re-read library truth without
                 // deleting the successfully published version or manufacturing a success message.
                 withContext(NonCancellable + Dispatchers.IO) {
-                    runCatching { store.listReleases() }.getOrNull()?.let { items -> mutableState.update { it.copy(releases = items) } }
-                    runCatching { store.listCandidates() }.getOrNull()?.let { candidates -> mutableState.update { it.copy(pendingCandidates = candidates) } }
+                    try {
+                        runCatching { store.listReleases() }.getOrNull()?.let { items -> mutableState.update { it.copy(releases = items) } }
+                        runCatching { store.listCandidates() }.getOrNull()?.let { candidates -> mutableState.update { it.copy(pendingCandidates = candidates) } }
+                    } finally {
+                        // Returning to a cancelled dispatcher can throw again. Clear inside this
+                        // barrier, last: busy prevents another operation from starting before here.
+                        mutableState.update { it.copy(busy = false, stage = null) }
+                    }
                 }
-                mutableState.update { it.copy(busy = false, stage = null) }
             }
         }
     }
