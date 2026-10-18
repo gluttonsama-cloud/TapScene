@@ -525,7 +525,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     private fun launchPlayerWork(block: suspend () -> Unit) {
         playerTask?.cancel()
         val generation = ++playerGeneration
-        mutableState.update { it.copy(busy = true, stage = "读取安全画面") }
+        mutableState.update { it.copy(busy = true, stage = "读取安全画面", message = null) }
         playerTask = viewModelScope.launch {
             try { block() }
             catch (cancelled: CancellationException) { throw cancelled }
@@ -862,6 +862,21 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         matchingHotspotIds = emptyList(), visitedEdgeIds = next.visitedEdgeIds, completedFromStart = next.completedFromStart)
 
     fun cancel() {
+        if (playerTask?.isActive == true) {
+            // The visible busy action belongs to the player, not the independent package task.
+            // Keep an already displayed visit; only abandon a transition that has not advanced.
+            cancelPlayerWork()
+            mutableState.update { current ->
+                val player = current.player
+                current.copy(player = if (player?.traversal()?.pendingEdgeId != null)
+                    player.applyTraversal(player.traversal().cancelTransition(player.scene)).copy(video = null)
+                    else player,
+                    message = if (player?.candidateId != null)
+                        "已取消处理，保留当前画面；请点重来后继续试走。"
+                    else "已取消读取，保留当前画面")
+            }
+            return
+        }
         if (deliveryExportActive || (exportDeliverySelection != null && state.value.exportFile != null)) cancelExportPicker()
         task?.cancel()
         mutableState.update { it.copy(pendingShare = null) }

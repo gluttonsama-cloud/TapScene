@@ -607,6 +607,10 @@ fun ReleasePlayerContent(
     val hotspots = scene.hotspots.filter { it.stateId == player.currentStateId }
     val outgoing = scene.edges.filter { it.fromStateId == player.currentStateId }
     val actionsEnabled = !state.busy && player.video == null && !player.ended && current != null && state.playerBitmap.isUsable()
+    val actionScroll = rememberScrollState()
+    LaunchedEffect(scene.releaseId, state.message) {
+        if (state.message != null) actionScroll.scrollTo(0)
+    }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val panelMaxHeight = (maxHeight * .30f).coerceIn(72.dp, 240.dp)
         val explanationMaxHeight = (maxHeight * .16f).coerceIn(56.dp, 128.dp)
@@ -642,8 +646,9 @@ fun ReleasePlayerContent(
             } else ReleaseImageCanvas(state.playerBitmap, if (player.ended || video != null) emptyList() else hotspots,
                 Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp), enabled = actionsEnabled, busy = state.busy,
                 imageDescription = current?.title ?: "离线演示画面", onTap = onTap)
-            Column(Modifier.fillMaxWidth().heightIn(max = panelMaxHeight).verticalScroll(rememberScrollState())
+            Column(Modifier.fillMaxWidth().heightIn(max = panelMaxHeight).verticalScroll(actionScroll)
                 .padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                state.message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = ShellColors.Accent) }
                 when {
                     video != null -> {
                         Text(if (video.failed) "过渡播放失败" else "正在播放过渡", style = MaterialTheme.typography.titleSmall)
@@ -680,7 +685,6 @@ fun ReleasePlayerContent(
                         }
                     }
                 }
-                state.message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = ShellColors.Accent) }
             }
             ShellDivider()
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {

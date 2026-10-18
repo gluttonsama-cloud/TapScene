@@ -265,7 +265,7 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 107, f"Expected one hundred seven Compose review images, found {len(images)}"
+          assert len(images) == 109, f"Expected one hundred nine Compose review images, found {len(images)}"
           delivery_images = [image for image in images if "DeliveryAvailabilityScreenshotPreviewsKt" in str(image)]
           assert len(delivery_images) == 3, f"Expected three delivery availability images, found {len(delivery_images)}"
           click_review_images = [image for image in images if "ClickChainReviewScreenshotPreviewsKt" in str(image)]
@@ -433,6 +433,8 @@ jobs:
             --tests com.tapscene.ui.shell.CopiedAnimationReadinessHostTest \
             --tests com.tapscene.ui.AnimationReadinessFailureHostTest \
             --tests com.tapscene.ui.shell.AuthoredPathImpactHostTest \
+            --tests com.tapscene.ui.ReleasePlayerCancellationHostTest \
+            --tests com.tapscene.ui.shell.ReleasePlayerFeedbackHostTest \
             --tests com.tapscene.ui.shell.AiImportNavigationHostTest \
             --tests com.tapscene.ui.AiImportCancellationHostTest \
             --tests com.tapscene.ui.AiAnnotationEditsTest \
@@ -477,6 +479,9 @@ jobs:
               ("com.tapscene.ui.AnimationReadinessFailureHostTest", "unreadableAnimationCannotTurnCommittedAddOrReplacementIntoFailure"): 1,
               ("com.tapscene.ui.shell.AuthoredPathImpactHostTest", "sameTitleStepsShowOnlyChangedTransitionImpactAndRequireExplicitBuild"): 1,
               ("com.tapscene.ui.shell.AuthoredPathImpactHostTest", "changedRevisionAndBusyStateBlockBuildCallbacks"): 1,
+              ("com.tapscene.ui.ReleasePlayerCancellationHostTest", "cancelBlockedNextRetainsDisplayedVisitAndCannotClearNewPlayerWork"): 1,
+              ("com.tapscene.ui.ReleasePlayerCancellationHostTest", "cancelTransitionPreparationClearsPendingAndRejectsOldRunCallbacks"): 1,
+              ("com.tapscene.ui.shell.ReleasePlayerFeedbackHostTest", "newCancellationFeedbackResetsScrolledLandscapeActionsAndKeepsRestartReachable"): 1,
               ("com.tapscene.ui.shell.CopiedAnimationReadinessHostTest", "copiedPlanBlocksDeliveryUntilExplicitSaveOnExactOwnerAndPreservesOriginalCandidate"): 1,
               ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "failedProjectReadBlocksGenerationWithoutShowingProgress"): 1,
               ("com.tapscene.ui.shell.StepDeletionConfirmationHostTest", "exactStepAndStartImpactStayFrozenUntilExplicitCurrentConfirmation"): 1,
