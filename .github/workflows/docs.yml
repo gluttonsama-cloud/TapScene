@@ -634,6 +634,7 @@ jobs:
               ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "settingsOnlyShowsRealStorageAndExpandableAccurateHelp"): 1,
               ("com.tapscene.ui.shell.DraftAiHoldInputHostTest", "pendingHoldSurvivesCollapseAndTabsAndCannotSilentlySaveOldValue"): 1,
               ("com.tapscene.ui.shell.DraftAiHoldInputHostTest", "pendingInputCanBeExplicitlyDiscardedAndNeverFollowsAnotherProject"): 1,
+              ("com.tapscene.ui.shell.DraftAiHoldInputHostTest", "shellTaskViewProtectsRawAndDirtyPlansButAllowsCleanDiscardedAndSavedPlans"): 1,
               ("com.tapscene.ui.shell.AiImportNavigationHostTest", "busyBackPreservesImportAndOnlyExplicitCancelReachesDestructiveCallback"): 1,
               ("com.tapscene.ui.AiImportCancellationHostTest", "cancellingUnknownReceiptRetryAlwaysReadsActualCommitBeforeCleanup"): 1,
               ("com.tapscene.ui.AiImportCancellationHostTest", "lateExplicitCancelDuringFinalRefreshIsReconciledBeforeBusyClears"): 1,

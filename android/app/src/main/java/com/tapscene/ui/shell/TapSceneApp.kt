@@ -148,6 +148,10 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     var discardingCandidate by remember { mutableStateOf<ReleaseCandidate?>(null) }
     var exportPickerPending by rememberSaveable { mutableStateOf(false) }
     val projectId = state.project?.project?.id
+    var draftAiPendingHold by remember(projectId) { mutableStateOf(false) }
+    LaunchedEffect(page) { if (page != "draft-ai") draftAiPendingHold = false }
+    val draftAiTaskBlocked = page == "draft-ai" && (draftAiState.busy || draftAiState.dirty ||
+        draftAiState.saveOutcomeUnknown || draftAiPendingHold)
     val unavailable = state.busy || state.loadFailed || candidateState.busy || releaseState.busy || screenshotPickerPending || aiPickerPending || aiImportState.busy || draftAiState.busy
     val copyProject: (String) -> Unit = { id ->
         if (!unavailable && !mediaState.busy) {
@@ -560,7 +564,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                 }
                 if (recording.isBusy && page != "record") Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(if (recording.phase == RecordingPhase.Recording) "录制中" else "录屏处理中", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = ShellColors.Accent)
-                    TextButton(onClick = { push("record") }, enabled = mediaState.correction == null && screenshotState.sessionId == null) { Text("查看") }
+                    TextButton(onClick = { push("record") }, enabled = !draftAiTaskBlocked && mediaState.correction == null && screenshotState.sessionId == null) { Text("查看") }
                     if (recording.phase == RecordingPhase.Recording || recording.phase == RecordingPhase.Starting) TextButton(onClick = { RecordingCoordinator.stop(context) }) { Text("停止") }
                 }
                 if (candidateState.busy && page != "candidates") Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -568,7 +572,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                         "本机识别文字 ${candidateState.ocrCompleted}/${candidateState.ocrTotal}"
                         else "正在整理候选 ${candidateState.completedSamples}/${candidateState.totalSamples}",
                         Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
-                    TextButton(onClick = { push("candidates") }) { Text("查看") }
+                    TextButton(onClick = { push("candidates") }, enabled = !draftAiTaskBlocked) { Text("查看") }
                     TextButton(onClick = candidates::cancel) { Text("取消") }
                 }
                 if (!retainedMedia && state.route != ProjectRoute.MEDIA && page != "candidate-review" && page != "step-correction" && page != "screenshot") {
@@ -576,7 +580,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                         LinearProgressIndicator(Modifier.fillMaxWidth())
                         Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                             Text(if (state.busy) state.stage.orEmpty() else mediaState.stage.orEmpty(), Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
-                            TextButton(onClick = { push("task") }) { Text("详情") }
+                            TextButton(onClick = { push("task") }, enabled = !draftAiTaskBlocked) { Text("详情") }
                             TextButton(onClick = {
                                 if (state.busy) projects.cancel() else media.cancel()
                                 if (page == "review" && reviewSourceStepId != null && !reviewSourceOpened) {
@@ -606,6 +610,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                         TextButton(onClick = projects::reload, enabled = !state.busy) { Text("重试") }
                     }
                 }
+                if (draftAiTaskBlocked && (recording.isBusy || candidateState.busy || state.busy || (scopeReady && mediaState.busy)))
+                    DraftAiTaskNavigationNote(draftAiState, draftAiPendingHold)
                 Box(Modifier.weight(1f)) {
                     when {
                         retainedMedia -> MediaScreen(media, onBack = { retainedMedia = false; projects.reload() })
@@ -833,7 +839,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 onConfirmPath = aiDrafts::confirmPathChange, onDismissPath = aiDrafts::dismissPathChange,
                                 onChangeEffect = aiDrafts::changeEffect, onDeleteEffect = aiDrafts::deleteEffect,
                                 onSave = aiDrafts::savePlan, onReadResult = aiDrafts::reconcilePlan,
-                                onReload = { projectId?.let(aiDrafts::openPlan) }))
+                                onReload = { projectId?.let(aiDrafts::openPlan) }),
+                                onPendingHoldChange = { draftAiPendingHold = it })
                             "ai" -> aiRouteState.SaveableStateProvider(aiStateKey) {
                                 AiPackageScreen(pop, releaseState, releases::openAiPackage, releases::chooseAiEdge,
                                     releases::previousAiVisit, releases::resetAiPath, releases::setAiCanvas, releases::setAiHold,

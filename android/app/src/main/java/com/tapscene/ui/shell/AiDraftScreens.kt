@@ -266,8 +266,20 @@ data class DraftAiPlanCallbacks(
 )
 
 @Composable
+internal fun DraftAiTaskNavigationNote(state: DraftAiPlanUiState, pendingHold: Boolean) {
+    Text(when {
+        state.busy -> "正在处理动画计划，完成后可查看其他任务。"
+        state.saveOutcomeUnknown -> "先重读动画计划的保存结果，再查看任务。"
+        pendingHold -> "先应用停留输入并保存计划，或返回放弃，再查看任务。"
+        else -> "先保存动画计划，或返回放弃修改，再查看任务。"
+    }, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+}
+
+@Composable
 fun DraftAiPlanContent(state: DraftAiPlanUiState, callbacks: DraftAiPlanCallbacks, initialSection: Int = 0,
-    initialVisitId: String? = null, initialEffectId: String? = null) {
+    initialVisitId: String? = null, initialEffectId: String? = null,
+    onPendingHoldChange: (Boolean) -> Unit = {}) {
     val config = state.config
     val project = state.project
     var section by rememberSaveable(project?.project?.id) { mutableIntStateOf(initialSection) }
@@ -282,6 +294,8 @@ fun DraftAiPlanContent(state: DraftAiPlanUiState, callbacks: DraftAiPlanCallback
     val pendingHolds = config?.visits.orEmpty().filter { visit ->
         holdInputs[visit.visitId]?.let { it.toIntOrNull() != visit.holdFrames } == true
     }
+    // The shell must not let task banners bypass this editor's pending-input confirmation.
+    SideEffect { onPendingHoldChange(pendingHolds.isNotEmpty()) }
     val listState = rememberLazyListState()
     var locateHold by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(config) {

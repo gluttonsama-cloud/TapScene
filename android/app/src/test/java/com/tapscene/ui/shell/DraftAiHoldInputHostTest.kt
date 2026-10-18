@@ -11,15 +11,32 @@ import com.tapscene.MainActivity
 import com.tapscene.data.*
 import com.tapscene.packageformat.RenderPlan
 import com.tapscene.packageformat.ViewerScene
+import com.tapscene.recording.RecordingCoordinator
+import com.tapscene.recording.RecordingPhase
+import com.tapscene.recording.RecordingUiState
+import com.tapscene.ui.AiDraftWorkspace
 import com.tapscene.ui.DraftAiEdits
 import com.tapscene.ui.DraftAiPlanUiState
+import com.tapscene.ui.MediaWorkspace
+import com.tapscene.ui.ProjectWorkspace
+import com.tapscene.ui.ReleaseWorkspace
 import java.util.UUID
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.ExternalResource
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.annotation.LooperMode
@@ -119,6 +136,152 @@ class DraftAiHoldInputHostTest {
         compose.onNodeWithText(field).performScrollTo().assertTextContains("90")
         compose.onNodeWithText("检查并保存计划").assertIsEnabled()
         assertEquals(90, state.value.config!!.visits.single().holdFrames)
+    }
+
+    @Config(shadows = [HostFileSyncShadow::class])
+    @Test fun shellTaskViewProtectsRawAndDirtyPlansButAllowsCleanDiscardedAndSavedPlans() {
+        // Real MainActivity, project storage and plan save. The recording banner is synthetic:
+        // this never requests capture consent, starts a service or validates OS stop/organize.
+        compose.waitForIdle()
+        val app = RuntimeEnvironment.getApplication()
+        val projects = ViewModelProvider(compose.activity)[ProjectWorkspace::class.java]
+        val media = ViewModelProvider(compose.activity)[MediaWorkspace::class.java]
+        val releases = ViewModelProvider(compose.activity)[ReleaseWorkspace::class.java]
+        val drafts = ViewModelProvider(compose.activity)[AiDraftWorkspace::class.java]
+        val store = ProjectStore(app)
+        @Suppress("UNCHECKED_CAST") val recordingState = RecordingCoordinator::class.java.getDeclaredField("mutableState")
+            .apply { isAccessible = true }.get(null) as MutableStateFlow<RecordingUiState>
+        val recordingGate = RecordingCoordinator::class.java.getDeclaredField("gate")
+            .apply { isAccessible = true }.get(null) as Mutex
+        val stopRequest = RecordingCoordinator::class.java.getDeclaredField("stopRequest").apply { isAccessible = true }
+        val serviceOwner = RecordingCoordinator::class.java.getDeclaredField("owner").apply { isAccessible = true }
+        val originalStopRequest = stopRequest.get(null)
+        var originalRecording: RecordingUiState? = null
+        fun settled() = compose.waitUntil(30_000) {
+            compose.waitForIdle()
+            !projects.state.value.busy && !media.state.value.busy && !releases.state.value.busy &&
+                !drafts.planState.value.busy && !drafts.planState.value.checking
+        }
+        HostFileSyncShadow.begin(app.noBackupFilesDir)
+        try {
+            val snapshot = runBlocking(Dispatchers.IO) {
+                val fixture = AiDraftImportFixtures.complete(app)
+                val imports = AiDraftImportStore(app)
+                val prepared = fixture.zip.inputStream().use { imports.prepare(it) }
+                val projectId = checkNotNull(imports.commit(prepared.sessionId, prepared.previewDigest).projectId)
+                // Synthetic region review makes this stored plan valid; it is not human review.
+                AiDraftImportFixtures.reviewDraftRegions(store, projectId)
+                checkNotNull(store.readProject(projectId))
+            }
+            val projectId = snapshot.project.id
+            val saved = runBlocking(Dispatchers.IO) { checkNotNull(store.readDraftAiConfig(projectId)) }
+            val firstVisit = saved.visits.first()
+            val visitLabel = "访问 1：${snapshot.steps.single { it.id == firstVisit.stateId }.title}"
+            val owner = RecordingUiState(phase = RecordingPhase.Recording, sessionId = id("draft-recording-session"),
+                projectId = projectId, sourceId = id("draft-recording-source"), elapsedMs = 1_000)
+            // Serialize the fixture with startup recovery; no real capture owner is installed.
+            originalRecording = runBlocking { recordingGate.withLock {
+                recordingState.value.also { recordingState.value = owner }
+            } }
+            fun assertRecordingUnchanged() = compose.runOnIdle {
+                assertEquals(RecordingPhase.Recording, RecordingCoordinator.state.value.phase)
+                assertEquals(owner.sessionId, RecordingCoordinator.state.value.sessionId)
+                assertEquals(owner, RecordingCoordinator.state.value)
+                assertEquals(originalStopRequest, stopRequest.get(null))
+                assertNull(serviceOwner.get(null))
+                assertNull(shadowOf(compose.activity).nextStartedActivity)
+            }
+            fun visitRecordingAndReturn() {
+                compose.onNodeWithText("查看").assertIsEnabled().performClick()
+                compose.onNodeWithText("录制操作").assertIsDisplayed()
+                assertRecordingUnchanged()
+                compose.runOnIdle { compose.activity.onBackPressedDispatcher.onBackPressed() }
+                compose.onNodeWithText("录制操作").assertDoesNotExist()
+                assertRecordingUnchanged()
+            }
+            fun openPlan() {
+                settled()
+                compose.onNodeWithText("动画计划").performScrollTo().performClick()
+                settled()
+                compose.onNodeWithText("访问路径").assertIsDisplayed()
+                assertEquals(projectId, drafts.planState.value.project?.project?.id)
+                assertFalse(drafts.planState.value.dirty)
+                assertTrue(drafts.planState.value.issues.isEmpty())
+            }
+            fun assertProtected(text: String, expected: DraftAiConfig) {
+                compose.onNodeWithText("查看").assertIsNotEnabled().performClick()
+                compose.onNodeWithText("停止").assertIsEnabled()
+                compose.onNodeWithText("录制操作").assertDoesNotExist()
+                compose.onNodeWithText("访问路径").assertIsDisplayed()
+                compose.onNodeWithText(field).performScrollTo().assertTextContains(text)
+                assertTrue(AiDraftWorkspace.samePlan(expected, checkNotNull(drafts.planState.value.config)))
+                assertRecordingUnchanged()
+            }
+
+            settled()
+            compose.runOnIdle { projects.reload() }
+            settled()
+            compose.onNodeWithText(snapshot.project.title).performScrollTo().performClick()
+            compose.waitUntil(30_000) {
+                compose.waitForIdle()
+                !projects.state.value.busy && !media.state.value.busy && media.projectId == projectId
+            }
+            openPlan()
+            visitRecordingAndReturn()
+            compose.onNodeWithText("访问路径").assertIsDisplayed()
+            assertTrue(AiDraftWorkspace.samePlan(saved, checkNotNull(drafts.planState.value.config)))
+
+            compose.onNodeWithText(visitLabel).performScrollTo().performClick()
+            compose.onNodeWithText(field).performScrollTo().performTextReplacement("invalid")
+            assertProtected("invalid", saved)
+            assertFalse(drafts.planState.value.dirty)
+            compose.onNodeWithContentDescription("返回").performClick()
+            compose.onNodeWithText("停留帧数尚未应用").assertIsDisplayed()
+            compose.onNodeWithText("放弃输入并返回").performClick()
+            settled()
+            assertNull(drafts.planState.value.config)
+            visitRecordingAndReturn()
+
+            openPlan()
+            compose.onNodeWithText(visitLabel).performScrollTo().performClick()
+            compose.onNodeWithText(field).performScrollTo().performTextReplacement("150")
+            compose.onNodeWithText("应用停留，保留全部效果").performScrollTo().performClick()
+            settled()
+            assertTrue(drafts.planState.value.dirty)
+            assertProtected("150", DraftAiEdits.hold(saved, firstVisit.visitId, 150))
+            val beforeDiscard = runBlocking(Dispatchers.IO) { checkNotNull(store.readDraftAiConfig(projectId)) }
+            assertTrue(AiDraftWorkspace.samePlan(saved, beforeDiscard))
+            compose.onNodeWithContentDescription("返回").performClick()
+            compose.onNodeWithText("保留动画计划修改？").assertIsDisplayed()
+            compose.onNodeWithText("放弃未保存修改并返回").performClick()
+            settled()
+            assertNull(drafts.planState.value.config)
+            visitRecordingAndReturn()
+
+            openPlan()
+            assertTrue(AiDraftWorkspace.samePlan(saved, checkNotNull(drafts.planState.value.config)))
+            compose.onNodeWithText(visitLabel).performScrollTo().performClick()
+            compose.onNodeWithText(field).performScrollTo().assertTextContains(firstVisit.holdFrames.toString())
+            compose.onNodeWithText(field).performTextReplacement("180")
+            compose.onNodeWithText("应用停留，保留全部效果").performScrollTo().performClick()
+            settled()
+            assertProtected("180", DraftAiEdits.hold(saved, firstVisit.visitId, 180))
+            compose.onNodeWithText("检查并保存计划").assertIsEnabled().performClick()
+            settled()
+            assertFalse(drafts.planState.value.dirty)
+            assertFalse(drafts.planState.value.saveOutcomeUnknown)
+            val persisted = runBlocking(Dispatchers.IO) { checkNotNull(store.readDraftAiConfig(projectId)) }
+            assertTrue(AiDraftWorkspace.samePlan(DraftAiEdits.hold(saved, firstVisit.visitId, 180), persisted))
+            visitRecordingAndReturn()
+            compose.onNodeWithText("访问路径").assertIsDisplayed()
+            assertTrue(AiDraftWorkspace.samePlan(persisted, checkNotNull(drafts.planState.value.config)))
+        } finally {
+            try { originalRecording?.let { previous -> runBlocking { recordingGate.withLock {
+                recordingState.value = previous
+                stopRequest.set(null, originalStopRequest)
+            } } } }
+            finally { HostFileSyncShadow.reset() }
+        }
     }
 
     private fun resetApplicationViewModelFactory() {
