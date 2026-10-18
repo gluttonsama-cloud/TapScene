@@ -68,6 +68,22 @@ data class AiPackageConfiguration(
 ) {
     fun resolve(): RenderPlan = RenderPlan.build(scene, width, height, visits, effects)
 
+    /** Structural comparison also works for an unfinished path; resolving it would lose that guard. */
+    internal fun sameAnimation(other: AiPackageConfiguration): Boolean =
+        scene.releaseId == other.scene.releaseId && fromDraft == other.fromDraft &&
+            width == other.width && height == other.height && visits.size == other.visits.size &&
+            visits.zip(other.visits).all { (a, b) ->
+                a.visitId == b.visitId && a.stateId == b.stateId &&
+                    a.selectedEdgeId == b.selectedEdgeId && a.holdFrames == b.holdFrames
+            } && effects.size == other.effects.size && effects.zip(other.effects).all { (a, b) ->
+                a.type == b.type && a.visitId == b.visitId && a.startFrame == b.startFrame &&
+                    a.durationFrames == b.durationFrames && a.hotspotId == b.hotspotId &&
+                    a.regionId == b.regionId && a.text == b.text &&
+                    (if (a.rect == null || b.rect == null) a.rect == null && b.rect == null else
+                        a.rect.x == b.rect.x && a.rect.y == b.rect.y &&
+                            a.rect.width == b.rect.width && a.rect.height == b.rect.height)
+            }
+
     fun withAnnotation(visitId: String, text: String): AiPackageConfiguration {
         check(!fromDraft) { "此计划随草稿封存，请回项目的动画计划调整后重新封存。" }
         check(text.isNotBlank() && text.length <= 240) { "标注须为 1 至 240 字的非空白文字。" }
@@ -119,6 +135,8 @@ data class ReleaseUiState(
     val pendingShare: OfflineShare? = null,
     val shareChooserOpen: Boolean = false,
     val aiConfiguration: AiPackageConfiguration? = null,
+    /** Changes since the last confirmed load/save; cancellation may leave disk outcome unknown. */
+    val aiConfigurationChanged: Boolean = false,
 ) {
     val deliveryRelease: ReleaseSummary? get() = deliverySelection?.let { selected ->
         releases.singleOrNull { it.id == selected.releaseId && it.contentDigest == selected.contentDigest && it.origin == "local" }
@@ -140,6 +158,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     private var playerGeneration = 0L
     private var reviewVideoTask: Job? = null
     private var reviewRunSequence = 0L
+    private var aiConfigurationBaseline: AiPackageConfiguration? = null
     private var exportDigest: String? = null
     private var exportLength: Long? = null
     private var pendingExportFile: File? = null
@@ -670,16 +689,23 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     fun openAiPackage(id: String) = execute("读取固定版本与动画配置") {
-        mutableState.update { it.copy(aiConfiguration = null) }
+        aiConfigurationBaseline = null
+        mutableState.update { it.copy(aiConfiguration = null, aiConfigurationChanged = false) }
         val scene = withContext(Dispatchers.IO) { store.loadRelease(id) }
         val saved = withContext(Dispatchers.IO) { store.readAiPlan(id) }
         val fromDraft = withContext(Dispatchers.IO) { store.hasDraftAiPlan(id) }
         val config = if (saved == null) AiPackageConfiguration(scene, listOf(RenderPlan.Visit(java.util.UUID.randomUUID().toString(), scene.startStateId, null, 90)))
             else AiPackageConfiguration(scene, saved.visits, saved.effects, saved.width, saved.height, fromDraft)
-        mutableState.update { it.copy(aiConfiguration = config) }
+        aiConfigurationBaseline = config
+        mutableState.update { it.copy(aiConfiguration = config, aiConfigurationChanged = false) }
     }
 
-    fun clearAiConfiguration() { if (!state.value.busy && !savePickerPending) mutableState.update { it.copy(aiConfiguration = null) } }
+    fun clearAiConfiguration() {
+        if (!state.value.busy && !savePickerPending) {
+            aiConfigurationBaseline = null
+            mutableState.update { it.copy(aiConfiguration = null, aiConfigurationChanged = false) }
+        }
+    }
 
     fun chooseAiEdge(edgeId: String) = editAi { config ->
         val current = config.visits.last()
@@ -738,7 +764,11 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         if (state.value.busy || savePickerPending) return
         val config = state.value.aiConfiguration ?: return
         if (config.fromDraft) { message("此计划随草稿封存，请回项目的动画计划调整后重新封存。"); return }
-        try { mutableState.update { it.copy(aiConfiguration = change(config), exportFile = null, message = null) } }
+        try {
+            val changed = change(config)
+            val differs = aiConfigurationBaseline?.let { !changed.sameAnimation(it) } ?: true
+            mutableState.update { it.copy(aiConfiguration = changed, aiConfigurationChanged = differs, exportFile = null, message = null) }
+        }
         catch (error: IllegalStateException) { message(error.message ?: "动画配置无效。") }
         catch (error: IllegalArgumentException) { message(error.message ?: "动画配置无效。") }
     }
@@ -748,6 +778,9 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         exportDigest = null; exportLength = null; pendingExportFile = null; exportDeliverySelection = null
         mutableState.update { it.copy(exportFile = null) }
         val file = withContext(Dispatchers.IO) { store.exportAiRelease(config.scene.releaseId, plan) }
+        // The store has confirmed its local configuration write, before hashing or the system picker.
+        aiConfigurationBaseline = config
+        mutableState.update { it.copy(aiConfigurationChanged = false) }
         exportDigest = withContext(Dispatchers.IO) { ViewerPackageCodec.sha256(file) }; exportLength = file.length()
         mutableState.update { it.copy(exportFile = file) }
     }

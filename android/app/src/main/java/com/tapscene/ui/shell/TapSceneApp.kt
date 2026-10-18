@@ -59,14 +59,32 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     val aiStateKey = "ai:${releaseState.aiConfiguration?.scene?.releaseId.orEmpty()}"
     val aiInStack = "ai" in pages
     var retainedAiStateKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var aiPendingInput by rememberSaveable(aiStateKey) { mutableStateOf(false) }
     LaunchedEffect(aiInStack, aiStateKey) {
         if (!aiInStack || retainedAiStateKey != aiStateKey) retainedAiStateKey?.let(aiRouteState::removeState)
         retainedAiStateKey = if (aiInStack) aiStateKey else null
+        if (!aiInStack) aiPendingInput = false
     }
     val push: (String) -> Unit = { if (pages.lastOrNull() != it) pages.add(it) }
     val pop: () -> Unit = { if (pages.isNotEmpty()) pages.removeAt(pages.lastIndex) }
+    // Temporary task/recording pages may cover AI. Refuse only navigation that would destroy
+    // its edited route, never stop/cancel another owner or replay the navigation afterwards.
+    val retainAiChanges: (String) -> Boolean = { note ->
+        val current = releases.state.value
+        val retain = "ai" in pages && current.aiConfiguration?.fromDraft == false &&
+            (current.aiConfigurationChanged || aiPendingInput)
+        if (retain) {
+            while (pages.lastOrNull() != "ai") pages.removeAt(pages.lastIndex)
+            releases.message(note)
+        }
+        retain
+    }
+    val aiNavigationNote = "请先处理 AI 配置修改，再回到项目；可检查并保存，或返回时明确放弃未保存修改。"
+    val aiRecordingNote = "录屏已保存在本机。请先处理 AI 配置修改，再从所属项目的素材页整理录屏。"
     val openCreatedProject: (String) -> Unit = { id ->
-        pages.clear(); library = false; tab = ProjectTab.STEPS; projects.openProject(id)
+        if (!retainAiChanges("已有结果保存在本机。$aiNavigationNote")) {
+            pages.clear(); library = false; tab = ProjectTab.STEPS; projects.openProject(id)
+        }
     }
     val hostingVisit = BuildConfig.HOSTED_ENABLED && page in setOf("hosted", "account", "versions")
     LaunchedEffect(page) {
@@ -381,7 +399,9 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
             closeStepCorrection()
     }
     val openRecordedCandidates: (String, String, Boolean) -> Unit = { id, source, analyze ->
-        if (media.state.value.unsavedEdits) {
+        if (retainAiChanges(aiRecordingNote)) {
+            pendingCandidateProject = null; pendingCandidateSource = null; autoAnalyzeSource = null
+        } else if (media.state.value.unsavedEdits) {
             // Recording has completed before this callback. Preserve its durable source and
             // the earlier correction owner; do not refresh or replace that pending input.
             pendingCandidateProject = null; pendingCandidateSource = null; autoAnalyzeSource = null
@@ -401,7 +421,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
         if (expectedProject != null && !state.busy && projectId == expectedProject && scopeReady && !mediaState.busy) {
             pendingCandidateProject = null
             pendingCandidateSource = null
-            if (mediaState.drafts.any { it.source.sourceId == expectedSource }) {
+            if (retainAiChanges(aiRecordingNote)) autoAnalyzeSource = null
+            else if (mediaState.drafts.any { it.source.sourceId == expectedSource }) {
                 media.selectSource(requireNotNull(expectedSource))
                 pages.clear(); pages.add("candidates")
             } else { autoAnalyzeSource = null; projects.message("录屏尚未读入，请从项目素材重新打开。") }
@@ -454,7 +475,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     }
     LaunchedEffect(page, projectId, state.busy, pendingCandidateProject) {
         if ((page == "candidate-review" || page == "candidates") && projectId == null && !state.busy && pendingCandidateProject == null) {
-            reviewQueue = arrayListOf(); pages.clear()
+            reviewQueue = arrayListOf(); if (!retainAiChanges(aiNavigationNote)) pages.clear()
         }
     }
     LaunchedEffect(pendingPathProject, projectId, state.busy, state.project?.project?.revision) {
@@ -466,7 +487,10 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                 current.project.revision > pendingPathRevision && pendingPathIds.size >= 2 &&
                 pendingPathIds.zipWithNext().all { (from, to) -> current.steps.firstOrNull { it.id == from }?.nextAction?.targetStepId == to } &&
                 (!pendingPathTerminal || current.steps.firstOrNull { it.id == pendingPathIds.last() }?.isTerminal == true)
-            if (committed && page == "path") { pages.clear(); tab = ProjectTab.STEPS; pathStepIds = null; pathMarkLastTerminal = null }
+            if (committed && page == "path") {
+                if (!retainAiChanges("通路已保存。$aiNavigationNote")) { pages.clear(); tab = ProjectTab.STEPS }
+                pathStepIds = null; pathMarkLastTerminal = null
+            }
         }
     }
     val openPath: () -> Unit = {
@@ -546,7 +570,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
         }
     }
     val requestImport: () -> Unit = {
-        if (!unavailable && !mediaState.busy) {
+        if (!unavailable && !mediaState.busy && !retainAiChanges(aiNavigationNote)) {
             if (projectId == null) {
                 importAfterCreate = true
                 newProject = true
@@ -626,8 +650,9 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                         state.projectCopyNotice?.takeIf { notice -> notice.message == it }?.let { notice ->
                             LaunchedEffect(notice.operationId, state.busy) {
                                 if (!state.busy) {
-                                    pages.clear()
-                                    library = false
+                                    if (!retainAiChanges("项目副本已保存。$aiNavigationNote")) {
+                                        pages.clear(); library = false
+                                    }
                                     projects.acknowledgeProjectCopyResult(notice.operationId)
                                 }
                             }
@@ -878,7 +903,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 AiPackageScreen(pop, releaseState, releases::openAiPackage, releases::chooseAiEdge,
                                     releases::previousAiVisit, releases::resetAiPath, releases::setAiCanvas, releases::setAiHold,
                                     releases::toggleAiEffect, releases::prepareAiExport,
-                                    onApplyAnnotation = releases::applyAiAnnotation, onRemoveAnnotation = releases::removeAiAnnotation)
+                                    onApplyAnnotation = releases::applyAiAnnotation, onRemoveAnnotation = releases::removeAiAnnotation,
+                                    onPendingInputChange = { aiPendingInput = it })
                             }
                             "hosted" -> if (BuildConfig.HOSTED_ENABLED) LocalHostingContent(hostingState, hostingActions) else HostingAccountScreen(pop, { push("versions") })
                             "account" -> if (BuildConfig.HOSTED_ENABLED) LocalHostingContent(hostingState, hostingActions) else HostingAccountScreen(pop, { push("versions") })
@@ -896,7 +922,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 onVideoRetry = releases::retryPlayerTransition, onVideoSkip = releases::skipPlayerTransition)
                             "task" -> TaskDetailsScreen(
                                 if (state.busy || mediaState.busy) ShellTaskInfo("本机处理", if (state.busy) state.stage.orEmpty() else mediaState.stage.orEmpty(), state.project?.project?.title) else null,
-                                pop, { pages.clear() }, { push("settings") })
+                                pop, { if (!retainAiChanges(aiNavigationNote)) pages.clear() }, { push("settings") })
                             "regions", "check-region" -> state.project?.let { snapshot ->
                                 val fromChecks = page == "check-region"
                                 val requestedStep = if (fromChecks) regionCorrectionStepId else state.selectedStepId
@@ -1036,7 +1062,10 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                 }
             }
             if (newProject) ProjectTitleDialog("新建项目", "", "", true, !state.busy, { newProject = false; importAfterCreate = false }) { title, goal ->
-                newProject = false; pages.clear(); awaitingCreatedProject = true; projects.createProject(title, goal)
+                newProject = false
+                if (!retainAiChanges(aiNavigationNote)) {
+                    pages.clear(); awaitingCreatedProject = true; projects.createProject(title, goal)
+                } else importAfterCreate = false
             }
             renaming?.let { item -> key(item.id) {
                 ProjectTextDialog(item.title, item.goal, !state.busy && !state.loadFailed,

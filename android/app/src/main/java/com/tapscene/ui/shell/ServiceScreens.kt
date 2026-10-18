@@ -27,6 +27,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.key
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -400,6 +401,7 @@ fun AiPackageScreen(
     onExport: () -> Unit = {},
     onApplyAnnotation: (String, String) -> Unit = { _, _ -> },
     onRemoveAnnotation: (String) -> Unit = {},
+    onPendingInputChange: (Boolean) -> Unit = {},
 ) {
     val config = state.aiConfiguration
     val resolved = remember(config) { config?.let { runCatching { it.resolve() } } }
@@ -411,6 +413,8 @@ fun AiPackageScreen(
     var expandedEffects by rememberSaveable(config?.scene?.releaseId) { mutableStateOf(hashSetOf<String>()) }
     var annotationToLocate by remember(config?.scene?.releaseId) { mutableStateOf<String?>(null) }
     var discardAnnotationRequested by rememberSaveable(config?.scene?.releaseId) { mutableStateOf(false) }
+    var requestedReleaseId by rememberSaveable(config?.scene?.releaseId) { mutableStateOf<String?>(null) }
+    var busyBackNotice by remember { mutableStateOf(false) }
     val annotations = config?.effects.orEmpty().filter { it.type == "annotation" }.groupBy { it.visitId }
     val pendingAnnotations = config?.visits.orEmpty().filter { visit ->
         config?.fromDraft == false && annotations[visit.visitId].orEmpty().size <= 1 &&
@@ -420,11 +424,20 @@ fun AiPackageScreen(
         val visits = config?.visits.orEmpty().map { it.visitId }.toSet()
         annotationInputs = HashMap(annotationInputs.filter { (id, text) -> id in visits && text != annotations[id]?.singleOrNull()?.text.orEmpty() })
     }
+    val configurationChanged = config?.fromDraft == false && state.aiConfigurationChanged
+    val hasPendingChanges = configurationChanged || pendingAnnotations.isNotEmpty()
+    SideEffect { onPendingInputChange(pendingAnnotations.isNotEmpty()) }
+    LaunchedEffect(state.busy) { if (!state.busy) busyBackNotice = false }
     val requestBack: () -> Unit = {
-        if (pendingAnnotations.isNotEmpty()) discardAnnotationRequested = true else onBack()
+        when {
+            state.busy -> busyBackNotice = true
+            chooseSource -> chooseSource = false
+            hasPendingChanges -> { requestedReleaseId = null; discardAnnotationRequested = true }
+            else -> onBack()
+        }
     }
-    // Other routes' cancellation and system-picker owners retain their existing Back handling.
-    BackHandler(enabled = pendingAnnotations.isNotEmpty(), onBack = requestBack)
+    // Only the visible AI page handles its Back; no effect cancels another route's work.
+    BackHandler(enabled = state.busy || chooseSource || hasPendingChanges, onBack = requestBack)
     val last = config?.visits?.lastOrNull()
     val lastStep = config?.scene?.states?.firstOrNull { it.id == last?.stateId }
     val needsNext = last != null && last.selectedEdgeId == null && lastStep?.terminal == false
@@ -432,6 +445,8 @@ fun AiPackageScreen(
     Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
         ShellTopBar("AI 动画配置", requestBack)
         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (busyBackNotice) Text("正在处理动画包，请等待完成；如需中止，请使用任务的取消。",
+            Modifier.padding(horizontal = 16.dp, vertical = 8.dp), color = ShellColors.Accent)
         Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp)) {
             state.message?.let { Text(it, color = ShellColors.Accent) }
@@ -440,12 +455,16 @@ fun AiPackageScreen(
                     if (state.releases.isEmpty()) Text("先完成成品复核与封存，再选择固定版本。", color = ShellColors.Muted)
                     state.releases.forEach { item ->
                         ShellActionRow(item.title, "${item.stepCount} 个步骤 · ${formatReleaseDate(item.sealedAt)} · ${if (item.origin == "local") "本机成品" else "导入版本"}",
-                            onClick = { chooseSource = false; onChooseRelease(item.id) }, enabled = !state.busy)
+                            onClick = {
+                                if (item.id == config?.scene?.releaseId) chooseSource = false
+                                else if (hasPendingChanges) { requestedReleaseId = item.id; discardAnnotationRequested = true }
+                                else { chooseSource = false; onChooseRelease(item.id) }
+                            }, enabled = !state.busy)
                     }
                 } else {
                     ShellLabelValue("版本", config.scene.title)
                     Text("${config.scene.states.size} 个步骤 · ${config.scene.regions.size} 个可用区域", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-                    TextButton(onClick = { chooseSource = true }, enabled = !state.busy && pendingAnnotations.isEmpty(), modifier = Modifier.heightIn(min = 48.dp)) { Text("换一个版本") }
+                    TextButton(onClick = { chooseSource = true }, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("换一个版本") }
                 }
             }
             if (config != null && !chooseSource) {
@@ -528,6 +547,7 @@ fun AiPackageScreen(
                     val id = pendingAnnotations.first().visitId
                     expandedEffects = HashSet(expandedEffects).apply { add(id) }; annotationToLocate = id
                 }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("${pendingAnnotations.size} 处标注输入未应用 · 返回检查") }
+                if (configurationChanged) Text("已应用的修改仍需检查并保存。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Accent)
                 Text("${config.visits.size} 步 / ${if (plan != null) "总时长" else "当前时长"} ${
                     (plan?.totalFrames ?: selectedFrames)?.let { "约 ${aiSeconds(it)} 秒" } ?: "待检查"
                 }", style = MaterialTheme.typography.labelMedium, color = ShellColors.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -539,12 +559,21 @@ fun AiPackageScreen(
             }
         }
     }
-    if (discardAnnotationRequested) AlertDialog(onDismissRequest = { discardAnnotationRequested = false },
-        title = { Text("标注文字尚未应用") }, text = { Text("继续编辑并应用后再保存。放弃输入不会修改已经应用的标注和其他效果。") },
-        confirmButton = { TextButton(onClick = { discardAnnotationRequested = false }) { Text("继续编辑") } },
-        dismissButton = { TextButton(onClick = {
-            discardAnnotationRequested = false; annotationInputs = hashMapOf(); onBack()
-        }) { Text("放弃标注输入并返回") } })
+    if (discardAnnotationRequested) AiConfigurationExitDialog(
+        configurationChanged = configurationChanged,
+        destination = requestedReleaseId?.let { id -> state.releases.firstOrNull { it.id == id } },
+        enabled = !state.busy,
+        destinationId = requestedReleaseId,
+        onContinue = { discardAnnotationRequested = false; requestedReleaseId = null; chooseSource = false },
+        onDiscard = {
+            val next = requestedReleaseId
+            if (next == null || state.releases.any { it.id == next }) {
+                discardAnnotationRequested = false; requestedReleaseId = null; annotationInputs = hashMapOf()
+                chooseSource = false
+                if (next != null) onChooseRelease(next) else onBack()
+            }
+        },
+    )
     if (chooseNext && config != null && last != null && needsNext) AlertDialog(
         onDismissRequest = { chooseNext = false }, title = { Text("接着播放") },
         text = {
@@ -566,6 +595,35 @@ fun AiPackageScreen(
         confirmButton = { TextButton(onClick = { confirmExport = false; onExport() }) { Text("选择保存位置") } },
         dismissButton = { TextButton(onClick = { confirmExport = false }) { Text("返回调整") } },
     )
+}
+
+/** Applied edits remain temporary until the export preparation confirms its local save. */
+@Composable
+internal fun AiConfigurationExitDialog(
+    configurationChanged: Boolean, destination: ReleaseSummary?, enabled: Boolean,
+    onContinue: () -> Unit, onDiscard: () -> Unit,
+    destinationId: String? = destination?.id,
+) {
+    AlertDialog(onDismissRequest = onContinue,
+        title = { Text(if (configurationChanged || destinationId != null) "动画配置尚未确认保存" else "标注文字尚未应用") },
+        text = { AiConfigurationExitDetails(destination, destinationId) },
+        confirmButton = { TextButton(onClick = onContinue) { Text("继续编辑") } },
+        dismissButton = { TextButton(onClick = onDiscard, enabled = enabled && (destinationId == null || destination != null)) {
+            Text(if (destinationId != null) "放弃未保存修改并换版本" else if (configurationChanged) "放弃未保存修改并返回" else "放弃标注输入并返回")
+        } },
+    )
+}
+
+/** Production dialog text, separately renderable because Layoutlib omits the modal window. */
+@Composable
+internal fun AiConfigurationExitDetails(destination: ReleaseSummary?, destinationId: String?) {
+    Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("继续编辑并检查保存，或放弃未保存修改和未应用输入。下次打开以本机已保留配置为准，已经保留的配置不会撤销。")
+        destinationId?.let { id ->
+            Text(if (destination != null) "将打开：${destination.title}\n版本 ID：$id"
+                else "该版本已不可用，请返回重新选择。\n版本 ID：$id")
+        }
+    }
 }
 
 /** Shared production editor body so pending and invalid states can be inspected in host layouts. */
@@ -617,6 +675,7 @@ private fun aiEffectLabel(config: AiPackageConfiguration, effect: RenderPlan.Eff
 internal fun AiExportReviewContent(config: AiPackageConfiguration, plan: RenderPlan) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(config.scene.title, style = MaterialTheme.typography.titleSmall)
+        Text("确认后会先在本机保留配置。取消选择保存位置，不会撤销已经保留的配置。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
         Text("${if (plan.width < plan.height) "竖屏" else "横屏"} · 约 ${aiSeconds(plan.totalFrames)} 秒 · ${plan.visits.size} 步")
         plan.visits.forEachIndexed { index, visit ->
             val step = config.scene.states.single { it.id == visit.stateId }
