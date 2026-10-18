@@ -8,6 +8,7 @@ import android.provider.DocumentsContract
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.tapscene.data.ReleaseCandidate
+import com.tapscene.data.ReleaseDeletionState
 import com.tapscene.data.ReleaseStore
 import com.tapscene.data.ReleaseSummary
 import com.tapscene.data.PlaybackOpen
@@ -117,9 +118,14 @@ data class AiPackageConfiguration(
 /** A deliberate delivery choice, independent from the last seal operation's result. */
 data class DeliverySelection(val releaseId: String, val contentDigest: String, val projectId: String)
 
+/** A failed result read never authorizes another deletion; retry only checks/finishes its commit. */
+data class ReleaseDeletionCheck(val release: ReleaseSummary, val cleanupPending: Boolean = false)
+
 data class ReleaseUiState(
     val releases: List<ReleaseSummary> = emptyList(),
     val pendingCandidates: List<ReleaseCandidate> = emptyList(),
+    val deletionCheck: ReleaseDeletionCheck? = null,
+    val libraryReadFailed: Boolean = false,
     val candidate: ReleaseCandidate? = null,
     val reviewStateId: String? = null,
     val reviewBitmap: Bitmap? = null,
@@ -180,7 +186,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     fun reloadLibrary() = execute("读取演示库") {
         val items = withContext(Dispatchers.IO) { store.listReleases() }
         val candidates = withContext(Dispatchers.IO) { store.listCandidates() }
-        mutableState.update { current -> current.copy(releases = items, pendingCandidates = candidates,
+        mutableState.update { current -> current.copy(releases = items, pendingCandidates = candidates, libraryReadFailed = false,
             deliverySelection = current.deliverySelection?.takeIf { selected -> items.any {
                 it.id == selected.releaseId && it.contentDigest == selected.contentDigest && it.origin == "local"
             } }) }
@@ -626,16 +632,75 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
 
     fun clearImportResult() { mutableState.update { it.copy(lastImportedId = null) } }
 
-    fun deleteRelease(id: String) = execute("删除本机观看副本") {
-        withContext(Dispatchers.IO) { store.deleteRelease(id) }
-        val items = withContext(Dispatchers.IO) { store.listReleases() }
-        mutableState.update { it.copy(releases = items,
-            player = it.player?.takeUnless { player -> player.candidateId == null && player.scene.releaseId == id },
-            playerBitmap = it.playerBitmap.takeUnless { _ -> it.player?.scene?.releaseId == id },
-            lastSealedId = it.lastSealedId?.takeUnless { selected -> selected == id },
-            deliverySelection = it.deliverySelection?.takeUnless { selected -> selected.releaseId == id },
-            aiConfiguration = it.aiConfiguration?.takeUnless { config -> config.scene.releaseId == id }) }
+    fun deleteRelease(expected: ReleaseSummary) {
+        if (state.value.deletionCheck != null) {
+            message("请先核对上次删除结果，再删除其他版本。")
+            return
+        }
+        execute("删除本机观看副本", settle = { failure -> settleReleaseDeletion(expected, failure) }) {
+            withContext(Dispatchers.IO) { store.deleteRelease(expected) }
+        }
     }
+
+    fun retryReleaseDeletion() {
+        val pending = state.value.deletionCheck ?: return
+        execute(if (pending.cleanupPending) "继续清理本机副本" else "核对删除结果",
+            settle = { failure -> settleReleaseDeletion(pending.release, failure) }) {
+            if (pending.cleanupPending) withContext(Dispatchers.IO) { store.retryDeletionCleanup(pending.release) }
+        }
+    }
+
+    /** Run after the normal refresh, even if that refresh failed or the task was cancelled. */
+    private suspend fun settleReleaseDeletion(expected: ReleaseSummary, failure: Throwable?) {
+        val result = withContext(Dispatchers.IO) { runCatching { store.inspectDeletion(expected) }.getOrNull() }
+        withContext(Dispatchers.Main) {
+            if (result in setOf(ReleaseDeletionState.DELETED, ReleaseDeletionState.CLEANUP_PENDING)) {
+                if (aiConfigurationBaseline?.scene?.matches(expected) == true) aiConfigurationBaseline = null
+                mutableState.update { current ->
+                    val removePlayer = current.player?.let { it.candidateId == null && it.scene.matches(expected) } == true
+                    val removeAi = current.aiConfiguration?.scene?.matches(expected) == true
+                    current.copy(
+                        releases = current.releases.filterNot { it.sameBinding(expected) },
+                        player = current.player.takeUnless { removePlayer },
+                        playerBitmap = current.playerBitmap.takeUnless { removePlayer },
+                        playbackResume = current.playbackResume?.takeUnless { it.scene.matches(expected) },
+                        lastSealedId = current.lastSealedId?.takeUnless { it == expected.id },
+                        lastImportedId = current.lastImportedId?.takeUnless { it == expected.id },
+                        deliverySelection = current.deliverySelection?.takeUnless {
+                            it.releaseId == expected.id && it.contentDigest == expected.contentDigest
+                        },
+                        aiConfiguration = current.aiConfiguration.takeUnless { removeAi },
+                        aiConfigurationChanged = current.aiConfigurationChanged && !removeAi,
+                    )
+                }
+            }
+            if (result == ReleaseDeletionState.REPLACED) mutableState.update { current ->
+                // A same-ID replacement may already own new edits; never clear that owner's data.
+                current.copy(releases = current.releases.filterNot { it.sameBinding(expected) })
+            }
+            val pending = when (result) {
+                null -> ReleaseDeletionCheck(expected)
+                ReleaseDeletionState.CLEANUP_PENDING -> ReleaseDeletionCheck(expected, cleanupPending = true)
+                else -> null
+            }
+            val note = when (result) {
+                ReleaseDeletionState.PRESENT -> if (failure is CancellationException)
+                    "已取消删除；本机副本、观看记录和 AI 配置保留。"
+                    else "已核对：本机副本仍保留，没有完成删除。"
+                ReleaseDeletionState.REPLACED -> "确认的版本已变化，未删除当前副本。请重新打开后核对。"
+                ReleaseDeletionState.DELETED -> "本机副本、观看记录和 AI 配置已删除。创作项目及保存到应用外的文件保留。"
+                ReleaseDeletionState.CLEANUP_PENDING -> "本机副本已删除；剩余本机文件尚未清理完成。请继续清理，保存到应用外的文件不受影响。"
+                null -> "暂时无法核对删除结果。请重新核对，确认前不要重复删除或导入同一版本。"
+            }
+            mutableState.update { it.copy(deletionCheck = pending, message = note) }
+        }
+    }
+
+    private fun ViewerScene.matches(expected: ReleaseSummary) = releaseId == expected.id &&
+        ViewerPackageCodec.contentDigest(this) == expected.contentDigest
+
+    private fun ReleaseSummary.sameBinding(other: ReleaseSummary) = id == other.id &&
+        contentDigest == other.contentDigest && origin == other.origin && sealedAt == other.sealedAt
 
     /** Project entry must not inherit another project's previous delivery choice. */
     fun openProjectDelivery(projectId: String) {
@@ -975,17 +1040,22 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     fun message(text: String) { mutableState.update { it.copy(message = text) } }
     fun clearMessage() { mutableState.update { it.copy(message = null) } }
 
-    private fun execute(label: String, block: suspend () -> Unit) {
+    private fun execute(label: String, settle: (suspend (Throwable?) -> Unit)? = null, block: suspend () -> Unit) {
         if (state.value.busy || savePickerPending || state.value.shareChooserOpen || state.value.pendingShare != null || state.value.exportFile != null) return
         cancellationNote = null
         mutableState.update { it.copy(busy = true, stage = label, message = null) }
         task = viewModelScope.launch {
+            var failure: Throwable? = null
             try { block() }
             catch (cancelled: CancellationException) {
-                mutableState.update { it.copy(player = null, playerBitmap = null, playbackResume = null, pendingShare = null) }
-                message(cancellationNote ?: "已取消当前处理；完整保存的版本保留")
+                failure = cancelled
+                if (settle == null) {
+                    mutableState.update { it.copy(player = null, playerBitmap = null, playbackResume = null, pendingShare = null) }
+                    message(cancellationNote ?: "已取消当前处理；完整保存的版本保留")
+                }
                 throw cancelled
             } catch (error: Exception) {
+                failure = error
                 if (error is PlaybackSessionExpiredException) mutableState.update { it.copy(playbackResume = null) }
                 val detail = when (error) {
                     is DocumentSaveException -> error.message
@@ -993,18 +1063,22 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
                     is IOException -> null
                     else -> null
                 }
-                message(detail ?: "$label 未完成，请检查文件和可用空间后重试")
+                if (settle == null) message(detail ?: "$label 未完成，请检查文件和可用空间后重试")
             } finally {
                 // A cancellation can arrive after an atomic commit. Re-read library truth without
                 // deleting the successfully published version or manufacturing a success message.
                 withContext(NonCancellable + Dispatchers.IO) {
                     try {
-                        runCatching { store.listReleases() }.getOrNull()?.let { items -> mutableState.update { it.copy(releases = items) } }
+                        runCatching { store.listReleases() }.fold(
+                            onSuccess = { items -> mutableState.update { it.copy(releases = items, libraryReadFailed = false) } },
+                            onFailure = { mutableState.update { it.copy(libraryReadFailed = true) } },
+                        )
                         runCatching { store.listCandidates() }.getOrNull()?.let { candidates -> mutableState.update { it.copy(pendingCandidates = candidates) } }
                     } finally {
                         // Returning to a cancelled dispatcher can throw again. Clear inside this
                         // barrier, last: busy prevents another operation from starting before here.
-                        mutableState.update { it.copy(busy = false, stage = null) }
+                        try { settle?.invoke(failure) }
+                        finally { mutableState.update { it.copy(busy = false, stage = null) } }
                     }
                 }
             }

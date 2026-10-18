@@ -134,7 +134,7 @@ class PlaybackCheckpointHostTest {
         val old = f.store.openPlayback(f.scene.releaseId)
         check(f.store.savePlayback(old.session, ViewerTraversal.start(f.scene).advance(f.scene, f.input.nextEdgeId), 1))
         val packageBefore = f.packageHashes()
-        f.store.deleteRelease(f.scene.releaseId)
+        f.store.deleteRelease(f.store.listReleases().single { it.id == f.scene.releaseId })
         check(!f.release.exists() && !f.checkpoint.exists())
         check(!f.store.isPlaybackCurrent(old.session))
         check(!f.store.savePlayback(old.session, ViewerTraversal.start(f.scene), 1))

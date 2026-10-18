@@ -226,7 +226,7 @@ class OfflinePlaybackResumeHostTest {
             val file = File(a.file.parentFile, "replacement-${scene.releaseId}.tapscene")
             ViewerPackageCodec.writePackage(changed, File(a.file.parentFile, a.file.nameWithoutExtension), file, {}, null)
             val store = ReleaseStore(RuntimeEnvironment.getApplication())
-            store.deleteRelease(scene.releaseId)
+            store.deleteRelease(store.listReleases().single { it.id == scene.releaseId })
             file.inputStream().use { store.importPackage(it) }
             a.copy(scene = changed, file = file)
         }

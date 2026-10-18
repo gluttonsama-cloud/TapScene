@@ -265,7 +265,7 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 120, f"Expected one hundred twenty Compose review images, found {len(images)}"
+          assert len(images) == 123, f"Expected one hundred twenty-three Compose review images, found {len(images)}"
           resume_images = [image for image in images if "PlaybackResumeScreenshotPreviewsKt" in str(image)]
           assert len(resume_images) == 3, f"Expected three playback resume images, found {len(resume_images)}"
           busy_tab_images = [image for image in images if "ProjectSourcesBusyPreview" in str(image)]
@@ -444,6 +444,8 @@ jobs:
             --tests com.tapscene.ui.AnimationReadinessFailureHostTest \
             --tests com.tapscene.ui.shell.AuthoredPathImpactHostTest \
             --tests com.tapscene.ui.ReleasePlayerCancellationHostTest \
+            --tests com.tapscene.data.ReleaseDeletionStoreHostTest \
+            --tests com.tapscene.ui.shell.ReleaseDeletionFlowHostTest \
             --tests com.tapscene.data.PlaybackCheckpointHostTest \
             --tests com.tapscene.ui.shell.OfflinePlaybackResumeHostTest \
             --tests com.tapscene.ui.shell.OfflineImportPlaybackHostTest \
@@ -492,6 +494,16 @@ jobs:
           root = Path("android/app/build/test-results/testDebugUnitTest")
           files = sorted(root.glob("TEST-*.xml"))
           expected = {
+              ("com.tapscene.data.ReleaseDeletionStoreHostTest", "staleBindingAndCleanupRetryNeverStartAnotherDeletion"): 1,
+              ("com.tapscene.data.ReleaseDeletionStoreHostTest", "cancellationAfterStageSyncBeforeRenamePreservesVersionAndPrivatePlan"): 1,
+              ("com.tapscene.data.ReleaseDeletionStoreHostTest", "committedSyncFailureKeepsReceiptAndRetriesBeforeReimportWithoutPlanInheritance"): 1,
+              ("com.tapscene.data.ReleaseDeletionStoreHostTest", "configDirectorySyncFailureRemainsPendingUntilExplicitBoundCleanup"): 1,
+              ("com.tapscene.data.ReleaseDeletionStoreHostTest", "sameIdReplacementEvenWithIdenticalSummaryBlocksOldReceiptCleanup"): 1,
+              ("com.tapscene.data.ReleaseDeletionStoreHostTest", "cleanedStageRecoveryOnlyRemovesItsOwnTreeAndRetainsOwnerOnPartialFailure"): 1,
+              ("com.tapscene.ui.shell.ReleaseDeletionFlowHostTest", "actualConfirmationDistinguishesSameTitlesAndStoreRejectsChangedDigest"): 1,
+              ("com.tapscene.ui.shell.ReleaseDeletionFlowHostTest", "cancellationBeforeRenamePreservesEveryVersionCheckpointPlanAndExternalCopy"): 1,
+              ("com.tapscene.ui.shell.ReleaseDeletionFlowHostTest", "cancellationAfterRenameClearsExactReferencesEvenWhenAnotherVersionBreaksLibraryRefresh"): 1,
+              ("com.tapscene.ui.shell.ReleaseDeletionFlowHostTest", "unknownResultRequiresExplicitReadOnlyRecheckAndNeverDeletesOnRecovery"): 1,
               ("com.tapscene.data.PlaybackCheckpointHostTest", "freshOpenAndNewStoreRestoreExactHistoryBackRestartAndEnding"): 1,
               ("com.tapscene.data.PlaybackCheckpointHostTest", "invalidBoundedCheckpointsNeverResumeAnotherFrameOrChangePackage"): 1,
               ("com.tapscene.data.PlaybackCheckpointHostTest", "newerOpenRejectsDelayedAndForgedOwnersAcrossStoreInstances"): 1,

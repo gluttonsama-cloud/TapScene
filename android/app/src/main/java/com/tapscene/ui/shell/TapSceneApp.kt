@@ -1088,6 +1088,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 onDiscardCandidate = { discardingCandidate = it },
                                 onAi = { id -> releases.openAiPackage(id); push("ai") },
                                 onDelivery = { id -> if (releases.selectDeliveryRelease(id)) push("delivery") },
+                                onRetryDeletion = releases::retryReleaseDeletion, onReload = releases::reloadLibrary,
                                 onHosting = if (BuildConfig.HOSTED_ENABLED) ({ push("hosted") }) else null) }
                             GlobalNavigation(true, { library = false }, {})
                         }
@@ -1128,9 +1129,12 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                         projects.deleteStep(stepId, snapshot.project.id, snapshot.project.revision)
                     })
             }
-            deletingRelease?.let { item -> ConfirmDelete("删除本机观看副本？",
-                "“${item.title}”及本机观看资产将删除，无法撤销。创作项目和已导出的文件保留。", !releaseState.busy,
-                { deletingRelease = null }, { deletingRelease = null; releases.deleteRelease(item.id) }) }
+            deletingRelease?.let { item ->
+                val current = releaseState.releases.any { it.id == item.id && it.contentDigest == item.contentDigest &&
+                    it.origin == item.origin && it.sealedAt == item.sealedAt }
+                ReleaseDeleteDialog(item, current, !releaseState.busy && releaseState.deletionCheck == null,
+                    { deletingRelease = null }, { deletingRelease = null; releases.deleteRelease(item) })
+            }
             discardingCandidate?.let { item -> ConfirmDelete("删除未封存副本？",
                 "“${item.scene.title}”修订 ${item.projectRevision} 的固定图片和复核记录将删除。创作项目与封存版本保留。", !releaseState.busy,
                 { discardingCandidate = null }, { discardingCandidate = null; releases.discardCandidate(item.id) }) }

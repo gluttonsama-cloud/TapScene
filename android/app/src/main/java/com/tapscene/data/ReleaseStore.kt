@@ -15,6 +15,8 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.LinkOption
+import java.nio.file.NoSuchFileException
+import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.UUID
@@ -515,15 +517,122 @@ class ReleaseStore(context: Context) {
         }
     }
 
-    /** Only call after explicit local-library deletion confirmation. Drafts/sources are untouched. */
-    suspend fun deleteRelease(releaseId: String) = locked {
-        val source = child(releases, releaseId)
-        check(source.isDirectory) { "这个本机版本已不存在。" }
+    /** Only call after confirming this exact fixed version. The rename is irreversible. */
+    suspend fun deleteRelease(expected: ReleaseSummary) = locked {
+        deleteReleaseLocked(expected)
+    }
+
+    private suspend fun deleteReleaseLocked(expected: ReleaseSummary) {
+        val source = child(releases, expected.id)
+        check(sameDeletionTarget(readReleaseDirectory(source, verifyAssets = false), expected)) {
+            "这个版本已改变，请重新核对后删除。"
+        }
         stage { operation ->
+            // Stage creation includes directory fsync, which may block while cancellation arrives.
+            currentCoroutineContext().ensureActive()
             Files.move(source.toPath(), File(operation, "deleted-release").toPath(), StandardCopyOption.ATOMIC_MOVE)
             playbackOwners.remove(source.path)
-            runCatching { syncDirectory(releases); File(exports, "$releaseId.tapscene").delete(); File(exports, "$releaseId.tapscene-ai").delete(); File(aiConfigs, "$releaseId.json").delete(); syncDirectory(exports); syncDirectory(aiConfigs) }
+            // A failed cleanup leaves the actual snapshot and .owner as its only authority.
+            cleanupDeletedRelease(operation)
         }
+    }
+
+    /** Read only this deletion outcome; unrelated recovery must not hide a committed deletion. */
+    suspend fun inspectDeletion(expected: ReleaseSummary): ReleaseDeletionState = locked(recover = false) {
+        inspectDeletionLocked(expected)
+    }
+
+    /** Never starts a deletion, and never removes anything belonging to a current same-ID release. */
+    suspend fun retryDeletionCleanup(expected: ReleaseSummary): ReleaseDeletionState = locked(recover = false) {
+        val operations = pendingDeletionStages(expected)
+        check(!pathExists(child(releases, expected.id)) || operations.isEmpty()) {
+            "相同标识已有本机版本，保留当前版本与配置，请重新核对。"
+        }
+        operations.forEach { cleanupDeletedRelease(it) }
+        inspectDeletionLocked(expected)
+    }
+
+    private suspend fun inspectDeletionLocked(expected: ReleaseSummary): ReleaseDeletionState {
+        val source = child(releases, expected.id)
+        val pending = pendingDeletionStages(expected).isNotEmpty()
+        if (pathExists(source)) {
+            val current = readReleaseDirectory(source, verifyAssets = false)
+            return if (!pending && sameDeletionTarget(current, expected)) ReleaseDeletionState.PRESENT
+                else ReleaseDeletionState.REPLACED
+        }
+        if (pending) return ReleaseDeletionState.CLEANUP_PENDING
+        // No receipt grants authority to remove historical leftovers or claim they were removed.
+        listOf(File(exports, "${expected.id}.tapscene"), File(exports, "${expected.id}.tapscene-ai"),
+            File(aiConfigs, "${expected.id}.json")).forEach { file ->
+            check(file.canonicalFile == file.absoluteFile && !pathExists(file)) {
+                "仍有私有配置或导出缓存且缺少匹配的删除凭据，无法确认删除完成。"
+            }
+        }
+        return ReleaseDeletionState.DELETED
+    }
+
+    private fun sameDeletionTarget(actual: ReleaseSummary, expected: ReleaseSummary) =
+        actual.id == expected.id && actual.contentDigest == expected.contentDigest &&
+            actual.origin == expected.origin && actual.sealedAt == expected.sealedAt
+
+    private suspend fun pendingDeletionStages(expected: ReleaseSummary): List<File> {
+        validId(expected.id)
+        val result = mutableListOf<File>()
+        stageDirectories().forEach { operation ->
+            checkOwnedStage(operation)
+            val deleted = File(operation, "deleted-release")
+            if (pathExists(deleted)) {
+                checkOwnedStage(operation, requireComplete = true)
+                val snapshot = readDeletedRelease(operation)
+                if (sameDeletionTarget(snapshot, expected)) result += operation
+            }
+        }
+        return result
+    }
+
+    private suspend fun readDeletedRelease(operation: File): ReleaseSummary {
+        checkOwnedStage(operation, requireComplete = true)
+        val deleted = File(operation, "deleted-release")
+        check(deleted.canonicalFile == deleted.absoluteFile && deleted.isDirectory &&
+            !pathExists(File(operation, "cleaned-release"))) { "本机删除凭据无效。" }
+        val scene = readScene(File(deleted, "package"))
+        validId(scene.releaseId)
+        return readReleaseContents(deleted, scene.releaseId, verifyAssets = false)
+    }
+
+    private suspend fun cleanupDeletedRelease(operation: File) {
+        val snapshot = readDeletedRelease(operation)
+        check(!pathExists(child(releases, snapshot.id))) {
+            "相同标识已有本机版本，保留当前版本与配置，请重新核对。"
+        }
+        var failure: Exception? = null
+        fun attempt(action: () -> Unit) {
+            try { action() } catch (problem: Exception) {
+                if (failure == null) failure = problem else failure!!.addSuppressed(problem)
+            }
+        }
+        // Each action is attempted independently: an earlier fsync failure cannot skip private
+        // configuration/cache cleanup. Keep the complete receipt until every directory is durable.
+        attempt { syncDirectory(releases) }
+        attempt { syncDirectory(operation) }
+        listOf(File(exports, "${snapshot.id}.tapscene"), File(exports, "${snapshot.id}.tapscene-ai"),
+            File(aiConfigs, "${snapshot.id}.json")).forEach { file ->
+            attempt {
+                check(file.canonicalFile == file.absoluteFile) { "本机删除缓存路径无效。" }
+                if (pathExists(file)) {
+                    check(Files.readAttributes(file.toPath(), BasicFileAttributes::class.java,
+                        LinkOption.NOFOLLOW_LINKS).isRegularFile) { "本机删除缓存类型无效。" }
+                    Files.delete(file.toPath())
+                }
+                syncDirectory(file.parentFile!!)
+            }
+        }
+        failure?.let { throw it }
+        Files.move(File(operation, "deleted-release").toPath(), File(operation, "cleaned-release").toPath(),
+            StandardCopyOption.ATOMIC_MOVE)
+        // Past this point recovery may only remove the stage, even if a new same-ID release exists.
+        syncDirectory(operation)
+        removeOwnedStage(operation)
     }
 
     private suspend fun checkedAsset(scene: ViewerScene, payload: File, stateId: String): File {
@@ -621,10 +730,14 @@ class ReleaseStore(context: Context) {
             "本机成品不存在或路径无效。"
         }
         validId(location.name)
+        return readReleaseContents(location, location.name, verifyAssets)
+    }
+
+    private suspend fun readReleaseContents(location: File, releaseId: String, verifyAssets: Boolean): ReleaseSummary {
         val scene = readScene(File(location, "package"))
         verifyPackage(scene, File(location, "package"), decode = false, verifyAssets = verifyAssets)
         val json = readJson(File(location, "summary.json"))
-        check(json.getInt("version") == 1 && scene.releaseId == location.name) { "本机成品记录无效。" }
+        check(json.getInt("version") == 1 && scene.releaseId == releaseId) { "本机成品记录无效。" }
         val origin = json.getString("origin")
         check(origin == "local" || origin == "imported") { "本机成品来源无效。" }
         val expected = summary(scene, origin, json.getLong("sealedAt"))
@@ -675,11 +788,13 @@ class ReleaseStore(context: Context) {
         return ViewerPackageCodec.CancelCheck { owner.ensureActive() }
     }
 
-    private suspend fun <T> locked(action: suspend () -> T): T = mutex.withLock {
+    private suspend fun <T> locked(recover: Boolean = true, action: suspend () -> T): T = mutex.withLock {
         directory(root, privateRoot)
         listOf(candidates, releases, staging, exports, aiConfigs).forEach { directory(it, root) }
-        recoverStages()
-        recoverMetadataParts()
+        if (recover) {
+            recoverStages()
+            recoverMetadataParts()
+        }
         action()
     }
 
@@ -698,26 +813,52 @@ class ReleaseStore(context: Context) {
         }
     }
 
-    private fun recoverStages() {
-        staging.listFiles().orEmpty().forEach { operation -> runCatching { removeOwnedStage(operation) } }
+    private suspend fun recoverStages() {
+        stageDirectories().forEach { operation ->
+            checkOwnedStage(operation)
+            if (pathExists(File(operation, "deleted-release"))) {
+                // Fail closed before another import can inherit a deleted version's private plan.
+                cleanupDeletedRelease(operation)
+            } else runCatching { removeOwnedStage(operation) }
+        }
     }
 
-    private fun removeOwnedStage(operation: File) {
+    private fun stageDirectories(): List<File> = Files.newDirectoryStream(staging.toPath()).use { entries ->
+        entries.map { it.toFile() }
+    }
+
+    private fun checkOwnedStage(operation: File, requireComplete: Boolean = false) {
         validId(operation.name)
-        if (!operation.exists()) return
         check(operation.parentFile == staging && operation.canonicalFile == operation.absoluteFile && operation.isDirectory)
         val marker = File(operation, ".owner")
         check(marker.canonicalFile == marker.absoluteFile)
         val completeMarker = marker.isFile && marker.length() <= 100 &&
             marker.readText(Charsets.US_ASCII) == "$OWNER:${operation.name}"
-        // mkdir and the first marker write are not atomic together. Before that write completes,
-        // only an empty UUID directory or its partially written regular marker can exist here.
-        val interruptedCreation = operation.listFiles()?.all { it.name == ".owner" &&
+        // mkdir and the first marker write are not atomic together. No payload exists yet.
+        val interruptedCreation = !requireComplete && operation.listFiles()?.all { it.name == ".owner" &&
             it.isFile && it.canonicalFile == it.absoluteFile && it.length() <= 100 } == true
         check(completeMarker || interruptedCreation) { "暂存目录不属于本次成品存储。" }
-        deleteExactTree(operation)
+    }
+
+    private fun removeOwnedStage(operation: File) {
+        if (!pathExists(operation)) return
+        checkOwnedStage(operation)
+        check(!pathExists(File(operation, "deleted-release"))) { "本机删除尚待清理，保留完整凭据。" }
+        // Delete ownership last so a failed recursive cleanup is still recoverable.
+        Files.newDirectoryStream(operation.toPath()).use { entries ->
+            entries.filter { it.fileName.toString() != ".owner" }.forEach { deleteExactTree(it.toFile()) }
+        }
+        syncDirectory(operation)
+        Files.deleteIfExists(File(operation, ".owner").toPath())
+        Files.delete(operation.toPath())
         syncDirectory(staging)
     }
+
+    /** Only ENOENT establishes absence; inaccessible or malformed paths remain unknown. */
+    private fun pathExists(file: File): Boolean = try {
+        Files.readAttributes(file.toPath(), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        true
+    } catch (_: NoSuchFileException) { false }
 
     /** Exact private metadata temp names only; never inspect/delete package or export files. */
     private fun recoverMetadataParts() {
@@ -745,8 +886,14 @@ class ReleaseStore(context: Context) {
 
     private fun deleteExactTree(file: File) {
         check(file.canonicalFile == file.absoluteFile) { "拒绝清理非本机成品路径。" }
-        if (file.isDirectory) file.listFiles().orEmpty().forEach(::deleteExactTree)
-        check(file.delete() || !file.exists()) { "本次成品暂存清理未完成。" }
+        val attributes = try {
+            Files.readAttributes(file.toPath(), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        } catch (_: NoSuchFileException) { return }
+        check(!attributes.isSymbolicLink) { "拒绝清理非本机成品路径。" }
+        if (attributes.isDirectory) Files.newDirectoryStream(file.toPath()).use { entries ->
+            entries.forEach { deleteExactTree(it.toFile()) }
+        }
+        Files.delete(file.toPath())
     }
 
     private fun directory(file: File, parent: File): File {

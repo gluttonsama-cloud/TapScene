@@ -121,7 +121,7 @@ class DeliverySelectionHostTest {
                 withContext(Dispatchers.Main) { workspace.prepareExport(external.id) }; settled(workspace)
                 check(workspace.state.value.exportFile?.isFile == true)
                 withContext(Dispatchers.Main) { workspace.cancelExportPicker(); workspace.selectDeliveryRelease(old.id) }; settled(workspace)
-                withContext(Dispatchers.Main) { workspace.deleteRelease(old.id) }; settled(workspace)
+                withContext(Dispatchers.Main) { workspace.deleteRelease(old) }; settled(workspace)
                 check(workspace.state.value.deliverySelection == null && workspace.state.value.deliveryRelease == null)
                 println("HOST_DELIVERY_SELECTION old-version/digest/project-isolation/reopen/source-delete/late-export/import-boundary PASS; system picker/device NOT_RUN")
             } finally { withContext(Dispatchers.Main) { owner.clear() } }

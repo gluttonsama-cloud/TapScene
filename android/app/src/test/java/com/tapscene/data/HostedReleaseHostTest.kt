@@ -79,7 +79,7 @@ class HostedReleaseHostTest {
                 projects.deleteProject(projectId)
                 check(projects.readProject(projectId) == null)
                 check(store.readHostedRelease(sealed.id, sealed.contentDigest).projectId == projectId)
-                store.deleteRelease(sealed.id)
+                store.deleteRelease(sealed)
                 check(hashes() == before)
                 // A valid external viewing package has no locally sealed review provenance.
                 val external = File(app.noBackupFilesDir, "external.tapscene")
