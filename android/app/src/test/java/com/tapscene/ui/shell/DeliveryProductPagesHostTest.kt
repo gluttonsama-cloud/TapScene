@@ -3,9 +3,11 @@ package com.tapscene.ui.shell
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import com.tapscene.MainActivity
+import com.tapscene.data.HostProjectFixture
 import com.tapscene.data.HostSqlite
 import com.tapscene.data.ReleaseSummary
 import org.junit.Assert.assertEquals
@@ -132,6 +134,30 @@ class DeliveryProductPagesHostTest {
         compose.onNodeWithText("本机内容与设备丢失").performClick()
         compose.onNodeWithText("观看包不包含原片或可继续编辑的草稿。", substring = true).assertDoesNotExist()
         compose.onNodeWithText("Apache-2.0").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test fun failedProjectReadBlocksGenerationWithoutShowingProgress() {
+        HostProjectFixture().use { fixture ->
+            val snapshot = fixture.snapshot()
+            val failed = mutableStateOf(true)
+            val busy = mutableStateOf(true)
+            var builds = 0
+            content { DeliveryCheckScreen(snapshot, emptyList(), {}, {}, {}, {}, {},
+                onBuildCandidate = { builds++ }, busy = busy.value, loadFailed = failed.value) }
+            compose.onNodeWithText("请先重试读取项目，再确认交付检查。").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("正在生成固定候选，请稍候。").assertDoesNotExist()
+            compose.onNodeWithText("当前检查未返回待处理问题。").assertDoesNotExist()
+            compose.onAllNodes(SemanticsMatcher.keyIsDefined(SemanticsProperties.ProgressBarRangeInfo)).assertCountEquals(0)
+            compose.onNodeWithText("生成待复核成品").assertIsNotEnabled().performClick()
+            assertEquals(0, builds)
+            compose.runOnIdle { busy.value = false }
+            compose.onNodeWithText("生成待复核成品").assertIsNotEnabled().performClick()
+            assertEquals(0, builds)
+            compose.runOnIdle { failed.value = false }
+            compose.onNodeWithText("请先重试读取项目，再确认交付检查。").assertDoesNotExist()
+            compose.onNodeWithText("生成待复核成品").assertIsEnabled().performClick()
+            assertEquals(1, builds)
+        }
     }
 
     private fun content(block: @Composable () -> Unit) {

@@ -19,6 +19,7 @@ import com.tapscene.media.OpaqueMask
 import com.tapscene.media.SafeMediaWriter
 import com.tapscene.packageformat.ViewerPackageCodec
 import com.tapscene.ui.MediaWorkspace
+import com.tapscene.ui.ProjectIssue
 import com.tapscene.ui.ProjectIssueCorrection
 import com.tapscene.ui.ProjectRoute
 import com.tapscene.ui.ProjectWorkspace
@@ -52,6 +53,7 @@ import org.robolectric.annotation.SQLiteMode
 @LooperMode(LooperMode.Mode.PAUSED)
 class DeliveryIssueNavigationHostTest {
     private var previousRequestedSize: String? = null
+    private val animationIssue = ProjectIssue(null, "动画计划待核对，请检查路径与效果并保存。", ProjectIssueCorrection.ANIMATION)
 
     @get:Rule(order = 0) val database = object : ExternalResource() {
         override fun before() {
@@ -204,11 +206,12 @@ class DeliveryIssueNavigationHostTest {
         compose.onNodeWithText("此步已接入当前起点路径。").assertIsDisplayed()
         compose.onNodeWithText("选择接入步骤").assertDoesNotExist()
         compose.onNodeWithText("返回交付检查").assertIsDisplayed().performClick()
-        waitFor("当前检查未返回待处理问题。")
+        waitFor(animationIssue.message)
         compose.onNodeWithText("检查与交付").assertIsSelected()
         compose.onNodeWithText(issue.message).assertDoesNotExist()
-        compose.onNodeWithText("去修正").assertDoesNotExist()
-        assertTrue(projects.state.value.issues.isEmpty())
+        compose.onNodeWithText("去修正").performScrollTo().assertIsDisplayed()
+        assertEquals(listOf(animationIssue), projects.state.value.issues)
+        compose.onNodeWithText("生成待复核成品").performScrollTo().assertIsNotEnabled()
         assertEquals(saved, store.readProject(projectId))
         // Stop at graph repair. Imported animation-plan revalidation and candidate creation
         // have separate gates and are intentionally not claimed as part of this UI check.
@@ -344,11 +347,12 @@ class DeliveryIssueNavigationHostTest {
         compose.onNodeWithText("返回").performClick()
         waitFor("名称与讲解")
         compose.onNodeWithText("返回").performClick()
-        waitFor("当前检查未返回待处理问题。")
+        waitFor(animationIssue.message)
         compose.onNodeWithText("检查与交付").assertIsSelected()
         compose.onNodeWithText(endingIssue(target.title)).assertDoesNotExist()
-        compose.onNodeWithText("去修正").assertDoesNotExist()
-        assertTrue(projects.state.value.issues.isEmpty())
+        compose.onNodeWithText("去修正").performScrollTo().assertIsDisplayed()
+        assertEquals(listOf(animationIssue), projects.state.value.issues)
+        compose.onNodeWithText("生成待复核成品").performScrollTo().assertIsNotEnabled()
         assertEquals(saved, store.readProject(projectId))
         val planAfter = checkNotNull(store.readDraftAiConfig(projectId))
         // Java Visit/Effect values use identity equality; compare every persisted plan field.
@@ -444,7 +448,7 @@ class DeliveryIssueNavigationHostTest {
         awaitIdle()
         compose.onNodeWithText("检查与交付").performClick()
         compose.waitForIdle()
-        assertEquals(listOf(unreviewedMessage, missingMessage, missingMessage, staleMessage),
+        assertEquals(listOf(unreviewedMessage, missingMessage, missingMessage, staleMessage, animationIssue.message),
             projects.state.value.issues.map { it.message })
         compose.onNodeWithText(unreviewedMessage).performScrollTo().assertIsDisplayed()
         compose.onAllNodesWithText(missingMessage).assertCountEquals(2)
@@ -566,12 +570,12 @@ class DeliveryIssueNavigationHostTest {
         compose.onNodeWithContentDescription("返回").performClick()
         waitFor("可见区域")
         compose.onNodeWithContentDescription("返回").performClick()
-        waitFor("3 项待处理")
+        waitFor("4 项待处理")
         awaitIdle()
         compose.onNodeWithText("检查与交付").assertIsSelected()
         assertEquals(ProjectRoute.STEPS, projects.state.value.route)
         assertEquals(projectId, projects.state.value.project?.project?.id)
-        assertEquals(listOf(unreviewedMessage, missingMessage, staleMessage), projects.state.value.issues.map { it.message })
+        assertEquals(listOf(unreviewedMessage, missingMessage, staleMessage, animationIssue.message), projects.state.value.issues.map { it.message })
         compose.onAllNodesWithText(missingMessage).assertCountEquals(1)
         compose.onNodeWithText(chosenIssueLabel).assertDoesNotExist()
         compose.onNodeWithText("步骤 $targetNumber · ${target.title} · 区域 1").performScrollTo().assertIsDisplayed()

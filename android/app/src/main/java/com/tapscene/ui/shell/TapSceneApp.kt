@@ -1005,6 +1005,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                                 regionCorrectionStepId = issue.stepId; regionCorrectionId = issue.regionId
                                                 regionCorrectionPending = true; push("check-region")
                                             }
+                                            ProjectIssueCorrection.ANIMATION -> openDraftAi()
                                             ProjectIssueCorrection.CONNECTION -> {
                                                 connectionRepairStepId = issue.stepId; tab = ProjectTab.STEPS
                                             }
@@ -1013,7 +1014,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                     } },
                                     { projects.startPreview() }, openReleaseReview, { projectId?.let(releases::openProjectDelivery); push("delivery") }, showTopBar = false,
                                     onBuildCandidate = buildRelease, busy = unavailable || mediaState.busy,
-                                    buildEnabled = state.dirtyStepIds.isEmpty())
+                                    buildEnabled = state.dirtyStepIds.isEmpty(), loadFailed = state.loadFailed)
                             }
                         }
                         library -> Column(Modifier.fillMaxSize()) {

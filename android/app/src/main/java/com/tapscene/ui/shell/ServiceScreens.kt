@@ -51,6 +51,7 @@ import com.tapscene.hosting.HostedModels
 import com.tapscene.packageformat.ViewerScene
 import com.tapscene.packageformat.ViewerPackageCodec
 import kotlinx.coroutines.delay
+import com.tapscene.ui.ProjectIssueCorrection
 import com.tapscene.ui.ProjectIssue
 import com.tapscene.ui.AiPackageConfiguration
 import com.tapscene.ui.ReleaseUiState
@@ -196,6 +197,7 @@ fun DeliveryCheckScreen(
     onBuildCandidate: (() -> Unit)? = null,
     busy: Boolean = false,
     buildEnabled: Boolean = true,
+    loadFailed: Boolean = false,
 ) {
     var showMediaDetails by rememberSaveable(project?.project?.id) { mutableStateOf(false) }
     ServicePage("检查与交付", onBack, showTopBar = showTopBar) {
@@ -214,7 +216,7 @@ fun DeliveryCheckScreen(
                 ) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text("${issues.size} 项待处理", style = MaterialTheme.typography.titleLarge, color = ShellColors.Accent)
-                        Text("结构、路径与区域", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                        Text("交付前检查", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                     }
                     Button(shape = RoundedCornerShape(8.dp), onClick = { onIssue(firstIssue) }, modifier = Modifier.heightIn(min = 48.dp)) { Text("去修正") }
                 }
@@ -228,12 +230,16 @@ fun DeliveryCheckScreen(
                     ShellDivider()
                     ShellActionRow(
                         title = issue.message,
-                        subtitle = targetLabel ?: "项目结构",
+                        subtitle = targetLabel ?: if (issue.correction == ProjectIssueCorrection.ANIMATION) "项目动画计划" else "项目结构",
                         onClick = { onIssue(issue) },
                     )
                 }
             } else {
-                SectionHeader("结构、路径与区域", if (project == null) "未选择项目。" else "当前检查未返回待处理问题。")
+                SectionHeader("交付前检查", when {
+                    loadFailed -> "检查暂未完成，请重试读取项目。"
+                    project == null -> "未选择项目。"
+                    else -> "当前检查未返回待处理问题。"
+                })
             }
             ShellDivider()
             ShellActionRow("试走点击路径", "确认每个动作到达预期画面或结束结果。", onClick = onPreview, enabled = project?.steps?.isNotEmpty() == true)
@@ -258,6 +264,7 @@ fun DeliveryCheckScreen(
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
                 when {
+                    loadFailed -> "请先重试读取项目，再确认交付检查。"
                     busy -> "正在生成固定候选，请稍候。"
                     !buildEnabled -> "先保存当前修改，再生成固定候选。"
                     issues.isNotEmpty() -> "先修正以上问题，再生成候选。"
@@ -266,13 +273,13 @@ fun DeliveryCheckScreen(
                 },
                 style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted,
             )
-            if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (busy && !loadFailed) LinearProgressIndicator(Modifier.fillMaxWidth())
             Button(
                 shape = RoundedCornerShape(8.dp),
                 onClick = { onBuildCandidate?.invoke() },
-                enabled = onBuildCandidate != null && !busy && buildEnabled && project?.steps?.isNotEmpty() == true && issues.isEmpty(),
+                enabled = onBuildCandidate != null && !busy && !loadFailed && buildEnabled && project?.steps?.isNotEmpty() == true && issues.isEmpty(),
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-            ) { Text(if (busy) "正在生成" else "生成待复核成品") }
+            ) { Text(if (busy && !loadFailed) "正在生成" else "生成待复核成品") }
         }
         Column {
             ShellDivider()

@@ -5,6 +5,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.tapscene.data.DraftAiConfig
+import com.tapscene.data.DraftPlanProjection
 import com.tapscene.data.EditorDraftFields
 import com.tapscene.data.EditorFormKind
 import com.tapscene.data.SafeImageBinding
@@ -65,7 +67,7 @@ data class StepEditDraft(
     val conflicts: Set<String> = emptySet(),
 )
 
-enum class ProjectIssueCorrection { STEP_EDITOR, CONNECTION, REGION }
+enum class ProjectIssueCorrection { STEP_EDITOR, CONNECTION, REGION, ANIMATION }
 data class ProjectIssue(val stepId: String?, val message: String,
     val correction: ProjectIssueCorrection = ProjectIssueCorrection.STEP_EDITOR, val regionId: String? = null)
 
@@ -1401,7 +1403,20 @@ class ProjectWorkspace internal constructor(application: Application,
         }
     }
 
-    private fun applyProject(project: ProjectSnapshot) {
+    private suspend fun applyProject(project: ProjectSnapshot) {
+        // The saved plan belongs to this project; validation uses this exact displayed revision.
+        // A later saved plan revision is conservatively blocked until the final refresh.
+        var readinessFailed = false
+        val issues = try {
+            withContext(Dispatchers.IO) { deliveryIssues(project, store.readDraftAiConfig(project.project.id)) }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // A committed image/step must remain authoritative if this optional read fails.
+            // Unknown is never treated as an absent plan or as permission to generate.
+            readinessFailed = true
+            deliveryIssues(project) + ProjectIssue(null, "动画计划检查暂时无法完成，请重新读取项目。", ProjectIssueCorrection.ANIMATION)
+        }
         state.value.textRegions.binding?.let { binding ->
             if (project.steps.none { binding.matches(project.project, it) }) cancelTextRegions()
         }
@@ -1418,8 +1433,9 @@ class ProjectWorkspace internal constructor(application: Application,
         val selectedDraft = selectedId?.let { draftFor(project, stepsById.getValue(it)) }
         mutableState.update { old -> old.copy(project = project, selectedStepId = selectedId,
             route = if (old.route == ProjectRoute.EDIT && selectedId == null) ProjectRoute.STEPS else old.route,
-            stepDraft = selectedDraft, issues = deliveryIssues(project), dirtyStepIds = dirtyIds(project.project.id),
-            bitmap = if (current.project?.project?.id != project.project.id || current.selectedStepId != selectedId ||
+            stepDraft = selectedDraft, issues = issues, loadFailed = old.loadFailed || readinessFailed,
+            dirtyStepIds = dirtyIds(project.project.id),
+            bitmap = if (readinessFailed || current.project?.project?.id != project.project.id || current.selectedStepId != selectedId ||
                 current.selectedStep?.asset != selectedId?.let { stepsById[it]?.asset }) null else old.bitmap) }
     }
 
@@ -1670,7 +1686,7 @@ class ProjectWorkspace internal constructor(application: Application,
         private val PNG_SIGNATURE = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
 
         /** Snapshot-level readiness only; generation still verifies the actual persisted assets. */
-        fun deliveryIssues(snapshot: ProjectSnapshot): List<ProjectIssue> = graphIssues(snapshot) +
+        fun deliveryIssues(snapshot: ProjectSnapshot, animation: DraftAiConfig? = null): List<ProjectIssue> = graphIssues(snapshot) +
             snapshot.steps.flatMap { step -> step.regions.mapNotNull { region ->
                 val problem = when {
                     !region.matchesBase(step.asset) -> "底图已改变，请校正范围后重新生成并复核。"
@@ -1680,7 +1696,10 @@ class ProjectWorkspace internal constructor(application: Application,
                 }
                 problem?.let { ProjectIssue(step.id, "步骤“${step.title}”的区域“${region.name}”$it",
                     ProjectIssueCorrection.REGION, region.id) }
-            } }
+            } } + if (animation != null && (animation.needsRepair ||
+                animation.boundRevision != snapshot.project.revision || DraftPlanProjection.issues(snapshot, animation).isNotEmpty()))
+                listOf(ProjectIssue(null, "动画计划待核对，请检查路径与效果并保存。", ProjectIssueCorrection.ANIMATION))
+            else emptyList()
 
         fun graphIssues(snapshot: ProjectSnapshot): List<ProjectIssue> {
             if (snapshot.steps.isEmpty()) return listOf(ProjectIssue(null, "项目还没有步骤，请添加已生成并复核的图片"))
