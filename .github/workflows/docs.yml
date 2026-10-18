@@ -429,6 +429,7 @@ jobs:
             --tests com.tapscene.ui.shell.RecordingOwnerNavigationHostTest \
             --tests com.tapscene.ui.shell.ProjectTextEditingHostTest \
             --tests com.tapscene.ui.shell.DeliveryIssueNavigationHostTest \
+            --tests com.tapscene.ui.shell.StepDeletionConfirmationHostTest \
             --tests com.tapscene.ui.shell.AiImportNavigationHostTest \
             --tests com.tapscene.ui.AiImportCancellationHostTest \
             --tests com.tapscene.ui.AiAnnotationEditsTest \
@@ -470,6 +471,7 @@ jobs:
           root = Path("android/app/build/test-results/testDebugUnitTest")
           files = sorted(root.glob("TEST-*.xml"))
           expected = {
+              ("com.tapscene.ui.shell.StepDeletionConfirmationHostTest", "exactStepAndStartImpactStayFrozenUntilExplicitCurrentConfirmation"): 1,
               ("com.tapscene.media.SourceCapacityHostTest", "aggregateLimitsRejectBeforeWriteAndAcceptExactBoundary"): 1,
               ("com.tapscene.media.SourceCapacityHostTest", "capacityMappingIsClosedAndUnknownFailuresStayPrivate"): 1,
               ("com.tapscene.media.SourceCapacityHostTest", "interruptedProviderReadCleansOnlyItsUnregisteredCopy"): 1,
@@ -752,6 +754,7 @@ jobs:
           path: |
             android/app/build/test-results/testDebugUnitTest/
             android/app/build/reports/tests/testDebugUnitTest/
+            android/app/build/reports/step-delete-layouts/
             ${{ runner.temp }}/host-data-checks.txt
             ${{ runner.temp }}/host-data-execution.txt
             ${{ runner.temp }}/ai-round-trip/

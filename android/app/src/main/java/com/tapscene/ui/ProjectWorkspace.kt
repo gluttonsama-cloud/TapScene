@@ -894,25 +894,41 @@ class ProjectWorkspace internal constructor(application: Application,
     }
 
     /** Hotspots are removed; incoming next buttons become unresolved, after UI confirmation. */
-    fun deleteStep(stepId: String) {
+    fun deleteStep(stepId: String, expectedProjectId: String? = null, expectedRevision: Long? = null) {
         val project = state.value.project ?: return
+        if (expectedProjectId != null && expectedProjectId != project.project.id ||
+            expectedRevision != null && expectedRevision != project.project.revision) {
+            message("项目内容已变化，请重新检查删除影响。")
+            return
+        }
         execute("删除步骤并更新相关动作", editing = true, afterRefresh = {
             // Even a cancelled dispatcher return can hide a successful deletion transaction.
             if (state.value.project?.project?.id == project.project.id && state.value.project?.steps?.none { it.id == stepId } == true) {
+                invalidateStaging(project.project.id to stepId)
                 drafts.remove(project.project.id to stepId)
                 pruneDeletedTargets(project.project.id, stepId)
             }
         }) {
-            invalidateStaging(project.project.id to stepId)
-            val result = draftWriteLock.withLock { withContext(Dispatchers.IO) { store.deleteStep(project.project.id, stepId) } }
-            drafts.remove(project.project.id to stepId)
+            val result = draftWriteLock.withLock {
+                val result = withContext(Dispatchers.IO) {
+                    store.deleteStep(project.project.id, stepId, expectedRevision ?: project.project.revision)
+                }
+                // Rejected confirmation must not cancel the target's pending draft staging.
+                invalidateStaging(project.project.id to stepId)
+                drafts.remove(project.project.id to stepId)
+                result
+            }
             applyProject(result.snapshot)
             // Never resurrect a just-deleted target from another step's retained dirty draft.
             pruneDeletedTargets(project.project.id, stepId)
             if (state.value.selectedStepId == stepId || state.value.route == ProjectRoute.EDIT) {
                 mutableState.update { it.copy(route = ProjectRoute.STEPS, selectedStepId = null, stepDraft = null, bitmap = null) }
             }
-            message("步骤已删除，已移除 ${result.impact.hotspotCount} 个相关热点" +
+            val newStart = result.snapshot.steps.firstOrNull { it.id == result.snapshot.project.startStepId }
+            val startMessage = if (!result.impact.wasStart) "" else if (newStart == null)
+                "；项目已没有步骤和起点"
+            else "；起点已改为步骤 ${(result.snapshot.steps.indexOf(newStart) + 1).toString().padStart(2, '0')} · ${newStart.title}"
+            message("步骤已删除，已移除 ${result.impact.hotspotCount} 个相关热点" + startMessage +
                 (if (result.impact.incomingNextActionCount > 0) "；${result.impact.incomingNextActionCount} 个下一步动作需重选目标" else "") +
                 (if (result.pendingAssetCleanupCount > 0) "；本机图片（可能含原截图）稍后继续清理" else ""))
         }

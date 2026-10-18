@@ -1959,9 +1959,12 @@ class ProjectStore(context: Context) {
         deletionImpact(requireSnapshot(db, projectId), stepId)
     }
 
-    fun deleteStep(projectId: String, stepId: String): StepDeletionResult = access { db ->
+    fun deleteStep(projectId: String, stepId: String, expectedRevision: Long? = null): StepDeletionResult = access { db ->
         val result = transaction(db) {
             val current = requireSnapshot(db, projectId)
+            require(expectedRevision == null || current.project.revision == expectedRevision) {
+                "项目内容已变化，请重新检查删除影响。"
+            }
             val step = current.steps.firstOrNull { it.id == stepId } ?: error("步骤已不存在，请刷新。")
             val impact = deletionImpact(current, stepId)
             val affected = current.steps.flatMap { from -> from.hotspots.filter {

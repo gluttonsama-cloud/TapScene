@@ -116,7 +116,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     var screenshotPickerProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var renaming by remember { mutableStateOf<ProjectSummary?>(null) }
     var deletingProject by remember { mutableStateOf<ProjectSummary?>(null) }
-    var deletingStep by remember { mutableStateOf<ProjectStep?>(null) }
+    var deletingStep by remember { mutableStateOf<Pair<ProjectSnapshot, String>?>(null) }
     var showUnsavedSteps by rememberSaveable { mutableStateOf(false) }
     var projectMore by rememberSaveable { mutableStateOf(false) }
     var transitionEdgeId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -975,7 +975,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                         ) {
                             when (tab) {
                                 ProjectTab.STEPS -> StoryboardContent(state, projects::openStep, { tab = ProjectTab.SOURCES },
-                                    projects::setStart, projects::moveStep, { deletingStep = it },
+                                    projects::setStart, projects::moveStep, { step -> state.project?.let { deletingStep = it to step.id } },
                                     stepThumbnail = { asset -> ReviewedThumbnail(projects, state.project, asset) }, onBuildPath = openPath, onAiPlan = openDraftAi,
                                     onCopyStep = projects::copySavedStep, connectionRepairStepId = connectionRepairStepId,
                                     onReturnToChecks = { connectionRepairStepId = null; tab = ProjectTab.CHECKS })
@@ -1053,9 +1053,14 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                 } else if (candidateState.projectId == item.id && candidateState.busy) {
                     deletingProject = null; projects.message("请先取消当前分析。")
                 } else { deletingProject = null; reviewTitles = HashMap(reviewTitles.filterKeys { !it.startsWith("${item.id}:") }); projects.deleteProject(item.id) } }) }
-            deletingStep?.let { step -> ConfirmDelete("删除“${step.title}”？",
-                "步骤、图片及 ${projects.deletionHotspotCount(step.id)} 个关联热点将删除，包括未保存草稿中指向它的热点。${projects.deletionNextActionCount(step.id)} 个下一步动作受影响；指向此步的下一步保留为待补目标。原录屏保留。${if (state.project?.project?.startStepId == step.id) "删除后需要重新设置起点。" else ""}", !state.busy,
-                { deletingStep = null }, { deletingStep = null; projects.deleteStep(step.id) }) }
+            deletingStep?.let { (snapshot, stepId) ->
+                val current = state.project?.project?.let { it.id == snapshot.project.id && it.revision == snapshot.project.revision } == true
+                StepDeleteDialog(snapshot, stepId, projects.deletionHotspotCount(stepId), projects.deletionNextActionCount(stepId),
+                    current, !state.busy && !state.loadFailed, { deletingStep = null }, {
+                        deletingStep = null
+                        projects.deleteStep(stepId, snapshot.project.id, snapshot.project.revision)
+                    })
+            }
             deletingRelease?.let { item -> ConfirmDelete("删除本机观看副本？",
                 "“${item.title}”及本机观看资产将删除，无法撤销。创作项目和已导出的文件保留。", !releaseState.busy,
                 { deletingRelease = null }, { deletingRelease = null; releases.deleteRelease(item.id) }) }
@@ -1170,6 +1175,24 @@ private fun ProjectTitleDialog(title: String, initialTitle: String, initialGoal:
             if (showGoal) OutlinedTextField(goal, { goal = it }, label = { Text("演示目标（选填）") }, enabled = enabled)
         }
     }, confirmButton = { TextButton(onClick = { onConfirm(name.trim(), goal.trim()) }, enabled = enabled && name.isNotBlank()) { Text(if (showGoal) "创建" else "保存") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
+}
+
+/** Confirmation uses a frozen project revision; the store rechecks it before deleting. */
+@Composable
+internal fun StepDeleteDialog(snapshot: ProjectSnapshot, stepId: String, hotspotCount: Int, nextActionCount: Int,
+    current: Boolean, enabled: Boolean, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    val step = snapshot.steps.firstOrNull { it.id == stepId } ?: return
+    fun label(item: ProjectStep) = "步骤 ${(snapshot.steps.indexOf(item) + 1).toString().padStart(2, '0')} · ${item.title}"
+    val startImpact = if (snapshot.project.startStepId != stepId) "" else {
+        snapshot.steps.firstOrNull { it.id != stepId }?.let { "删除后，当前${label(it)}将成为起点。" }
+            ?: "删除后项目将没有步骤和起点。"
+    }
+    val message = if (!current) "项目内容已变化，请取消后重新检查删除影响。"
+        else "步骤、图片及 $hotspotCount 个关联热点将删除，包括未保存草稿中指向它的热点。$nextActionCount 个下一步动作受影响；指向此步的下一步保留为待补目标。原录屏保留。$startImpact"
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("删除${label(step)}？") },
+        text = { Text(message, Modifier.verticalScroll(rememberScrollState())) },
+        confirmButton = { TextButton(onClick = onConfirm, enabled = enabled && current) { Text("删除") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }
 
