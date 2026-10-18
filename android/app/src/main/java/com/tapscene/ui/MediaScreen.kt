@@ -99,6 +99,7 @@ fun MediaScreen(
     stepTitle: String? = null,
     onStepTitleChange: (String) -> Unit = {},
     onUseSuggestedTitle: (String) -> Unit = {},
+    manualTimeInputs: ManualMediaTimeInputs? = null,
     onReviewedImage: (suspend (ReviewedStepInput) -> Unit)? = null,
 ) {
     val state by workspace.state.collectAsStateWithLifecycle()
@@ -245,15 +246,17 @@ fun MediaScreen(
                 Text("支持 H.264 / H.265；单段不超过 3 分钟、200 MiB，按本机能力解码。",
                     style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
             }
-            if (selected != null) key(selected.source.sourceId) {
+            if (selected != null) key(workspace.projectId, selected.source.sourceId) {
                 val meta = selected.source.metadata
-                // Keep local time fields when moving between modes; they still invalidate output on edit.
-                var requestedSeconds by rememberSaveable { mutableStateOf(selected.frameTimeUs / 1_000_000f) }
+                // Only the manual shell retains these raw fields across a temporary task page.
+                // Batch review keeps local fields and still follows its actual decoded frame.
+                val times = manualTimeInputs?.takeIf { it.matches(workspace.projectId, selected.source.sourceId) }
+                    ?: rememberSaveable(saver = ManualMediaTimeInputs.Saver) {
+                        ManualMediaTimeInputs.create(workspace.projectId.orEmpty(), selected.source.sourceId, selected.frameTimeUs, meta.durationUs)
+                    }
                 LaunchedEffect(state.frame?.presentationTimeUs, batchReview) {
-                    if (batchReview) state.frame?.let { requestedSeconds = it.presentationTimeUs / 1_000_000f }
+                    if (batchReview) state.frame?.let { times.requestedSeconds = it.presentationTimeUs / 1_000_000f }
                 }
-                var start by rememberSaveable { mutableStateOf("0.000") }
-                var end by rememberSaveable { mutableStateOf(seconds(min(meta.durationUs, 3_000_000))) }
                 when (mode) {
                     ManualMediaMode.FRAME -> {
                         state.frame?.let { frame ->
@@ -261,13 +264,13 @@ fun MediaScreen(
                             Text("当前画面 ${frame.presentationTimeUs / 1000} ms · 毫秒精度",
                                 style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                         } ?: StatusNote("选择时间并手动取帧，查看这段录屏中的实际画面。")
-                        Text("取帧位置 ${seconds((requestedSeconds * 1_000_000).toLong())} 秒",
+                        Text("取帧位置 ${seconds((times.requestedSeconds * 1_000_000).toLong())} 秒",
                             style = MaterialTheme.typography.titleSmall)
-                        Slider(value = requestedSeconds, onValueChange = { requestedSeconds = it },
+                        Slider(value = times.requestedSeconds, onValueChange = { times.requestedSeconds = it },
                             valueRange = 0f..(meta.durationUs / 1_000_000f).coerceAtLeast(0.001f), enabled = canEdit,
                             modifier = Modifier.semantics { contentDescription = "录屏取帧时间" })
                         OutlinedButton(onClick = {
-                            val time = (requestedSeconds * 1_000_000).toLong()
+                            val time = (times.requestedSeconds * 1_000_000).toLong()
                             if (batchReview) workspace.prepareCandidateImage(selected.source.sourceId, time, requireNotNull(reviewItemId)) else workspace.takeFrame(time)
                         },
                             enabled = canEdit, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("手动取这一帧") }
@@ -304,15 +307,15 @@ fun MediaScreen(
                         Text("每段最多 10 秒。遮挡固定覆盖整段，请覆盖敏感内容的完整运动范围；输出移除全部原音轨。",
                             style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            OutlinedTextField(value = start, onValueChange = { start = it; workspace.invalidateCandidate() },
+                            OutlinedTextField(value = times.clipStart, onValueChange = { times.clipStart = it; workspace.invalidateCandidate() },
                                 label = { Text("起点（秒）") }, singleLine = true, enabled = canEdit,
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
-                            OutlinedTextField(value = end, onValueChange = { end = it; workspace.invalidateCandidate() },
+                            OutlinedTextField(value = times.clipEnd, onValueChange = { times.clipEnd = it; workspace.invalidateCandidate() },
                                 label = { Text("终点（秒）") }, singleLine = true, enabled = canEdit,
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
                         }
-                        val startUs = parseSeconds(start)
-                        val endUs = parseSeconds(end)
+                        val startUs = parseSeconds(times.clipStart)
+                        val endUs = parseSeconds(times.clipEnd)
                         val valid = startUs != null && endUs != null && startUs >= 0 && endUs > startUs &&
                             endUs <= meta.durationUs && endUs - startUs <= 10_000_000
                         Button(onClick = { workspace.makeVideo(requireNotNull(startUs), requireNotNull(endUs)) },

@@ -411,6 +411,7 @@ jobs:
             --tests com.tapscene.ui.DeliverySelectionHostTest \
             --tests com.tapscene.ui.shell.DeliveryProductPagesHostTest \
             --tests com.tapscene.ui.shell.DraftAiHoldInputHostTest \
+            --tests com.tapscene.ui.shell.ManualMediaInputHostTest \
             --tests com.tapscene.ui.shell.AiImportNavigationHostTest \
             --tests com.tapscene.ui.AiImportCancellationHostTest \
             --tests com.tapscene.ui.AiAnnotationEditsTest \
@@ -635,6 +636,7 @@ jobs:
               ("com.tapscene.ui.shell.DraftAiHoldInputHostTest", "pendingHoldSurvivesCollapseAndTabsAndCannotSilentlySaveOldValue"): 1,
               ("com.tapscene.ui.shell.DraftAiHoldInputHostTest", "pendingInputCanBeExplicitlyDiscardedAndNeverFollowsAnotherProject"): 1,
               ("com.tapscene.ui.shell.DraftAiHoldInputHostTest", "shellTaskViewProtectsRawAndDirtyPlansButAllowsCleanDiscardedAndSavedPlans"): 1,
+              ("com.tapscene.ui.shell.ManualMediaInputHostTest", "shellRecordingCoverRetainsRawTimesButSourceSwitchAndFullExitClearThem"): 1,
               ("com.tapscene.ui.shell.AiImportNavigationHostTest", "busyBackPreservesImportAndOnlyExplicitCancelReachesDestructiveCallback"): 1,
               ("com.tapscene.ui.AiImportCancellationHostTest", "cancellingUnknownReceiptRetryAlwaysReadsActualCommitBeforeCleanup"): 1,
               ("com.tapscene.ui.AiImportCancellationHostTest", "lateExplicitCancelDuringFinalRefreshIsReconciledBeforeBusyClears"): 1,

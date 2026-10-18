@@ -340,6 +340,20 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
         if ((page == "transition" || page == "regions" || page == "path") && projectId == null && !state.busy) pop()
     }
     val scopeReady = projectId != null && media.projectId == projectId && !retainedMedia
+    val manualMediaProject = media.projectId.takeIf {
+        mediaState.correction == null && (retainedMedia || (scopeReady && state.route == ProjectRoute.MEDIA))
+    }
+    val manualMediaSource = mediaState.selected.takeIf { manualMediaProject != null }
+    // Keep just raw time inputs while this same workbench is covered by another task.
+    // A real exit, source change, or change of entry disposes this state rather than caching it.
+    val manualTimeInputs = key(manualMediaProject, manualMediaSource?.source?.sourceId, retainedMedia) {
+        manualMediaSource?.let { source ->
+            rememberSaveable(saver = ManualMediaTimeInputs.Saver) {
+                ManualMediaTimeInputs.create(requireNotNull(manualMediaProject), source.source.sourceId,
+                    source.frameTimeUs, source.source.metadata.durationUs)
+            }
+        }
+    }
     val openStepCorrection: (Boolean) -> Unit = { masks ->
         val snapshot = projects.state.value.project
         val step = projects.state.value.selectedStepId
@@ -614,7 +628,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                     DraftAiTaskNavigationNote(draftAiState, draftAiPendingHold)
                 Box(Modifier.weight(1f)) {
                     when {
-                        retainedMedia -> MediaScreen(media, onBack = { retainedMedia = false; projects.reload() })
+                        retainedMedia -> MediaScreen(media, onBack = { retainedMedia = false; projects.reload() }, manualTimeInputs = manualTimeInputs)
                         page != null -> when (page) {
                             "screenshot" -> {
                                 val draft = screenshotState.draft
@@ -882,7 +896,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                         }
                         state.route == ProjectRoute.MEDIA -> {
                             val targetId = projectId
-                            if (scopeReady) MediaScreen(media, projects::back) { input ->
+                            if (scopeReady) MediaScreen(media, projects::back, manualTimeInputs = manualTimeInputs) { input ->
                                 projects.saveReviewedStep(targetId, input)
                             } else ScreenEmpty("素材未就绪", "请返回项目重新打开素材。", "返回", projects::back)
                         }
