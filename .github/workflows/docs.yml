@@ -754,6 +754,8 @@ jobs:
               ("com.tapscene.ui.AiAnnotationEditsTest", "multipleAnnotationsOnOneVisitRejectApplyAndRemovalDespiteDifferentRegions"): 1,
               ("com.tapscene.ui.AiAnnotationEditsTest", "effectLimitBlocksOnlyAdditionNotTextUpdatesOrRemoval"): 1,
               ("com.tapscene.ui.shell.ProjectStorageNavigationHostTest", "sameTitleProjectsOpenTheirOwnSourcesAndLateCallbacksDoNotReopenOrStackNavigation"): 1,
+              ("com.tapscene.ui.shell.ProjectStorageNavigationHostTest", "projectMenuOnlyOffersHostingInTheExplicitDevelopmentVariant"): 1,
+              ("com.tapscene.ui.shell.ProjectStorageNavigationHostTest", "landscapeProjectMenuKeepsEveryLocalActionReachable"): 1,
               ("com.tapscene.ui.shell.ProjectStorageNavigationHostTest", "unreadableUsageStillOpensOwningProjectSourcesAndExplicitReloadRecoversOriginalRecord"): 1,
               ("com.tapscene.ui.shell.OfflineImportPlaybackHostTest", "repeatedOlderSameTitleImportOpensExactVersionAndExitBackAndReadFailureReturnToLibrary"): 1,
               ("com.tapscene.ui.shell.OfflineImportPlaybackHostTest", "repeatedLocalPackageRetainsProvenanceAndBackCancelsBlockedPlayerRead"): 1,

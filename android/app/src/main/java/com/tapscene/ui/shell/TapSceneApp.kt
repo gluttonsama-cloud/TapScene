@@ -1224,14 +1224,14 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                     }
                 }, confirmButton = { TextButton(onClick = { showUnsavedSteps = false }) { Text("关闭") } })
             if (projectMore) AlertDialog(onDismissRequest = { projectMore = false }, title = { Text("项目") }, text = {
-                Column {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
                     ShellActionRow("项目文字", "名称与随包交付的开场说明", enabled = !unavailable && !mediaState.busy,
                         onClick = { projectMore = false; projects.clearMessage(); renaming = state.project?.project })
                     ShellActionRow("复制项目", "复制已保存内容，独立编辑", enabled = !unavailable && !mediaState.busy,
                         onClick = { projectMore = false; state.project?.project?.id?.let(copyProject) })
                     ShellActionRow("动画计划", "保留并编辑完整访问与效果", onClick = { projectMore = false; openDraftAi() })
                     ShellActionRow("任务详情", onClick = { projectMore = false; push("task") })
-                    ShellActionRow("托管版本", onClick = { projectMore = false; push("versions") })
+                    if (BuildConfig.HOSTED_ENABLED) ShellActionRow("托管版本", onClick = { projectMore = false; push("versions") })
                     ShellActionRow("删除项目", enabled = !unavailable && !mediaState.busy,
                         onClick = { projectMore = false; deletingProject = state.project?.project })
                 }

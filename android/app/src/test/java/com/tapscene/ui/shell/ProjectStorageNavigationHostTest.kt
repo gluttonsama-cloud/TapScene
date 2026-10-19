@@ -1,10 +1,13 @@
 package com.tapscene.ui.shell
 
 import android.app.Application
+import androidx.activity.ComponentDialog
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModelProvider
+import com.tapscene.BuildConfig
 import com.tapscene.MainActivity
 import com.tapscene.data.HostFileSyncShadow
 import com.tapscene.data.HostSqlite
@@ -29,6 +32,7 @@ import org.junit.rules.ExternalResource
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.shadows.ShadowDialog
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.annotation.LooperMode
@@ -69,6 +73,56 @@ class ProjectStorageNavigationHostTest {
         }
     }
     @get:Rule(order = 1) val compose = createAndroidComposeRule<MainActivity>()
+
+    @Test fun projectMenuOnlyOffersHostingInTheExplicitDevelopmentVariant() = checkProjectMenu()
+
+    @Test
+    @Config(qualifiers = "w740dp-h360dp-xhdpi")
+    fun landscapeProjectMenuKeepsEveryLocalActionReachable() = checkProjectMenu()
+
+    private fun checkProjectMenu() {
+        val host = host()
+        val project = runBlocking(Dispatchers.IO) {
+            ProjectStore.withTemporary(host.app) { it.createProject("本机项目菜单", "只显示当前版本可用的操作") }
+        }
+        reload(host)
+        compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText(project.project.title))
+        compose.onNodeWithText(project.project.title).performClick()
+        awaitIdle(host)
+        assertEquals(project.project.id, host.projects.state.value.project?.project?.id)
+        compose.onNodeWithText("更多").assertIsEnabled().performClick()
+        val inMenu = hasAnyAncestor(isDialog())
+        val closeBounds = compose.onNodeWithText("关闭").fetchSemanticsNode().boundsInRoot
+        fun checkReachable(label: String) {
+            val row = compose.onNode(hasText(label) and inMenu)
+            row.performScrollTo().assertIsDisplayed().assertIsEnabled().assertHeightIsAtLeast(48.dp)
+            assertTrue("$label must retain a complete 48 dp visible touch target",
+                row.fetchSemanticsNode().boundsInRoot.height >= with(compose.density) { 48.dp.toPx() })
+            assertEquals("Closing stays outside the scrolling menu", closeBounds,
+                compose.onNodeWithText("关闭").fetchSemanticsNode().boundsInRoot)
+        }
+        listOf("项目文字", "复制项目", "动画计划", "任务详情", "删除项目").forEach {
+            checkReachable(it)
+        }
+        val hosting = compose.onNode(hasText("托管版本") and inMenu)
+        if (BuildConfig.HOSTED_ENABLED) checkReachable("托管版本")
+        else hosting.assertDoesNotExist()
+        compose.onNodeWithText("关闭").assertIsDisplayed().performClick()
+        compose.onNode(isDialog()).assertDoesNotExist()
+        compose.onNodeWithText("更多").performClick()
+        if (BuildConfig.HOSTED_ENABLED) checkReachable("托管版本") else hosting.assertDoesNotExist()
+        // A modal owns its own Back dispatcher; dispatching to the Activity would bypass it.
+        compose.runOnIdle {
+            val dialog = ShadowDialog.getLatestDialog() as ComponentDialog
+            assertTrue(dialog.isShowing)
+            dialog.onBackPressedDispatcher.onBackPressed()
+        }
+        compose.onNodeWithText("关闭").assertDoesNotExist()
+        compose.onNodeWithText("分镜").assertIsDisplayed()
+        assertEquals(ProjectRoute.STEPS, host.projects.state.value.route)
+        assertEquals(project, ProjectStore.withTemporary(host.app) { it.readProject(project.project.id) })
+        println("HOST_PROJECT_MENU hosted=${BuildConfig.HOSTED_ENABLED}; no hosting connection requested")
+    }
 
     @Test fun sameTitleProjectsOpenTheirOwnSourcesAndLateCallbacksDoNotReopenOrStackNavigation() {
         val host = host()
