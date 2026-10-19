@@ -440,6 +440,7 @@ jobs:
             --tests com.tapscene.ui.shell.ManualMaskRecoveryHostTest \
             --tests com.tapscene.ui.shell.RecordingOwnerNavigationHostTest \
             --tests com.tapscene.ui.shell.ProjectTextEditingHostTest \
+            --tests com.tapscene.ui.shell.ReviewDeliveryJourneyHostTest \
             --tests com.tapscene.ui.shell.DeliveryIssueNavigationHostTest \
             --tests com.tapscene.ui.shell.StepDeletionConfirmationHostTest \
             --tests com.tapscene.ui.shell.CopiedAnimationReadinessHostTest \
@@ -726,6 +727,7 @@ jobs:
               ("com.tapscene.ui.shell.DeliveryIssueNavigationHostTest", "unreachableCopiedTerminalRepairsIncomingHotspotOnlyAfterExplicitSave"): 1,
               ("com.tapscene.ui.shell.ProjectTextEditingHostTest", "fixedReviewEditsCurrentSourceTextByIdAndRebuildsOnlyAfterExplicitConfirmation"): 1,
               ("com.tapscene.ui.shell.ProjectTextEditingHostTest", "selectedSealedVersionSurvivesProjectTextSaveAndComparesOnlyItsLoadedSource"): 1,
+              ("com.tapscene.ui.shell.ReviewDeliveryJourneyHostTest", "projectChecksReviewTraversalSealAndSaveUseTheSameFixedPackage"): 1,
               ("com.tapscene.ui.shell.AiImportNavigationHostTest", "busyBackPreservesImportAndOnlyExplicitCancelReachesDestructiveCallback"): 1,
               ("com.tapscene.ui.shell.AiImportDifferenceIdentityHostTest", "reviewUsesEachVersionsNamesOrderAndDeletedHotspotWithoutCommitting"): 1,
               ("com.tapscene.ui.shell.AiImportDifferenceIdentityHostTest", "missingMismatchedAndIncompleteSnapshotsNeverBorrowTheOtherSidesIdentity"): 1,
