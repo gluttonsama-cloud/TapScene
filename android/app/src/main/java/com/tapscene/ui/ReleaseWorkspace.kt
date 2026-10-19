@@ -11,6 +11,9 @@ import com.tapscene.data.ReleaseCandidate
 import com.tapscene.data.ReleaseDeletionState
 import com.tapscene.data.ReleaseStore
 import com.tapscene.data.ReleaseSummary
+import com.tapscene.data.AiConfigurationOpen
+import com.tapscene.data.ImportedAiConfigurationSnapshot
+import com.tapscene.data.ImportedAiConfigurationState
 import com.tapscene.data.PlaybackOpen
 import com.tapscene.data.PlaybackSession
 import com.tapscene.sharing.OfflineShare
@@ -121,6 +124,9 @@ data class DeliverySelection(val releaseId: String, val contentDigest: String, v
 /** A failed result read never authorizes another deletion; retry only checks/finishes its commit. */
 data class ReleaseDeletionCheck(val release: ReleaseSummary, val cleanupPending: Boolean = false)
 
+/** A retained file is local metadata, not configuration supplied by the imported viewer package. */
+data class AiConfigurationChoice(val owner: String, val source: AiConfigurationOpen)
+
 data class ReleaseUiState(
     val releases: List<ReleaseSummary> = emptyList(),
     val pendingCandidates: List<ReleaseCandidate> = emptyList(),
@@ -147,6 +153,11 @@ data class ReleaseUiState(
     val aiConfiguration: AiPackageConfiguration? = null,
     /** Changes since the last confirmed load/save; cancellation may leave disk outcome unknown. */
     val aiConfigurationChanged: Boolean = false,
+    val aiConfigurationChoice: AiConfigurationChoice? = null,
+    val aiConfigurationOwner: String? = null,
+    val aiReplacesRetainedConfiguration: Boolean = false,
+    /** A save was started; until readback settles it, editing/export cannot assume no commit. */
+    val aiSaveNeedsCheck: Boolean = false,
 ) {
     val deliveryRelease: ReleaseSummary? get() = deliverySelection?.let { selected ->
         releases.singleOrNull { it.id == selected.releaseId && it.contentDigest == selected.contentDigest && it.origin == "local" }
@@ -171,6 +182,9 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     private var reviewVideoTask: Job? = null
     private var reviewRunSequence = 0L
     private var aiConfigurationBaseline: AiPackageConfiguration? = null
+    private var aiConfigurationSource: AiConfigurationOpen? = null
+    private var aiConfigurationGeneration = 0L
+    private var aiSaveCheck: AiSaveCheck? = null
     private var exportDigest: String? = null
     private var exportLength: Long? = null
     private var pendingExportFile: File? = null
@@ -656,9 +670,11 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         withContext(Dispatchers.Main) {
             if (result in setOf(ReleaseDeletionState.DELETED, ReleaseDeletionState.CLEANUP_PENDING)) {
                 if (aiConfigurationBaseline?.scene?.matches(expected) == true) aiConfigurationBaseline = null
+                val removeAiSource = aiConfigurationSource?.summary?.sameBinding(expected) == true
+                if (removeAiSource) { aiConfigurationSource = null; aiSaveCheck = null; aiConfigurationGeneration++ }
                 mutableState.update { current ->
                     val removePlayer = current.player?.let { it.candidateId == null && it.scene.matches(expected) } == true
-                    val removeAi = current.aiConfiguration?.scene?.matches(expected) == true
+                    val removeAi = removeAiSource || current.aiConfiguration?.scene?.matches(expected) == true
                     current.copy(
                         releases = current.releases.filterNot { it.sameBinding(expected) },
                         player = current.player.takeUnless { removePlayer },
@@ -671,6 +687,10 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
                         },
                         aiConfiguration = current.aiConfiguration.takeUnless { removeAi },
                         aiConfigurationChanged = current.aiConfigurationChanged && !removeAi,
+                        aiConfigurationChoice = current.aiConfigurationChoice.takeUnless { removeAi },
+                        aiConfigurationOwner = current.aiConfigurationOwner.takeUnless { removeAi },
+                        aiReplacesRetainedConfiguration = current.aiReplacesRetainedConfiguration && !removeAi,
+                        aiSaveNeedsCheck = current.aiSaveNeedsCheck && !removeAi,
                     )
                 }
             }
@@ -805,23 +825,60 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         // Keep the snapshot for receivers that open asynchronously. There is no delivery receipt.
     }
 
-    fun openAiPackage(id: String) = execute("读取固定版本与动画配置") {
-        aiConfigurationBaseline = null
-        mutableState.update { it.copy(aiConfiguration = null, aiConfigurationChanged = false) }
-        val scene = withContext(Dispatchers.IO) { store.loadRelease(id) }
-        val saved = withContext(Dispatchers.IO) { store.readAiPlan(id) }
-        val fromDraft = withContext(Dispatchers.IO) { store.hasDraftAiPlan(id) }
-        val config = if (saved == null) AiPackageConfiguration(scene, listOf(RenderPlan.Visit(java.util.UUID.randomUUID().toString(), scene.startStateId, null, 90)))
-            else AiPackageConfiguration(scene, saved.visits, saved.effects, saved.width, saved.height, fromDraft)
-        aiConfigurationBaseline = config
-        mutableState.update { it.copy(aiConfiguration = config, aiConfigurationChanged = false) }
+    fun openAiPackage(id: String) {
+        if (state.value.aiSaveNeedsCheck) { message("请先核对保存结果，或明确离开当前编辑后再选择版本。"); return }
+        execute("读取固定版本与动画配置") {
+            val generation = ++aiConfigurationGeneration
+            // A failed read must leave the previous editor, its baseline and unapplied input intact.
+            val source = withContext(Dispatchers.IO) { store.openAiConfiguration(id) }
+            if (generation != aiConfigurationGeneration) return@execute
+            val owner = "$id:$generation"
+            aiConfigurationSource = source
+            aiSaveCheck = null
+            if (source.importedSnapshot?.byteLength != null) {
+                aiConfigurationBaseline = source.plan?.let { configuration(source, it) }
+                mutableState.update { it.copy(aiConfiguration = null, aiConfigurationChanged = false,
+                    aiConfigurationChoice = AiConfigurationChoice(owner, source), aiConfigurationOwner = owner,
+                    aiReplacesRetainedConfiguration = true, aiSaveNeedsCheck = false) }
+                return@execute
+            }
+            val config = configuration(source, source.plan)
+            aiConfigurationBaseline = config
+            mutableState.update { it.copy(aiConfiguration = config, aiConfigurationChanged = false,
+                aiConfigurationChoice = null, aiConfigurationOwner = owner,
+                aiReplacesRetainedConfiguration = false, aiSaveNeedsCheck = false) }
+        }
     }
 
+    private fun configuration(source: AiConfigurationOpen, plan: RenderPlan?): AiPackageConfiguration =
+        if (plan == null) AiPackageConfiguration(source.scene,
+            listOf(RenderPlan.Visit(java.util.UUID.randomUUID().toString(), source.scene.startStateId, null, 90)))
+        else AiPackageConfiguration(source.scene, plan.visits, plan.effects, plan.width, plan.height, source.fromDraft)
+
+    fun chooseAiConfiguration(owner: String, useRetained: Boolean) {
+        if (state.value.busy || savePickerPending) return
+        val choice = state.value.aiConfigurationChoice?.takeIf { it.owner == owner } ?: return
+        if (useRetained && choice.source.plan == null) return
+        val config = configuration(choice.source, choice.source.plan.takeIf { useRetained })
+        val changed = aiConfigurationBaseline?.let { !config.sameAnimation(it) } ?: true
+        mutableState.update { it.copy(aiConfiguration = config, aiConfigurationChoice = null,
+            aiConfigurationChanged = changed, message = null) }
+    }
+
+    /** Actual departure ends the editor, but never cancels a task, export or file-picker owner. */
+    fun leaveAiPage() = resetAiEditor()
+
     fun clearAiConfiguration() {
-        if (!state.value.busy && !savePickerPending) {
-            aiConfigurationBaseline = null
-            mutableState.update { it.copy(aiConfiguration = null, aiConfigurationChanged = false) }
-        }
+        if (!state.value.busy && !savePickerPending) resetAiEditor()
+    }
+
+    private fun resetAiEditor() {
+        aiConfigurationGeneration++
+        aiConfigurationBaseline = null
+        aiConfigurationSource = null; aiSaveCheck = null
+        mutableState.update { it.copy(aiConfiguration = null, aiConfigurationChanged = false,
+            aiConfigurationChoice = null, aiConfigurationOwner = null,
+            aiReplacesRetainedConfiguration = false, aiSaveNeedsCheck = false) }
     }
 
     fun chooseAiEdge(edgeId: String) = editAi { config ->
@@ -878,7 +935,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         }
     }
     private fun editAi(change: (AiPackageConfiguration) -> AiPackageConfiguration) {
-        if (state.value.busy || savePickerPending) return
+        if (state.value.busy || savePickerPending || state.value.aiSaveNeedsCheck) return
         val config = state.value.aiConfiguration ?: return
         if (config.fromDraft) { message("此计划随草稿封存，请回项目的动画计划调整后重新封存。"); return }
         try {
@@ -889,18 +946,79 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         catch (error: IllegalStateException) { message(error.message ?: "动画配置无效。") }
         catch (error: IllegalArgumentException) { message(error.message ?: "动画配置无效。") }
     }
-    fun prepareAiExport() = execute("生成并回读验证 AI 数据包") {
+    fun prepareAiExport() {
+        if (state.value.aiSaveNeedsCheck) { message("请先核对上次保存结果。"); return }
+        val source = aiConfigurationSource?.takeIf { it.importedSnapshot != null }
+        if (source == null) { prepareLocalAiExport(); return }
+        val config = state.value.aiConfiguration ?: return
+        val owner = state.value.aiConfigurationOwner ?: return
+        val plan = runCatching { config.resolve() }.getOrElse { message("请先选好播放顺序并检查效果。"); return }
+        val check = AiSaveCheck(owner, source, config, plan)
+        execute("生成并回读验证 AI 数据包", settle = { failure -> settleImportedAiSave(check, failure) }) {
+            aiSaveCheck = check
+            mutableState.update { it.copy(aiSaveNeedsCheck = true, exportFile = null) }
+            exportDigest = null; exportLength = null; pendingExportFile = null; exportDeliverySelection = null
+            val file = withContext(Dispatchers.IO) {
+                store.exportImportedAiRelease(source.summary, checkNotNull(source.importedSnapshot), plan)
+            }
+            exportDigest = withContext(Dispatchers.IO) { ViewerPackageCodec.sha256(file) }; exportLength = file.length()
+            mutableState.update { it.copy(exportFile = file) }
+        }
+    }
+
+    private fun prepareLocalAiExport() = execute("生成并回读验证 AI 数据包") {
         val config = state.value.aiConfiguration ?: error("请先选择固定版本。")
         val plan = config.resolve()
         exportDigest = null; exportLength = null; pendingExportFile = null; exportDeliverySelection = null
         mutableState.update { it.copy(exportFile = null) }
-        val file = withContext(Dispatchers.IO) { store.exportAiRelease(config.scene.releaseId, plan) }
+        val source = checkNotNull(aiConfigurationSource) { "请重新选择固定版本。" }
+        val file = withContext(Dispatchers.IO) { store.exportAiRelease(config.scene.releaseId, plan, expectedLocal = source.summary) }
         // The store has confirmed its local configuration write, before hashing or the system picker.
         aiConfigurationBaseline = config
         mutableState.update { it.copy(aiConfigurationChanged = false) }
         exportDigest = withContext(Dispatchers.IO) { ViewerPackageCodec.sha256(file) }; exportLength = file.length()
         mutableState.update { it.copy(exportFile = file) }
     }
+
+    fun recheckAiSave() {
+        val pending = aiSaveCheck ?: return
+        execute("核对本机动画配置", settle = { failure -> settleImportedAiSave(pending, failure) }) {}
+    }
+
+    private suspend fun settleImportedAiSave(check: AiSaveCheck, failure: Throwable?) {
+        val result = runCatching { store.inspectImportedAiConfiguration(check.source.summary,
+            checkNotNull(check.source.importedSnapshot), check.plan) }.getOrNull()
+        withContext(Dispatchers.Main) {
+            if (state.value.aiConfigurationOwner != check.owner || aiSaveCheck !== check) return@withContext
+            val matches = result == ImportedAiConfigurationState.MATCHES_TARGET
+            val unchanged = result == ImportedAiConfigurationState.PREVIOUS_UNCHANGED
+            if (matches) {
+                val bytes = check.plan.toBytes()
+                val digest = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+                aiConfigurationSource = check.source.copy(plan = check.plan,
+                    importedSnapshot = ImportedAiConfigurationSnapshot(bytes.size.toLong(), digest))
+                aiConfigurationBaseline = check.config
+            }
+            if (matches || unchanged) aiSaveCheck = null
+            if (!matches || failure != null) {
+                exportDigest = null; exportLength = null; pendingExportFile = null
+            }
+            val note = when {
+                matches && failure == null && state.value.exportFile != null -> "已核对，本机配置与本页一致；接下来选择保存位置。"
+                matches -> "已核对，本机配置与本页一致；动画包尚未另存。"
+                unchanged -> "已核对，本机配置仍是保存前的内容。本页输入保留，可检查后重试。"
+                result == ImportedAiConfigurationState.CHANGED_OR_REPLACED -> "版本或本机配置已变化，未继续覆盖。本页输入保留，请重新核对；返回后可重新选择配置来源。"
+                else -> "暂时无法核对本机配置的保存结果。本页输入保留，请重新核对；不要重复保存。"
+            }
+            mutableState.update { it.copy(aiSaveNeedsCheck = !matches && !unchanged,
+                aiConfigurationChanged = if (matches) false else it.aiConfigurationChanged,
+                aiReplacesRetainedConfiguration = matches || it.aiReplacesRetainedConfiguration,
+                exportFile = it.exportFile.takeIf { matches && failure == null }, message = note) }
+        }
+    }
+
+    private data class AiSaveCheck(val owner: String, val source: AiConfigurationOpen,
+        val config: AiPackageConfiguration, val plan: RenderPlan)
 
     fun beginExportPicker(deliveryPageVisible: Boolean = true): Boolean {
         val selected = exportDeliverySelection

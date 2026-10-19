@@ -54,9 +54,9 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     )) { mutableStateListOf<String>() }
     val page = pages.lastOrNull()
     // A task banner may temporarily cover AI configuration. Retain its unapplied input only
-    // while that route remains on the stack, and never restore it into another fixed version.
+    // while that route remains on the stack, and never restore it into another editor owner.
     val aiRouteState = rememberSaveableStateHolder()
-    val aiStateKey = "ai:${releaseState.aiConfiguration?.scene?.releaseId.orEmpty()}"
+    val aiStateKey = "ai:${(releaseState.aiConfigurationOwner ?: releaseState.aiConfiguration?.scene?.releaseId).orEmpty()}"
     val aiInStack = "ai" in pages
     var retainedAiStateKey by rememberSaveable { mutableStateOf<String?>(null) }
     var aiPendingInput by rememberSaveable(aiStateKey) { mutableStateOf(false) }
@@ -65,22 +65,27 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
         retainedAiStateKey = if (aiInStack) aiStateKey else null
         if (!aiInStack) aiPendingInput = false
     }
+    LaunchedEffect(aiInStack) { if (!aiInStack) releases.leaveAiPage() }
     val push: (String) -> Unit = { if (pages.lastOrNull() != it) pages.add(it) }
     val pop: () -> Unit = { if (pages.isNotEmpty()) pages.removeAt(pages.lastIndex) }
     // Temporary task/recording pages may cover AI. Refuse only navigation that would destroy
     // its edited route, never stop/cancel another owner or replay the navigation afterwards.
     val retainAiChanges: (String) -> Boolean = { note ->
         val current = releases.state.value
-        val retain = "ai" in pages && current.aiConfiguration?.fromDraft == false &&
-            (current.aiConfigurationChanged || aiPendingInput)
+        val retain = "ai" in pages && (current.aiSaveNeedsCheck ||
+            (current.aiConfiguration?.fromDraft == false && (current.aiConfigurationChanged || aiPendingInput)))
         if (retain) {
             while (pages.lastOrNull() != "ai") pages.removeAt(pages.lastIndex)
             releases.message(note)
         }
         retain
     }
-    val aiNavigationNote = "请先处理 AI 配置修改，再回到项目；可检查并保存，或返回时明确放弃未保存修改。"
-    val aiRecordingNote = "录屏已保存在本机。请先处理 AI 配置修改，再从所属项目的素材页整理录屏。"
+    val aiNavigationNote = if (releaseState.aiSaveNeedsCheck)
+        "请先核对 AI 配置保存结果，再回到项目；也可从 AI 页返回并明确确认离开。"
+        else "请先处理 AI 配置修改，再回到项目；可检查并保存，或返回时明确放弃未保存修改。"
+    val aiRecordingNote = if (releaseState.aiSaveNeedsCheck)
+        "录屏已保存在本机。请先核对 AI 配置保存结果，再从所属项目的素材页整理录屏。"
+        else "录屏已保存在本机。请先处理 AI 配置修改，再从所属项目的素材页整理录屏。"
     val openCreatedProject: (String) -> Unit = { id ->
         if (!retainAiChanges("已有结果保存在本机。$aiNavigationNote")) {
             pages.clear(); library = false; tab = ProjectTab.STEPS; projects.openProject(id)
@@ -927,11 +932,13 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 onReload = { projectId?.let(aiDrafts::openPlan) }),
                                 onPendingHoldChange = { draftAiPendingHold = it })
                             "ai" -> aiRouteState.SaveableStateProvider(aiStateKey) {
-                                AiPackageScreen(pop, releaseState, releases::openAiPackage, releases::chooseAiEdge,
+                                AiPackageScreen({ releases.clearAiConfiguration(); pop() }, releaseState, releases::openAiPackage, releases::chooseAiEdge,
                                     releases::previousAiVisit, releases::resetAiPath, releases::setAiCanvas, releases::setAiHold,
                                     releases::toggleAiEffect, releases::prepareAiExport,
                                     onApplyAnnotation = releases::applyAiAnnotation, onRemoveAnnotation = releases::removeAiAnnotation,
-                                    onPendingInputChange = { aiPendingInput = it })
+                                    onPendingInputChange = { aiPendingInput = it },
+                                    onChooseConfiguration = releases::chooseAiConfiguration,
+                                    onRecheckSave = releases::recheckAiSave)
                             }
                             "hosted" -> if (BuildConfig.HOSTED_ENABLED) LocalHostingContent(hostingState, hostingActions) else HostingAccountScreen(pop, { push("versions") })
                             "account" -> if (BuildConfig.HOSTED_ENABLED) LocalHostingContent(hostingState, hostingActions) else HostingAccountScreen(pop, { push("versions") })

@@ -14,6 +14,10 @@ import com.tapscene.MainActivity
 import com.tapscene.data.HostFileSyncShadow
 import com.tapscene.data.HostSqlite
 import com.tapscene.data.ReleaseSummary
+import com.tapscene.data.AiConfigurationOpen
+import com.tapscene.data.ImportedAiConfigurationSnapshot
+import com.tapscene.ui.AiConfigurationChoice
+import com.tapscene.packageformat.ViewerPackageCodec
 import com.tapscene.packageformat.RenderPlan
 import com.tapscene.packageformat.ViewerScene
 import com.tapscene.recording.RecordingCoordinator
@@ -439,6 +443,27 @@ class AiAnnotationInputHostTest {
             compose.onNodeWithText("检查并保存").assertIsEnabled()
             compose.onNodeWithText("1 处标注输入未应用 · 返回检查").assertDoesNotExist()
             assertRecordingUnchanged()
+
+            // A clean editor may leave through another task's project action. That is an
+            // actual exit, unlike a temporary cover; a failed new open must not resurrect B.
+            val beforeCleanExit = projectState.value
+            compose.runOnIdle { projectState.value = beforeCleanExit.copy(busy = true, stage = "清洁编辑器离页测试") }
+            compose.onNodeWithText("详情").performClick()
+            compose.onNodeWithText("回到项目").performScrollTo().performClick()
+            compose.onNodeWithText("AI 动画配置").assertDoesNotExist()
+            compose.runOnIdle {
+                assertNull(releaseState.value.aiConfiguration)
+                assertNull(releaseState.value.aiConfigurationOwner)
+                projectState.value = beforeCleanExit
+            }
+            compose.onNodeWithText("配置 AI 数据包").performScrollTo().assertIsEnabled().performClick()
+            settled()
+            compose.onNodeWithText("AI 动画配置").assertIsDisplayed()
+            assertNull(releaseState.value.aiConfiguration)
+            assertNull(releaseState.value.aiConfigurationOwner)
+            check(releaseState.value.message != null) { "The synthetic library row has no release files" }
+            compose.onNodeWithText("检查并保存").assertDoesNotExist()
+            assertRecordingUnchanged()
             HostFileSyncShadow.assertDirectorySyncEvidence()
         } finally {
             try { compose.runOnIdle { releaseState.value = originalReleaseState; projectState.value = originalProjectState } }
@@ -447,6 +472,51 @@ class AiAnnotationInputHostTest {
                 stopRequest.set(null, originalStopRequest)
             } } }
         }
+    }
+
+    @Config(qualifiers = "w320dp-h568dp-xhdpi")
+    @Test fun retainedChoiceUsesExactOwnerAndUnknownSaveRequiresRecheckOrExplicitExit() {
+        val config = configuration(false)
+        val summary = ReleaseSummary(config.scene.releaseId, config.scene.title,
+            ViewerPackageCodec.contentDigest(config.scene), 1, 1, 100, "imported")
+        val source = AiConfigurationOpen(summary, config.scene, config.resolve(), false,
+            ImportedAiConfigurationSnapshot(100, "a".repeat(64)))
+        val state = mutableStateOf(ReleaseUiState(aiConfigurationOwner = "first-session",
+            aiConfigurationChoice = AiConfigurationChoice("first-session", source)))
+        val choices = mutableListOf<Pair<String, Boolean>>()
+        var backs = 0
+        var rechecks = 0
+        var exports = 0
+        compose.activity.setContent { TapSceneTheme { AiPackageScreen(
+            onBack = { backs++ }, state = state.value,
+            onChooseConfiguration = { owner, retained -> choices += owner to retained },
+            onRecheckSave = { rechecks++ }, onExport = { exports++ }) } }
+        compose.onNodeWithText("版本 ID：${summary.id}\n内容 SHA-256：${summary.contentDigest}").assertExists()
+        compose.onNodeWithText("使用保留配置").assertIsDisplayed().assertIsEnabled().performClick()
+        assertEquals(listOf("first-session" to true), choices)
+        compose.runOnIdle { state.value = state.value.copy(aiConfigurationOwner = "next-session",
+            aiConfigurationChoice = AiConfigurationChoice("next-session", source.copy(plan = null))) }
+        compose.onNodeWithText("使用保留配置").assertIsDisplayed().assertIsNotEnabled().performClick()
+        assertEquals(1, choices.size)
+        compose.onNodeWithText("从默认配置开始").assertIsDisplayed().performClick()
+        assertEquals("next-session" to false, choices.last())
+        compose.runOnIdle { state.value = state.value.copy(aiConfiguration = config,
+            aiConfigurationChoice = null, aiSaveNeedsCheck = true, aiConfigurationChanged = true) }
+        compose.onNodeWithText("换一个版本").performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithText("横屏 16:9").performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithText("检查并保存").assertDoesNotExist()
+        compose.onNodeWithText("重新核对保存结果").assertIsEnabled().performClick()
+        assertEquals(1, rechecks)
+        assertEquals(0, exports)
+        compose.runOnIdle { compose.activity.onBackPressedDispatcher.onBackPressed() }
+        compose.onNodeWithText("保存结果尚未确认").assertIsDisplayed()
+        assertEquals(0, backs)
+        compose.onNodeWithText("留在本页").performClick()
+        assertEquals(0, backs)
+        compose.onNodeWithContentDescription("返回").performClick()
+        compose.onNodeWithText("确认返回，不撤销本机配置").performClick()
+        assertEquals(1, backs)
+        assertEquals(0, exports)
     }
 
     private fun configuration(annotation: Boolean, release: String = "A"): AiPackageConfiguration {

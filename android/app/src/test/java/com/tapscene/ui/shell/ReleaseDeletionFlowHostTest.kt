@@ -305,6 +305,11 @@ class ReleaseDeletionFlowHostTest {
     private fun openReferences(workspace: ReleaseWorkspace, fixture: Fixture) {
         compose.runOnIdle { workspace.openAiPackage(fixture.summary.id) }
         awaitIdle(workspace)
+        workspace.state.value.aiConfigurationChoice?.let { choice ->
+            assertNull(workspace.state.value.aiConfiguration)
+            assertNotNull(choice.source.plan)
+            compose.runOnIdle { workspace.chooseAiConfiguration(choice.owner, true) }
+        }
         compose.runOnIdle { workspace.openRelease(fixture.summary.id) }
         awaitIdle(workspace)
         val resume = checkNotNull(workspace.state.value.playbackResume)

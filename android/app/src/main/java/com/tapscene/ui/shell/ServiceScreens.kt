@@ -55,6 +55,7 @@ import kotlinx.coroutines.delay
 import com.tapscene.ui.ProjectIssueCorrection
 import com.tapscene.ui.ProjectIssue
 import com.tapscene.ui.AiPackageConfiguration
+import com.tapscene.ui.AiConfigurationChoice
 import com.tapscene.ui.ReleaseUiState
 import com.tapscene.packageformat.AiPackageCodec
 import com.tapscene.packageformat.RenderPlan
@@ -402,19 +403,24 @@ fun AiPackageScreen(
     onApplyAnnotation: (String, String) -> Unit = { _, _ -> },
     onRemoveAnnotation: (String) -> Unit = {},
     onPendingInputChange: (Boolean) -> Unit = {},
+    onChooseConfiguration: (String, Boolean) -> Unit = { _, _ -> },
+    onRecheckSave: () -> Unit = {},
 ) {
     val config = state.aiConfiguration
+    val owner = state.aiConfigurationOwner ?: config?.scene?.releaseId
+    val retainedChoice = state.aiConfigurationChoice
+    val editingEnabled = !state.busy && !state.aiSaveNeedsCheck
     val resolved = remember(config) { config?.let { runCatching { it.resolve() } } }
     val plan = resolved?.getOrNull()
-    var confirmExport by remember(config) { mutableStateOf(false) }
-    var chooseSource by rememberSaveable { mutableStateOf(false) }
-    var chooseNext by remember(config) { mutableStateOf(false) }
-    var annotationInputs by rememberSaveable(config?.scene?.releaseId) { mutableStateOf(hashMapOf<String, String>()) }
-    var expandedEffects by rememberSaveable(config?.scene?.releaseId) { mutableStateOf(hashSetOf<String>()) }
-    var annotationToLocate by remember(config?.scene?.releaseId) { mutableStateOf<String?>(null) }
-    var discardAnnotationRequested by rememberSaveable(config?.scene?.releaseId) { mutableStateOf(false) }
-    var requestedReleaseId by rememberSaveable(config?.scene?.releaseId) { mutableStateOf<String?>(null) }
-    var busyBackNotice by remember { mutableStateOf(false) }
+    var confirmExport by remember(owner, config) { mutableStateOf(false) }
+    var chooseSource by rememberSaveable(owner) { mutableStateOf(false) }
+    var chooseNext by remember(owner, config) { mutableStateOf(false) }
+    var annotationInputs by rememberSaveable(owner) { mutableStateOf(hashMapOf<String, String>()) }
+    var expandedEffects by rememberSaveable(owner) { mutableStateOf(hashSetOf<String>()) }
+    var annotationToLocate by remember(owner) { mutableStateOf<String?>(null) }
+    var discardAnnotationRequested by rememberSaveable(owner) { mutableStateOf(false) }
+    var requestedReleaseId by rememberSaveable(owner) { mutableStateOf<String?>(null) }
+    var busyBackNotice by remember(owner) { mutableStateOf(false) }
     val annotations = config?.effects.orEmpty().filter { it.type == "annotation" }.groupBy { it.visitId }
     val pendingAnnotations = config?.visits.orEmpty().filter { visit ->
         config?.fromDraft == false && annotations[visit.visitId].orEmpty().size <= 1 &&
@@ -425,7 +431,7 @@ fun AiPackageScreen(
         annotationInputs = HashMap(annotationInputs.filter { (id, text) -> id in visits && text != annotations[id]?.singleOrNull()?.text.orEmpty() })
     }
     val configurationChanged = config?.fromDraft == false && state.aiConfigurationChanged
-    val hasPendingChanges = configurationChanged || pendingAnnotations.isNotEmpty()
+    val hasPendingChanges = configurationChanged || pendingAnnotations.isNotEmpty() || state.aiSaveNeedsCheck
     SideEffect { onPendingInputChange(pendingAnnotations.isNotEmpty()) }
     LaunchedEffect(state.busy) { if (!state.busy) busyBackNotice = false }
     val requestBack: () -> Unit = {
@@ -437,7 +443,7 @@ fun AiPackageScreen(
         }
     }
     // Only the visible AI page handles its Back; no effect cancels another route's work.
-    BackHandler(enabled = state.busy || chooseSource || hasPendingChanges, onBack = requestBack)
+    BackHandler(onBack = requestBack)
     val last = config?.visits?.lastOrNull()
     val lastStep = config?.scene?.states?.firstOrNull { it.id == last?.stateId }
     val needsNext = last != null && last.selectedEdgeId == null && lastStep?.terminal == false
@@ -450,8 +456,11 @@ fun AiPackageScreen(
         Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp)) {
             state.message?.let { Text(it, color = ShellColors.Accent) }
+            if (state.aiSaveNeedsCheck && state.message == null) Text("暂时无法确认上次配置是否已写入本机。编辑、换版本和导出已暂停，请重新核对保存结果；返回不会撤销已经写入的本机配置。", color = ShellColors.Accent)
             DetailSection("演示版本") {
-                if (config == null || chooseSource) {
+                if (retainedChoice != null) {
+                    AiRetainedConfigurationChoice(retainedChoice, editingEnabled, onChooseConfiguration, requestBack, showActions = false)
+                } else if (config == null || chooseSource) {
                     if (state.releases.isEmpty()) Text("先完成成品复核与封存，再选择固定版本。", color = ShellColors.Muted)
                     state.releases.forEach { item ->
                         ShellActionRow(item.title, "${item.stepCount} 个步骤 · ${formatReleaseDate(item.sealedAt)} · ${if (item.origin == "local") "本机成品" else "导入版本"}",
@@ -459,20 +468,20 @@ fun AiPackageScreen(
                                 if (item.id == config?.scene?.releaseId) chooseSource = false
                                 else if (hasPendingChanges) { requestedReleaseId = item.id; discardAnnotationRequested = true }
                                 else { chooseSource = false; onChooseRelease(item.id) }
-                            }, enabled = !state.busy)
+                            }, enabled = editingEnabled)
                     }
                 } else {
                     ShellLabelValue("版本", config.scene.title)
                     Text("${config.scene.states.size} 个步骤 · ${config.scene.regions.size} 个可用区域", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-                    TextButton(onClick = { chooseSource = true }, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("换一个版本") }
+                    TextButton(onClick = { chooseSource = true }, enabled = editingEnabled, modifier = Modifier.heightIn(min = 48.dp)) { Text("换一个版本") }
                 }
             }
-            if (config != null && !chooseSource) {
+            if (config != null && retainedChoice == null && !chooseSource) {
                 if (config.fromDraft) Text("此计划随草稿封存。需要调整时，请回项目的动画计划编辑并重新封存。", color = ShellColors.Muted)
                 DetailSection("画面方向", "选择生成视频的横竖方向。") {
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        OutlinedButton(onClick = { onCanvas(false) }, enabled = !state.busy && !config.fromDraft, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("${if (config.width == 1080) "✓ " else ""}竖屏 9:16") }
-                        OutlinedButton(onClick = { onCanvas(true) }, enabled = !state.busy && !config.fromDraft, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("${if (config.width == 1920) "✓ " else ""}横屏 16:9") }
+                        OutlinedButton(onClick = { onCanvas(false) }, enabled = editingEnabled && !config.fromDraft, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("${if (config.width == 1080) "✓ " else ""}竖屏 9:16") }
+                        OutlinedButton(onClick = { onCanvas(true) }, enabled = editingEnabled && !config.fromDraft, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("${if (config.width == 1920) "✓ " else ""}横屏 16:9") }
                     }
                 }
                 DetailSection("播放顺序", "逐步选择接下来播放的内容，也可以返回之前的步骤。视频最长 10 分钟。") {
@@ -489,21 +498,21 @@ fun AiPackageScreen(
                             Text("${index + 1}. ${step.title}", style = MaterialTheme.typography.titleSmall)
                             Text(edge?.let { "接着：${it.label}" } ?: if (step.terminal) "播放到这里结束" else "请选择下一步", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedButton(onClick = { onHold(visit.visitId, maxOf(1, visit.holdFrames - 30)) }, enabled = !state.busy && !config.fromDraft && visit.holdFrames > 1, modifier = Modifier.heightIn(min = 48.dp)) { Text("− 1 秒") }
+                                OutlinedButton(onClick = { onHold(visit.visitId, maxOf(1, visit.holdFrames - 30)) }, enabled = editingEnabled && !config.fromDraft && visit.holdFrames > 1, modifier = Modifier.heightIn(min = 48.dp)) { Text("− 1 秒") }
                                 Text("停留 ${aiSeconds(visit.holdFrames)} 秒", modifier = Modifier.weight(1f))
-                                OutlinedButton(onClick = { onHold(visit.visitId, minOf(RenderPlan.MAX_HOLD_FRAMES, visit.holdFrames + 30)) }, enabled = !state.busy && !config.fromDraft && visit.holdFrames < RenderPlan.MAX_HOLD_FRAMES, modifier = Modifier.heightIn(min = 48.dp)) { Text("+ 1 秒") }
+                                OutlinedButton(onClick = { onHold(visit.visitId, minOf(RenderPlan.MAX_HOLD_FRAMES, visit.holdFrames + 30)) }, enabled = editingEnabled && !config.fromDraft && visit.holdFrames < RenderPlan.MAX_HOLD_FRAMES, modifier = Modifier.heightIn(min = 48.dp)) { Text("+ 1 秒") }
                             }
                             effects.forEach { Text(aiEffectLabel(config, it), style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted) }
                             TextButton(onClick = { expandedEffects = HashSet(expandedEffects).apply { if (showEffects) remove(visit.visitId) else add(visit.visitId) } },
-                                enabled = !config.fromDraft, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (showEffects) "收起效果" else if (effects.isEmpty()) "添加效果" else "调整效果") }
+                                enabled = editingEnabled && !config.fromDraft, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (showEffects) "收起效果" else if (effects.isEmpty()) "添加效果" else "调整效果") }
                             if (showEffects && !config.fromDraft) {
-                                if (edge?.hotspotId != null) TextButton(onClick = { onEffect(visit.visitId, "click", null, null) }, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("${if (effects.any { it.type == "click" }) "✓ " else ""}点击提示") }
-                                if (edge?.toStateId != null && edge.transitionAssetId == null) TextButton(onClick = { onEffect(visit.visitId, "transition", null, null) }, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("${if (effects.any { it.type == "transition" }) "✓ " else ""}平滑切换到下一步") }
+                                if (edge?.hotspotId != null) TextButton(onClick = { onEffect(visit.visitId, "click", null, null) }, enabled = editingEnabled, modifier = Modifier.heightIn(min = 48.dp)) { Text("${if (effects.any { it.type == "click" }) "✓ " else ""}点击提示") }
+                                if (edge?.toStateId != null && edge.transitionAssetId == null) TextButton(onClick = { onEffect(visit.visitId, "transition", null, null) }, enabled = editingEnabled, modifier = Modifier.heightIn(min = 48.dp)) { Text("${if (effects.any { it.type == "transition" }) "✓ " else ""}平滑切换到下一步") }
                                 config.scene.regions.filter { it.stateId == visit.stateId }.forEach { region ->
                                     Text("区域：${region.name}", style = MaterialTheme.typography.bodySmall)
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         listOf("focus" to "聚焦", "highlight" to "高亮").forEach { (type, label) ->
-                                            OutlinedButton(onClick = { onEffect(visit.visitId, type, region.id, null) }, enabled = !state.busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("${if (effects.any { it.type == type && it.regionId == region.id }) "✓ " else ""}$label") }
+                                            OutlinedButton(onClick = { onEffect(visit.visitId, type, region.id, null) }, enabled = editingEnabled, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("${if (effects.any { it.type == type && it.regionId == region.id }) "✓ " else ""}$label") }
                                         }
                                     }
                                 }
@@ -512,7 +521,7 @@ fun AiPackageScreen(
                                 }
                                 if (existingAnnotations.size > 1) Text("此访问包含多条标注，请回草稿逐项编辑后重新封存。", color = ShellColors.Accent)
                                 else {
-                                    AiAnnotationEditor(annotation, annotationPending, !state.busy, existingAnnotations.isNotEmpty(),
+                                    AiAnnotationEditor(annotation, annotationPending, editingEnabled, existingAnnotations.isNotEmpty(),
                                         onText = { text -> annotationInputs = HashMap(annotationInputs).apply { put(visit.visitId, text) } },
                                         onApply = { onApplyAnnotation(visit.visitId, annotation) },
                                         onRestore = { annotationInputs = HashMap(annotationInputs).apply { remove(visit.visitId) } },
@@ -527,8 +536,8 @@ fun AiPackageScreen(
                     }
                     if (!needsNext) Text("已选好播放顺序", color = ShellColors.Accent)
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        TextButton(onClick = onPrevious, enabled = !state.busy && !config.fromDraft && pendingAnnotations.isEmpty() && (config.visits.size > 1 || last?.selectedEdgeId != null), modifier = Modifier.heightIn(min = 48.dp)) { Text("撤回最后一步") }
-                        TextButton(onClick = onReset, enabled = !state.busy && !config.fromDraft && pendingAnnotations.isEmpty(), modifier = Modifier.heightIn(min = 48.dp)) { Text("重新选择") }
+                        TextButton(onClick = onPrevious, enabled = editingEnabled && !config.fromDraft && pendingAnnotations.isEmpty() && (config.visits.size > 1 || last?.selectedEdgeId != null), modifier = Modifier.heightIn(min = 48.dp)) { Text("撤回最后一步") }
+                        TextButton(onClick = onReset, enabled = editingEnabled && !config.fromDraft && pendingAnnotations.isEmpty(), modifier = Modifier.heightIn(min = 48.dp)) { Text("重新选择") }
                     }
                 }
                 DetailSection("保存前检查") {
@@ -540,37 +549,46 @@ fun AiPackageScreen(
                 }
             }
         }
-        if (config != null && !chooseSource) {
+        if (retainedChoice != null) {
+            ShellDivider()
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+                AiRetainedConfigurationActions(retainedChoice, editingEnabled, onChooseConfiguration)
+            }
+        } else if (config != null && !chooseSource) {
             ShellDivider()
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (pendingAnnotations.isNotEmpty()) TextButton(onClick = {
                     val id = pendingAnnotations.first().visitId
                     expandedEffects = HashSet(expandedEffects).apply { add(id) }; annotationToLocate = id
                 }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("${pendingAnnotations.size} 处标注输入未应用 · 返回检查") }
-                if (configurationChanged) Text("已应用的修改仍需检查并保存。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Accent)
+                if (state.aiSaveNeedsCheck) Text("保存结果待核对，尚不能继续编辑或导出。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Accent)
+                else if (configurationChanged) Text("已应用的修改仍需检查并保存。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Accent)
                 Text("${config.visits.size} 步 / ${if (plan != null) "总时长" else "当前时长"} ${
                     (plan?.totalFrames ?: selectedFrames)?.let { "约 ${aiSeconds(it)} 秒" } ?: "待检查"
                 }", style = MaterialTheme.typography.labelMedium, color = ShellColors.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Button(onClick = { if (needsNext) chooseNext = true else confirmExport = true },
-                    enabled = !state.busy && pendingAnnotations.isEmpty() && (needsNext || plan != null), shape = RoundedCornerShape(8.dp),
+                Button(onClick = { if (state.aiSaveNeedsCheck) onRecheckSave() else if (needsNext) chooseNext = true else confirmExport = true },
+                    enabled = !state.busy && (state.aiSaveNeedsCheck || (pendingAnnotations.isEmpty() && (needsNext || plan != null))), shape = RoundedCornerShape(8.dp),
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                    Text(if (needsNext) "接着播放" else "检查并保存")
+                    Text(if (state.aiSaveNeedsCheck) "重新核对保存结果" else if (needsNext) "接着播放" else "检查并保存")
                 }
             }
         }
     }
     if (discardAnnotationRequested) AiConfigurationExitDialog(
         configurationChanged = configurationChanged,
-        destination = requestedReleaseId?.let { id -> state.releases.firstOrNull { it.id == id } },
+        destination = requestedReleaseId?.takeUnless { state.aiSaveNeedsCheck }?.let { id -> state.releases.firstOrNull { it.id == id } },
         enabled = !state.busy,
-        destinationId = requestedReleaseId,
+        destinationId = requestedReleaseId.takeUnless { state.aiSaveNeedsCheck },
+        saveNeedsCheck = state.aiSaveNeedsCheck,
         onContinue = { discardAnnotationRequested = false; requestedReleaseId = null; chooseSource = false },
         onDiscard = {
-            val next = requestedReleaseId
+            val next = requestedReleaseId.takeUnless { state.aiSaveNeedsCheck }
             if (next == null || state.releases.any { it.id == next }) {
-                discardAnnotationRequested = false; requestedReleaseId = null; annotationInputs = hashMapOf()
+                discardAnnotationRequested = false; requestedReleaseId = null
                 chooseSource = false
-                if (next != null) onChooseRelease(next) else onBack()
+                // A failed source read keeps the current editor and its inputs. A successful
+                // read changes owner and resets them; actual departure is the explicit discard.
+                if (next != null) onChooseRelease(next) else { annotationInputs = hashMapOf(); onBack() }
             }
         },
     )
@@ -581,7 +599,7 @@ fun AiPackageScreen(
                 Text(lastStep?.title.orEmpty(), style = MaterialTheme.typography.titleSmall)
                 config.scene.edges.filter { it.fromStateId == last.stateId }.forEach { edge ->
                     val target = edge.toStateId?.let { targetId -> config.scene.states.single { it.id == targetId }.title } ?: "结束：${edge.endLabel}"
-                    OutlinedButton(onClick = { chooseNext = false; onChooseEdge(edge.id) }, enabled = !state.busy,
+                    OutlinedButton(onClick = { chooseNext = false; onChooseEdge(edge.id) }, enabled = editingEnabled,
                         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("${edge.label} → $target") }
                 }
             }
@@ -591,34 +609,84 @@ fun AiPackageScreen(
     )
     if (confirmExport && plan != null && config != null) AlertDialog(
         onDismissRequest = { confirmExport = false }, title = { Text("保存 AI 动画包？") },
-        text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) { AiExportReviewContent(config, plan) } },
-        confirmButton = { TextButton(onClick = { confirmExport = false; onExport() }) { Text("选择保存位置") } },
+        text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) { AiExportReviewContent(config, plan, state.aiReplacesRetainedConfiguration) } },
+        confirmButton = { TextButton(onClick = { confirmExport = false; onExport() }, enabled = editingEnabled) { Text("选择保存位置") } },
         dismissButton = { TextButton(onClick = { confirmExport = false }) { Text("返回调整") } },
     )
 }
 
-/** Applied edits remain temporary until the export preparation confirms its local save. */
+/** An imported viewer package never supplies this separately retained local configuration. */
+@Composable
+internal fun AiRetainedConfigurationChoice(
+    choice: AiConfigurationChoice,
+    enabled: Boolean = true,
+    onChoose: (String, Boolean) -> Unit = { _, _ -> },
+    onBack: () -> Unit = {},
+    showActions: Boolean = true,
+) {
+    val source = choice.source
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(source.summary.title, style = MaterialTheme.typography.titleSmall)
+        Text("此导入版本有本机保留配置", style = MaterialTheme.typography.titleMedium)
+        val plan = source.plan
+        if (plan == null) Text("保留配置未通过检查，不能继续使用。可从默认配置开始；当前保留文件不会立即被覆盖。", color = ShellColors.Accent)
+        Text("版本 ID：${source.summary.id}\n内容 SHA-256：${source.summary.contentDigest}", style = MaterialTheme.typography.bodySmall)
+        Text("这份动画配置保存在本机，不是导入观看包携带的配置。请选择本次编辑的起点。", style = MaterialTheme.typography.bodySmall)
+        if (plan != null) {
+            Text("保留配置：${if (plan.width < plan.height) "竖屏" else "横屏"} · ${plan.visits.size} 步 · 约 ${aiSeconds(plan.totalFrames)} 秒", style = MaterialTheme.typography.bodySmall)
+        }
+        Text("从默认配置开始只调整本次编辑内容。完成检查并最终确认保存后，才会替换本机保留配置。返回不会改写保留文件。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+        if (showActions) {
+            AiRetainedConfigurationActions(choice, enabled, onChoose)
+            TextButton(onClick = onBack, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("返回") }
+        }
+    }
+}
+
+/** Kept outside the scrolling metadata on the actual screen so both choices remain reachable. */
+@Composable
+private fun AiRetainedConfigurationActions(
+    choice: AiConfigurationChoice, enabled: Boolean, onChoose: (String, Boolean) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (choice.source.plan != null) {
+            Button(onClick = { onChoose(choice.owner, true) }, enabled = enabled,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("使用保留配置") }
+            OutlinedButton(onClick = { onChoose(choice.owner, false) }, enabled = enabled,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("从默认配置开始") }
+        } else {
+            Button(onClick = { onChoose(choice.owner, false) }, enabled = enabled,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("从默认配置开始") }
+            OutlinedButton(onClick = {}, enabled = false,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("使用保留配置") }
+        }
+    }
+}
+
+/** A save with unknown outcome cannot be described as an uncommitted edit. */
 @Composable
 internal fun AiConfigurationExitDialog(
     configurationChanged: Boolean, destination: ReleaseSummary?, enabled: Boolean,
     onContinue: () -> Unit, onDiscard: () -> Unit,
     destinationId: String? = destination?.id,
+    saveNeedsCheck: Boolean = false,
 ) {
     AlertDialog(onDismissRequest = onContinue,
-        title = { Text(if (configurationChanged || destinationId != null) "动画配置尚未确认保存" else "标注文字尚未应用") },
-        text = { AiConfigurationExitDetails(destination, destinationId) },
-        confirmButton = { TextButton(onClick = onContinue) { Text("继续编辑") } },
+        title = { Text(if (saveNeedsCheck) "保存结果尚未确认" else if (configurationChanged || destinationId != null) "动画配置尚未确认保存" else "标注文字尚未应用") },
+        text = { AiConfigurationExitDetails(destination, destinationId, saveNeedsCheck) },
+        confirmButton = { TextButton(onClick = onContinue) { Text(if (saveNeedsCheck) "留在本页" else "继续编辑") } },
         dismissButton = { TextButton(onClick = onDiscard, enabled = enabled && (destinationId == null || destination != null)) {
-            Text(if (destinationId != null) "放弃未保存修改并换版本" else if (configurationChanged) "放弃未保存修改并返回" else "放弃标注输入并返回")
+            Text(if (saveNeedsCheck) "确认返回，不撤销本机配置" else if (destinationId != null) "放弃未保存修改并换版本" else if (configurationChanged) "放弃未保存修改并返回" else "放弃标注输入并返回")
         } },
     )
 }
 
 /** Production dialog text, separately renderable because Layoutlib omits the modal window. */
 @Composable
-internal fun AiConfigurationExitDetails(destination: ReleaseSummary?, destinationId: String?) {
+internal fun AiConfigurationExitDetails(destination: ReleaseSummary?, destinationId: String?, saveNeedsCheck: Boolean = false) {
     Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("继续编辑并检查保存，或放弃未保存修改和未应用输入。下次打开以本机已保留配置为准，已经保留的配置不会撤销。")
+        Text(if (saveNeedsCheck) "尚无法确认上次保存是否已经写入本机。返回会结束本次编辑并丢弃本页暂存输入；不会撤销可能已写入的本机配置。下次打开会重新读取实际配置；也可留在本页重新核对保存结果。"
+            else "继续编辑并检查保存，或放弃未保存修改和未应用输入。下次打开以本机已保留配置为准，已经保留的配置不会撤销。")
         destinationId?.let { id ->
             Text(if (destination != null) "将打开：${destination.title}\n版本 ID：$id"
                 else "该版本已不可用，请返回重新选择。\n版本 ID：$id")
@@ -672,10 +740,12 @@ private fun aiEffectLabel(config: AiPackageConfiguration, effect: RenderPlan.Eff
 }
 
 @Composable
-internal fun AiExportReviewContent(config: AiPackageConfiguration, plan: RenderPlan) {
+internal fun AiExportReviewContent(config: AiPackageConfiguration, plan: RenderPlan, replacesRetained: Boolean = false) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(config.scene.title, style = MaterialTheme.typography.titleSmall)
-        Text("确认后会先在本机保留配置。取消选择保存位置，不会撤销已经保留的配置。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+        Text(if (replacesRetained) "确认后会先用当前配置替换此导入版本的本机保留配置。取消选择保存位置，不会撤销已经保存的本机配置。"
+            else "确认后会先在本机保留配置。取消选择保存位置，不会撤销已经保留的配置。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+        if (replacesRetained) Text("版本 ID：${plan.releaseId}\n内容 SHA-256：${plan.contentDigest}", style = MaterialTheme.typography.bodySmall)
         Text("${if (plan.width < plan.height) "竖屏" else "横屏"} · 约 ${aiSeconds(plan.totalFrames)} 秒 · ${plan.visits.size} 步")
         plan.visits.forEachIndexed { index, visit ->
             val step = config.scene.states.single { it.id == visit.stateId }

@@ -396,6 +396,7 @@ v1–v5 升级在 SQLiteOpenHelper `onConfigure`（事务外）关闭该连接�
 | `local_releases.asset_ids_json` | `[assetId]`，必须与 scene 资产清单一一对应；引用只能指向完整 `local_assets`。Room 无法给 JSON 元素加 FK，由封存/导入事务及清理前引用扫描保证。 |
 | 正式观看断点（当前实现） | 本机 `release-store/releases/{releaseId}/playback.json`，不在 `package` 内，不导出/备份；64 KiB 上限。`{version:1,releaseId,contentDigest,currentStateId,history:[stateId],ended,endLabel:null\|text,endEdgeId:null\|id,visitedEdgeIds:[id],completedFromStart}`；按固定图验证。仅记录已显示的稳定画面，未完成视频保留来源步骤；打开须明确继续/从头。原子替换，进程内 owner 与单调写序号拒绝迟到写；删除版本同时移除断点。候选试走不读取/写入此文件。 |
 | 本机副本删除（当前实现） | 按确认时的 ID、内容摘要、来源与保存时间再次核对；正式目录移到 owned `staging/{operationId}/deleted-release` 是提交点。提交前检查取消，提交后不回滚。真实快照保留为私有导出缓存/AI 配置清理凭据；全部清理及目录同步成功后改名 `cleaned-release`，再清 stage 且最后移除 `.owner`。恢复不得碰已有同 ID 新副本；结果单独核对为保留、已变化、已删除或待清理，读取异常显示未知。无可信凭据的历史残留不自动删除。 |
+| 导入版本 AI 配置（当前实现） | 独立私有 `ai-configs/{releaseId}.json`，≤256 KiB，不属于观看包。打开时同锁读取实际来源、scene 和原始字节指纹；已有文件须明确选择保留/默认。保存核对 ID、内容摘要、来源、保存时间及原始字节 SHA-256，在配置原子替换前再次核对和检查取消。包缓存成功不代表配置已提交；结束后只读核对目标一致、原文件未变或已变化，读取失败保留未知。当前字节一致不证明本操作写入；系统另存结果独立。编辑会话 owner 隔离迟到选择和未应用输入，本机封存版本继续使用绑定的本机来源路径。 |
 | `local_releases.playback_checkpoint_json`（后续数据库映射） | 当前使用上列私有文件，未新增数据库列。在线恢复仍须重验 share，不能凭本机记录取媒体。 |
 
 ### 服务端表
