@@ -265,7 +265,7 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 134, f"Expected 134 Compose review images, found {len(images)}"
+          assert len(images) == 136, f"Expected 136 Compose review images, found {len(images)}"
           project_deletion_images = [image for image in images if "ProjectDeletionScreenshotPreviewsKt" in str(image)]
           assert len(project_deletion_images) == 3, f"Expected three project deletion confirmation images, found {len(project_deletion_images)}"
           screenshot_import_images = [image for image in images if "ScreenshotImportPreviewsKt" in str(image)]
@@ -312,6 +312,8 @@ jobs:
           assert len(connection_images) == 2, f"Expected two connection repair images, found {len(connection_images)}"
           annotation_images = [image for image in images if "AiAnnotationScreenshotPreviewsKt" in str(image)]
           assert len(annotation_images) == 2, f"Expected two annotation editor images, found {len(annotation_images)}"
+          ai_comparison_images = [image for image in images if "AiComparisonScreenshotPreviewsKt" in str(image)]
+          assert len(ai_comparison_images) == 2, f"Expected two AI comparison identity images, found {len(ai_comparison_images)}"
           ai_draft_images = [image for image in images if "AiDraftScreenshotPreviewsKt" in str(image)]
           assert len(ai_draft_images) == 9, f"Expected nine AI draft review images, found {len(ai_draft_images)}"
           lines = [
@@ -462,6 +464,7 @@ jobs:
             --tests com.tapscene.ui.shell.ReleasePlayerFeedbackHostTest \
             --tests com.tapscene.ui.shell.AiImportNavigationHostTest \
             --tests com.tapscene.ui.shell.AiImportDifferenceIdentityHostTest \
+            --tests com.tapscene.ui.shell.AiImportJourneyHostTest \
             --tests com.tapscene.ui.AiImportCancellationHostTest \
             --tests com.tapscene.ui.AiConfigurationRetentionHostTest \
             --tests com.tapscene.data.ImportedAiConfigurationHostTest \
@@ -739,6 +742,8 @@ jobs:
               ("com.tapscene.ui.shell.ProjectDeletionConfirmationHostTest", "externallyChangedSummaryInvalidatesTheOpenConfirmationUntilCancelledAndReopened"): 1,
               ("com.tapscene.ui.shell.ProjectDeletionConfirmationHostTest", "sharedContentKeepsLongDetailsScrollableAndBlocksStaleOrBusyConfirmation"): 1,
               ("com.tapscene.ui.shell.AiImportNavigationHostTest", "busyBackPreservesImportAndOnlyExplicitCancelReachesDestructiveCallback"): 1,
+              ("com.tapscene.ui.shell.AiImportJourneyHostTest", "homeAiImportSelectsExactSameTitleVersionsAndCreatesOnlyTheReceiptProject"): 1,
+              ("com.tapscene.ui.shell.AiImportDifferenceIdentityHostTest", "comparisonSelectionDistinguishesSameTitleVersionsAndKeepsTheFixedSnapshotIdentity"): 1,
               ("com.tapscene.ui.shell.AiImportDifferenceIdentityHostTest", "reviewUsesEachVersionsNamesOrderAndDeletedHotspotWithoutCommitting"): 1,
               ("com.tapscene.ui.shell.AiImportDifferenceIdentityHostTest", "missingMismatchedAndIncompleteSnapshotsNeverBorrowTheOtherSidesIdentity"): 1,
               ("com.tapscene.ui.AiImportCancellationHostTest", "cancellingUnknownReceiptRetryAlwaysReadsActualCommitBeforeCleanup"): 1,

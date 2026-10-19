@@ -10,6 +10,7 @@ import com.tapscene.MainActivity
 import com.tapscene.data.AiDraftImportPreview
 import com.tapscene.data.AiDraftImportResult
 import com.tapscene.data.HostSqlite
+import com.tapscene.data.ReleaseSummary
 import com.tapscene.packageformat.AiDraftImportPolicy
 import com.tapscene.packageformat.RenderPlan
 import com.tapscene.packageformat.ViewerPackageCodec
@@ -43,6 +44,47 @@ class AiImportDifferenceIdentityHostTest {
         override fun after() { resetApplicationViewModelFactory() }
     }
     @get:Rule(order = 1) val compose = createAndroidComposeRule<MainActivity>()
+
+    @Test fun comparisonSelectionDistinguishesSameTitleVersionsAndKeepsTheFixedSnapshotIdentity() {
+        val fixture = fixture()
+        val baseline = fixture.baseline
+        val digest = ViewerPackageCodec.contentDigest(baseline)
+        val first = ReleaseSummary(baseline.releaseId, baseline.title, digest, 1_700_000_000_000L,
+            baseline.states.size, 100L, "local")
+        val second = first.copy(id = id("another-baseline"), contentDigest = "b".repeat(64))
+        val noComparison = fixture.preview.copy(baselineReleaseId = null, baselineTitle = null,
+            baselineScene = null, differences = emptyList())
+        val state = mutableStateOf(ready(noComparison).copy(baselines = listOf(first, second)))
+        val actions = Actions()
+        showImport(state, actions)
+        compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("选择本机对比版本或不比较"))
+        compose.onNodeWithText("选择本机对比版本或不比较").performClick()
+        fun choice(id: String) = compose.onNode(hasClickAction() and hasText("版本 ID：$id", substring = true))
+        choice(first.id).performScrollTo().assertIsDisplayed().assertIsEnabled()
+        choice(second.id).performScrollTo().assertIsDisplayed().assertIsEnabled().performClick()
+        assertEquals(listOf(second.id), actions.baselines)
+        assertEquals(0, actions.commits)
+        compose.runOnIdle { state.value = state.value.copy(outcomeUnknown = true) }
+        choice(second.id).assertIsNotEnabled()
+        choice(first.id).performScrollTo().assertIsNotEnabled()
+        assertEquals(listOf(second.id), actions.baselines)
+
+        // A later list refresh is not the selected comparison snapshot. Its digest must not
+        // replace the scene that was already saved inside this import preview's review lease.
+        compose.runOnIdle {
+            state.value = ready(fixture.preview).copy(baselines = listOf(first.copy(contentDigest = "c".repeat(64))))
+        }
+        compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("对比版本 ID：${first.id}"))
+        compose.onNodeWithText("对比版本 ID：${first.id}").assertIsDisplayed()
+        compose.onNodeWithText("内容 SHA-256：$digest").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("内容 SHA-256：${"c".repeat(64)}").assertDoesNotExist()
+        compose.onNodeWithText("确认建立新草稿").assertIsEnabled()
+        assertEquals(0, actions.commits)
+
+        compose.runOnIdle { state.value = ready(fixture.preview.copy(baselineScene = fixture.incoming)) }
+        compose.onNodeWithText("对比版本快照不可用，无法核对内容摘要。").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("内容 SHA-256：${ViewerPackageCodec.contentDigest(fixture.incoming)}").assertDoesNotExist()
+    }
 
     @Test fun reviewUsesEachVersionsNamesOrderAndDeletedHotspotWithoutCommitting() {
         val fixture = fixture()

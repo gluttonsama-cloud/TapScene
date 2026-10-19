@@ -32,6 +32,7 @@ import com.tapscene.data.ProjectSnapshot
 import com.tapscene.data.ProjectStep
 import com.tapscene.packageformat.AiDraftImportPolicy
 import com.tapscene.packageformat.RenderPlan
+import com.tapscene.packageformat.ViewerPackageCodec
 import com.tapscene.packageformat.ViewerScene
 import com.tapscene.ui.AiDraftImportUiState
 import com.tapscene.ui.DraftAiPlanUiState
@@ -108,22 +109,7 @@ fun AiDraftImportContent(
                     }
                     item { StatusNote("文件校验不认证作者身份或隐私安全。将建立独立新草稿，不覆盖原项目；全部内容仍需在本机重新复核。") }
                     if (!completed) item {
-                        AiPanel {
-                            SectionHeader("2  核对内容与对比版本")
-                            Text(if (preview.baselineReleaseId == null) AiDraftImportPolicy.NO_BASELINE_NOTICE.replace("基线", "对比版本")
-                                else "当前比较：${preview.baselineTitle.orEmpty()}。这是你明确选择的本机不可变版本，仅用于内容比较。",
-                                style = MaterialTheme.typography.bodyMedium)
-                            OutlinedButton(onClick = { chooseBaseline = !chooseBaseline }, enabled = !state.busy && !state.outcomeUnknown,
-                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (chooseBaseline) "收起对比版本" else "选择本机对比版本或不比较") }
-                            if (chooseBaseline) {
-                                AiChoice("不比较，只看完整内容", preview.baselineReleaseId == null, !state.busy) { onBaseline(null) }
-                                if (state.baselines.isEmpty()) Text("没有可供比较的本机封存版本。", color = ShellColors.Muted)
-                                state.baselines.forEach { baseline ->
-                                    AiChoice("${baseline.title}\n${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(baseline.sealedAt))} · 本机不可变版本",
-                                        preview.baselineReleaseId == baseline.id, !state.busy) { onBaseline(baseline.id) }
-                                }
-                            }
-                        }
+                        AiImportComparisonPanel(state, chooseBaseline, { chooseBaseline = !chooseBaseline }, onBaseline)
                     }
                     if (preview.issues.isNotEmpty()) {
                         item { SectionHeader("需要先修复 ${preview.issues.size} 项", "保留完整输入，不会删减内容或把视频静默变成静态。") }
@@ -244,6 +230,43 @@ fun AiDraftImportContent(
                 if (!state.imageBusy && state.image == null) TextButton(onClick = { state.imageAssetId?.let(onImage) }) { Text("重试读取") }
             }
         }, confirmButton = { TextButton(onClick = onCloseImage, modifier = Modifier.heightIn(min = 48.dp)) { Text("关闭") } })
+}
+
+/** Comparison identity comes from the same frozen snapshot as the differences, never a live list. */
+@Composable
+internal fun AiImportComparisonPanel(state: AiDraftImportUiState, expanded: Boolean,
+    onToggle: () -> Unit, onBaseline: (String?) -> Unit) {
+    val preview = state.preview ?: return
+    val enabled = !state.busy && !state.outcomeUnknown
+    AiPanel {
+        SectionHeader("2  核对内容与对比版本")
+        if (preview.baselineReleaseId == null) {
+            Text(AiDraftImportPolicy.NO_BASELINE_NOTICE.replace("基线", "对比版本"), style = MaterialTheme.typography.bodyMedium)
+        } else {
+            Text("当前比较：${preview.baselineTitle.orEmpty()}。这是你明确选择的本机不可变版本，仅用于内容比较。",
+                style = MaterialTheme.typography.bodyMedium)
+            Text("对比版本 ID：${preview.baselineReleaseId}", style = MaterialTheme.typography.bodySmall)
+            val snapshot = preview.baselineScene?.takeIf { it.releaseId == preview.baselineReleaseId }
+            if (snapshot == null) Text("对比版本快照不可用，无法核对内容摘要。",
+                style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+            else {
+                val digest = remember(snapshot) { ViewerPackageCodec.contentDigest(snapshot) }
+                Text("内容 SHA-256：$digest", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+            }
+        }
+        OutlinedButton(onClick = onToggle, enabled = enabled,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+            Text(if (expanded) "收起对比版本" else "选择本机对比版本或不比较")
+        }
+        if (expanded) {
+            AiChoice("不比较，只看完整内容", preview.baselineReleaseId == null, enabled) { onBaseline(null) }
+            if (state.baselines.isEmpty()) Text("没有可供比较的本机封存版本。", color = ShellColors.Muted)
+            state.baselines.forEach { baseline ->
+                AiChoice("${baseline.title}\n${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(baseline.sealedAt))} · ${baseline.stepCount} 个步骤\n版本 ID：${baseline.id}",
+                    preview.baselineReleaseId == baseline.id, enabled) { onBaseline(baseline.id) }
+            }
+        }
+    }
 }
 
 data class DraftAiPlanCallbacks(
