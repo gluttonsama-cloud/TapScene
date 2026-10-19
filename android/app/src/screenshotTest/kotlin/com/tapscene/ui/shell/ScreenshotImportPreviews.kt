@@ -6,10 +6,13 @@ import android.graphics.Color
 import android.graphics.Paint
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Surface
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
 import com.android.tools.screenshot.PreviewTest
 import com.tapscene.media.OpaqueMask
 import com.tapscene.media.SafeMediaWriter
@@ -57,5 +60,28 @@ fun ScreenshotImportFailurePreview() {
         StepImageCorrectionContent(WorkspaceUiState(message="截图像素数据不完整，请重新选择完整的 PNG 或 JPEG。"),
             null,StepImageCorrectionMode.MASK,screenshotCallbacks,
             screenshot=ScreenshotEditorDraft("layout-failed-screenshot",null,creatingProject=true))
+    } }
+}
+
+@PreviewTest
+@Preview(name="screenshot_exit_edited_small",widthDp=320,heightDp=568,fontScale=1.3f,locale="zh-rCN",showBackground=true)
+@Composable
+fun ScreenshotExitEditedPreview() = ScreenshotExitPreview(false)
+
+@PreviewTest
+@Preview(name="screenshot_exit_unknown_landscape",widthDp=740,heightDp=360,fontScale=1.3f,locale="zh-rCN",showBackground=true)
+@Composable
+fun ScreenshotExitUnknownPreview() = ScreenshotExitPreview(true)
+
+@Composable
+private fun ScreenshotExitPreview(unknown: Boolean) {
+    TapSceneTheme { Surface(Modifier.fillMaxSize(), color=ShellColors.Background) {
+        Column(Modifier.fillMaxSize().padding(16.dp)) {
+            Text("退出确认内容 · 合成布局 · 非设备弹窗", style=MaterialTheme.typography.labelSmall)
+            Surface(Modifier.widthIn(max=512.dp), shape=MaterialTheme.shapes.extraLarge,
+                color=MaterialTheme.colorScheme.surfaceContainerHigh) {
+                ScreenshotExitConfirmationContent(unknown, {}, {})
+            }
+        }
     } }
 }

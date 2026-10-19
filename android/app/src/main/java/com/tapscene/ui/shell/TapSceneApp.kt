@@ -537,7 +537,13 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
             }
         }
     }
-    val closeScreenshot: () -> Unit = { if (screenshots.close()) pop() }
+    val closeScreenshot: () -> Unit = {
+        val needsCheck = screenshots.state.value.saveOutcomeUnknown
+        if (screenshots.close()) {
+            pop()
+            if (needsCheck) projects.reload()
+        }
+    }
     LaunchedEffect(screenshotState.completed, screenshotState.media.busy) {
         val saved = screenshotState.completed
         if (saved != null && !screenshotState.media.busy && !state.busy) {

@@ -26,6 +26,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import com.tapscene.media.OpaqueMask
 import com.tapscene.ui.FrameEditor
 import com.tapscene.ui.MaskDialog
@@ -73,6 +74,7 @@ fun StepImageCorrectionContent(
     var sourceMenu by remember(sessionId) { mutableStateOf(false) }
     var maskDialog by remember(sessionId) { mutableStateOf(false) }
     var timeDialog by remember(sessionId) { mutableStateOf(false) }
+    var screenshotExit by rememberSaveable(sessionId) { mutableStateOf(false) }
     var displayedDigest by remember(sessionId, candidate?.sha256, output) { mutableStateOf<String?>(null) }
     val idle = !state.busy
     // Shared source-list metadata can fail while this step's own stored source is still usable.
@@ -90,8 +92,20 @@ fun StepImageCorrectionContent(
         mutableFloatStateOf((frame?.presentationTimeUs ?: source?.frameTimeUs ?: 0L).coerceIn(0L, lastTimeUs).toFloat())
     }
     val panelScroll = rememberScrollState()
-    val back: () -> Unit = { if (idle) callbacks.onBack() }
+    val back: () -> Unit = {
+        if (idle) {
+            if (screenshot != null && (screenshot.reviewLocked || masks.isNotEmpty() || candidate != null)) screenshotExit = true
+            else callbacks.onBack()
+        }
+    }
     BackHandler(enabled = !maskDialog && !timeDialog, onBack = back)
+    if (screenshotExit && screenshot != null) Dialog(onDismissRequest = { screenshotExit = false }) {
+        Surface(shape = MaterialTheme.shapes.extraLarge, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+            ScreenshotExitConfirmationContent(screenshot.reviewLocked,
+                onContinue = { screenshotExit = false },
+                onLeave = { if (idle) { screenshotExit = false; callbacks.onBack() } })
+        }
+    }
 
     // An output may be reviewed only as its actual decoded PNG, never its source preview.
     LaunchedEffect(safeImage?.binding, safeImage?.bitmap) {
@@ -317,6 +331,26 @@ fun StepImageCorrectionContent(
             timeDialog = false
             if (canEditFrame) callbacks.onTakeFrame(time)
         })
+}
+
+/** The same exit content is rendered in host layouts without simulating a platform window. */
+@Composable
+internal fun ScreenshotExitConfirmationContent(outcomeUnknown: Boolean, onContinue: () -> Unit, onLeave: () -> Unit) {
+    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Text(if (outcomeUnknown) "保存结果尚未确认" else "放弃本次截图导入？", style = MaterialTheme.typography.headlineSmall)
+        Text(if (outcomeUnknown) "本次截图可能已加入步骤。离开只结束本次编辑，不会撤销已保存的步骤；返回后请核对项目。"
+            else "本轮遮挡与待复核图片会丢弃，再次导入需要重新选择截图。已保存的项目和步骤不变。",
+            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(Modifier.align(Alignment.End), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = onContinue, modifier = Modifier.heightIn(min = 48.dp)) {
+                Text(if (outcomeUnknown) "继续核对" else "继续编辑")
+            }
+            TextButton(onClick = onLeave, modifier = Modifier.heightIn(min = 48.dp)) {
+                Text(if (outcomeUnknown) "离开并检查" else "放弃导入")
+            }
+        }
+    }
 }
 
 @Composable
