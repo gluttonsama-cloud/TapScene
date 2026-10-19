@@ -163,6 +163,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     var preparedCandidate by remember { mutableStateOf<String?>(null) }
     var reviewCandidateId by rememberSaveable { mutableStateOf<String?>(null) }
     var reviewSourceStepId by rememberSaveable { mutableStateOf<String?>(null) }
+    var reviewSourceRegionId by rememberSaveable { mutableStateOf<String?>(null) }
+    var reviewReturnSection by rememberSaveable(releaseState.candidate?.id) { mutableIntStateOf(0) }
     var reviewSourceCandidateId by rememberSaveable { mutableStateOf<String?>(null) }
     var reviewSourceOpened by rememberSaveable { mutableStateOf(false) }
     var reviewSourceFromLibrary by rememberSaveable { mutableStateOf(false) }
@@ -238,26 +240,49 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
         }
     }
     val reviewSource = reviewSourceInfo?.first
-    LaunchedEffect(page, releaseState.candidate?.id, reviewSourceStepId, reviewSourceCandidateId, state.busy,
-        state.route, state.selectedStepId, projectId, mediaState.busy) {
+    LaunchedEffect(page, releaseState.candidate?.id, reviewSourceStepId, reviewSourceRegionId, reviewSourceCandidateId, state.busy,
+        state.route, state.selectedStepId, state.dirtyStepIds, projectId, mediaState.busy) {
         val stepId = reviewSourceStepId ?: return@LaunchedEffect
         val candidate = releaseState.candidate
         if (candidate == null || candidate.id != reviewSourceCandidateId) {
-            reviewSourceStepId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+            reviewSourceStepId = null; reviewSourceRegionId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
         } else if (page == "review" && !state.busy) {
             if (state.loadFailed || projectId != candidate.projectId || state.project?.steps?.none { it.id == stepId } != false) {
-                reviewSourceStepId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+                reviewSourceStepId = null; reviewSourceRegionId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
                 releases.message("来源项目或步骤已不可用，固定候选仍保留。")
+            } else if (reviewSourceRegionId != null) {
+                val regionId = requireNotNull(reviewSourceRegionId)
+                val sourceStep = state.project?.steps?.firstOrNull { it.id == stepId }
+                when {
+                    reviewSourceOpened -> {
+                        // check-region has refreshed the source. Keep the fixed candidate/crop selected.
+                        reviewSourceStepId = null; reviewSourceRegionId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+                    }
+                    sourceStep?.regions?.none { it.id == regionId } != false -> {
+                        reviewSourceStepId = null; reviewSourceRegionId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+                        releases.message("来源区域已移除，无法定位；固定候选仍保留原裁片。")
+                    }
+                    state.dirtyStepIds.isNotEmpty() -> {
+                        reviewSourceStepId = null; reviewSourceRegionId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+                        releases.message("来源步骤有暂存修改；请先保存或放弃，再修改区域。")
+                    }
+                    !mediaState.busy -> {
+                        // These fields are keyed by the loaded project: set them only after owner verification.
+                        regionCorrectionStepId = stepId; regionCorrectionId = regionId; regionCorrectionPending = true
+                        reviewSourceOpened = true
+                        push("check-region")
+                    }
+                }
             } else if (state.route == ProjectRoute.EDIT && state.selectedStepId == stepId) {
                 reviewSourceOpened = true
             } else if (reviewSourceOpened) {
                 // leaveEditor has already applied its conflict/staging barrier. Keep this exact review selection.
-                reviewSourceStepId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+                reviewSourceStepId = null; reviewSourceRegionId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
                 if (stepId in state.dirtyStepIds) releases.message("本步修改已暂存。保存本步并重新生成后，才会进入新成品。")
             } else if (!mediaState.busy) {
                 if (media.projectId == candidate.projectId) projects.openStep(stepId)
                 else if (!media.activateProject(candidate.projectId)) {
-                    reviewSourceStepId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+                    reviewSourceStepId = null; reviewSourceRegionId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
                     releases.message("请先处理尚未保存的画面修改，再打开来源步骤。")
                 }
             }
@@ -596,7 +621,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     BackHandler(enabled = page != null && !retainedMedia) { if (page == "delivery") releases.leaveDeliveryPage(); pop() }
     BackHandler(enabled = page in setOf("review", "import") && releaseState.busy) { releases.cancel() }
     BackHandler(enabled = page == "review" && reviewSourceStepId != null && state.route != ProjectRoute.EDIT) {
-        projects.cancel(); reviewSourceStepId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+        projects.cancel(); reviewSourceStepId = null; reviewSourceRegionId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
     }
     BackHandler(enabled = hostingVisit) { closeHosting() }
     BackHandler(enabled = page == "player") { closeReleasePlayer() }
@@ -648,7 +673,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                             TextButton(onClick = {
                                 if (state.busy) projects.cancel() else media.cancel()
                                 if (page == "review" && reviewSourceStepId != null && !reviewSourceOpened) {
-                                    reviewSourceStepId = null; reviewSourceCandidateId = null
+                                    reviewSourceStepId = null; reviewSourceRegionId = null; reviewSourceCandidateId = null
                                 }
                             }) { Text("取消") }
                         }
@@ -867,7 +892,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                             correctionEnabled = scopeReady && !mediaState.busy,
                                             dirtyStepCount = state.dirtyStepIds.size, formMessage = state.message, canUndoEdit = state.canUndoEdit, textRegions = state.textRegions)
                                     } else Column(Modifier.fillMaxSize()) {
-                                        ShellTopBar("打开来源步骤", { projects.cancel(); reviewSourceStepId = null; reviewSourceCandidateId = null; reviewSourceOpened = false })
+                                        ShellTopBar("打开来源步骤", { projects.cancel(); reviewSourceStepId = null; reviewSourceRegionId = null; reviewSourceCandidateId = null; reviewSourceOpened = false })
                                         LinearProgressIndicator(Modifier.fillMaxWidth())
                                     }
                                 } else ReleaseReviewContent(releaseState,
@@ -883,7 +908,23 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 onReviewVideo = releases::selectReviewTransition, onVideoCompleted = releases::completeReviewTransition,
                                 onVideoInterrupted = releases::interruptReviewTransition, onVideoReplay = releases::replayReviewTransition,
                                 onConfirmVideo = releases::confirmReviewTransition, onCloseVideo = releases::closeReviewVideo,
+                                initialSection = reviewReturnSection,
                                 onReviewRegion = releases::selectReviewRegion, onConfirmRegion = releases::confirmReviewRegion,
+                                sourceRegionEditEnabled = !unavailable && !mediaState.busy && reviewSourceInfo != null,
+                                editableSourceRegions = reviewSource?.steps?.flatMap { step -> step.regions.map { it.id to step.id } }?.toMap().orEmpty(),
+                                onEditSourceRegion = { stepId, regionId ->
+                                    val candidate = releases.state.value.candidate
+                                    if (candidate != null && !unavailable && !mediaState.busy && reviewSourceInfo?.second == false &&
+                                        reviewSource?.project?.id == candidate.projectId &&
+                                        candidate.scene.regions.any { it.id == regionId && it.stateId == stepId } &&
+                                        reviewSource?.steps?.any { it.id == stepId && it.regions.any { region -> region.id == regionId } } == true) {
+                                        reviewCandidateId = candidate.id; reviewReturnSection = 5
+                                        reviewSourceFromLibrary = library && state.route == ProjectRoute.PROJECTS
+                                        reviewSourceCandidateId = candidate.id; reviewSourceStepId = stepId
+                                        reviewSourceRegionId = regionId; reviewSourceOpened = false
+                                        releases.closeReviewVideo(); projects.openProject(candidate.projectId)
+                                    }
+                                },
                                 editableSourceStepIds = reviewSource?.steps?.map { it.id }?.toSet().orEmpty(),
                                 sourceHasPendingEdits = reviewSourceInfo?.second == true,
                                 onEditSourceProjectText = reviewSource?.project?.takeIf { it.id == releaseState.candidate?.projectId }?.let { source -> ({
@@ -895,7 +936,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                     val candidate = releases.state.value.candidate
                                     if (candidate != null && !unavailable && !mediaState.busy &&
                                         reviewSource?.project?.id == candidate.projectId && reviewSource?.steps?.any { it.id == stepId } == true) {
-                                        reviewCandidateId = candidate.id
+                                        reviewCandidateId = candidate.id; reviewReturnSection = 0; reviewSourceRegionId = null
                                         reviewSourceFromLibrary = library && state.route == ProjectRoute.PROJECTS
                                         reviewSourceCandidateId = candidate.id; reviewSourceStepId = stepId; reviewSourceOpened = false
                                         releases.closeReviewVideo(); projects.openProject(candidate.projectId)
@@ -1010,13 +1051,22 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                             if (opened && fromChecks) regionCorrectionPending = false
                                         }
                                     }
-                                    if (regionReady && !(fromChecks && regionCorrectionPending)) RegionEditorScreen(regions) {
+                                    val closeRegion: () -> Unit = {
                                         if (fromChecks) {
                                             regionCorrectionStepId = null; regionCorrectionId = null; regionCorrectionPending = false
                                             projects.reload()
                                         } else projects.refreshAfterTransition(snapshot.project.id, stepId)
                                         pop()
-                                    } else Column(Modifier.fillMaxSize()) {
+                                    }
+                                    val missingTarget = regionReady && !regionState.busy && !regionState.failedToLoad &&
+                                        !regionCorrectionPending && requestedRegion != null && regionState.regions.none { it.id == requestedRegion }
+                                    if (missingTarget) {
+                                        val closeMissing: () -> Unit = { regions.leave(); closeRegion() }
+                                        BackHandler(onBack = closeMissing)
+                                        ScreenEmpty("来源区域已不可用", "这个区域已移除；返回后重新核对，不会自动定位到同名区域。",
+                                            if (reviewSourceRegionId != null) "返回复核" else "返回检查", closeMissing)
+                                    } else if (regionReady && !(fromChecks && regionCorrectionPending)) RegionEditorScreen(regions, closeRegion)
+                                    else Column(Modifier.fillMaxSize()) {
                                         ShellTopBar("读取区域", {
                                             if (fromChecks) { regionCorrectionStepId = null; regionCorrectionId = null; regionCorrectionPending = false }
                                             pop()

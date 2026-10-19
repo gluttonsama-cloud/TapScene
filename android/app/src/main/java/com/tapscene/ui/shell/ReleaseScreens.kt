@@ -128,6 +128,9 @@ fun ReleaseReviewContent(
     onBackToChecks: (() -> Unit)? = null,
     sourceHasPendingEdits: Boolean = false,
     onEditSourceProjectText: (() -> Unit)? = null,
+    editableSourceRegions: Map<String, String> = emptyMap(),
+    onEditSourceRegion: ((String, String) -> Unit)? = null,
+    sourceRegionEditEnabled: Boolean = true,
 ) {
     val candidate = state.candidate
     var section by rememberSaveable(candidate?.id) { mutableStateOf(initialSection.coerceIn(0, 5)) }
@@ -329,6 +332,22 @@ fun ReleaseReviewContent(
                             Text(region.name, style = MaterialTheme.typography.titleMedium)
                             Image(bitmap!!.asImageBitmap(), "实际固定区域裁片", modifier = Modifier.fillMaxWidth().heightIn(min = 96.dp, max = 300.dp), contentScale = ContentScale.Fit)
                             Text("组：${region.group ?: "未分组"} · 层次 ${region.zIndex} · 锚点 ${region.anchor.x}, ${region.anchor.y}", style = MaterialTheme.typography.bodySmall)
+                            if (onEditSourceRegion != null) {
+                                if (editableSourceRegions[region.id] == region.stateId) {
+                                    TextButton(onClick = { onEditSourceRegion(region.stateId, region.id) },
+                                        enabled = !state.busy && sourceRegionEditEnabled && !sourceHasPendingEdits,
+                                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("修改来源区域") }
+                                    Text(if (sourceHasPendingEdits) "来源步骤有暂存修改；请先保存或放弃，再修改区域。"
+                                        else "修改只保存到来源草稿；这份固定候选仍保留原裁片与文字。",
+                                        style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                                } else Text("来源项目、步骤或区域暂不可用，无法定位；固定候选仍保留原裁片。",
+                                    style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                            }
+                            if (currentDraftRevision != null && currentDraftRevision != candidate.projectRevision) {
+                                StatusNote("草稿已有修改；当前仍是原区域裁片，重新生成并复核后才会进入新成品。")
+                                TextButton(onClick = onRebuild, enabled = !state.busy,
+                                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("从当前草稿重新生成") }
+                            }
                             Button(onClick = onConfirmRegion, enabled = !state.busy && region.id !in candidate.reviewedRegionIds, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (region.id in candidate.reviewedRegionIds) "裁片已确认" else "确认实际裁片与区域文字") }
                         }
                     }
