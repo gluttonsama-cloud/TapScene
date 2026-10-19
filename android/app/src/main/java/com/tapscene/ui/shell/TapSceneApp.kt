@@ -48,6 +48,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     val recording by RecordingCoordinator.state.collectAsStateWithLifecycle()
     val context = LocalContext.current.applicationContext
     var library by rememberSaveable { mutableStateOf(false) }
+    val projectHomeState = rememberProjectHomeState()
     var tab by rememberSaveable { mutableStateOf(ProjectTab.STEPS) }
     val pages = rememberSaveable(saver = listSaver(
         save = { it.toList() }, restore = { it.toMutableStateList() },
@@ -1129,7 +1130,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                         }
                         else -> ProjectHomeFrame({ push("record") }, requestImport, { push("settings") }, { library = true; releases.reloadLibrary() }, onImportScreenshot = requestScreenshot, onImportAi = openAiImport, onClickPlan = { push("click-plan") }) {
                             ProjectHomeContent(state, { tab = ProjectTab.STEPS; projects.openProject(it) }, { projects.clearMessage(); renaming = it },
-                                { if (!unavailable && !mediaState.busy) deletingProject = it }, onCopyProject = copyProject)
+                                { if (!unavailable && !mediaState.busy) deletingProject = it }, onCopyProject = copyProject,
+                                homeState = projectHomeState)
                         }
                     }
                 }

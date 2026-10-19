@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -37,6 +38,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -71,6 +74,22 @@ import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
 
+/** Browsing context belongs to the home destination, not whichever project is open. */
+@Stable
+class ProjectHomeState internal constructor(
+    search: MutableState<String>,
+    val listState: LazyListState,
+) {
+    var query by search
+}
+
+@Composable
+fun rememberProjectHomeState(): ProjectHomeState {
+    val search = rememberSaveable { mutableStateOf("") }
+    val listState = rememberLazyListState()
+    return remember(search, listState) { ProjectHomeState(search, listState) }
+}
+
 /** Content only: the host owns navigation, creation, confirmations, and persistent state. */
 @Composable
 fun ProjectHomeContent(
@@ -80,8 +99,9 @@ fun ProjectHomeContent(
     onDeleteProject: (ProjectSummary) -> Unit,
     modifier: Modifier = Modifier,
     onCopyProject: (String) -> Unit = {},
+    homeState: ProjectHomeState = rememberProjectHomeState(),
 ) {
-    var query by rememberSaveable { mutableStateOf("") }
+    val query = homeState.query
     val visibleProjects = remember(state.projects, query) {
         val term = query.trim()
         state.projects.filter { term.isEmpty() || it.title.contains(term, ignoreCase = true) ||
@@ -89,6 +109,7 @@ fun ProjectHomeContent(
     }
     LazyColumn(
         modifier = modifier.fillMaxSize(),
+        state = homeState.listState,
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
@@ -96,14 +117,14 @@ fun ProjectHomeContent(
             item(key = "search") {
                 OutlinedTextField(
                     value = query,
-                    onValueChange = { query = it },
+                    onValueChange = { homeState.query = it },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     label = { Text("搜索项目") },
                     placeholder = { Text("名称或演示目标") },
                     shape = RoundedCornerShape(4.dp),
                     trailingIcon = if (query.isNotEmpty()) {
-                        { TextButton(onClick = { query = "" }, modifier = Modifier.heightIn(min = 48.dp)) { Text("清除") } }
+                        { TextButton(onClick = { homeState.query = "" }, modifier = Modifier.heightIn(min = 48.dp)) { Text("清除") } }
                     } else null,
                 )
             }
