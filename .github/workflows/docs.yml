@@ -717,6 +717,7 @@ jobs:
               ("com.tapscene.ui.shell.ManualMaskRecoveryHostTest", "failedSaveAndRereadKeepMasksUntilConfirmedRecoveryThenBackWorks"): 1,
               ("com.tapscene.ui.shell.ManualMaskRecoveryHostTest", "cancellationAfterRealDirectorySyncRereadsCommittedMasksWithoutRollback"): 1,
               ("com.tapscene.ui.shell.ManualMediaInputHostTest", "shellRecordingCoverRetainsRawTimesButSourceSwitchAndFullExitClearThem"): 1,
+              ("com.tapscene.ui.shell.ManualMediaInputHostTest", "missingVideoPickerPreservesManualWorkbenchForMenuAndEmptyEntrances"): 1,
               ("com.tapscene.ui.shell.DeliveryIssueNavigationHostTest", "regionPreflightTargetsExactCropAndRequiresExplicitGenerationAndReview"): 1,
               ("com.tapscene.ui.shell.DeliveryIssueNavigationHostTest", "reachableClosedLoopRequiresExplicitEndingAndRepairsExactSameTitleStep"): 1,
               ("com.tapscene.ui.shell.DeliveryIssueNavigationHostTest", "unreachableCopiedTerminalRepairsIncomingHotspotOnlyAfterExplicitSave"): 1,
@@ -832,6 +833,7 @@ jobs:
             android/app/build/test-results/testDebugUnitTest/
             android/app/build/reports/tests/testDebugUnitTest/
             android/app/build/reports/step-delete-layouts/
+            android/app/build/reports/manual-media-picker/
             ${{ runner.temp }}/host-data-checks.txt
             ${{ runner.temp }}/host-data-execution.txt
             ${{ runner.temp }}/ai-round-trip/
