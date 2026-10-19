@@ -323,6 +323,9 @@ fun DeliveryOptionsScreen(
     onHosting: (() -> Unit)? = null,
     onOpenSealed: (() -> Unit)? = null,
     onChooseVersion: (() -> Unit)? = null,
+    sealedRevision: Long? = null,
+    currentDraftRevision: Long? = null,
+    onBackToChecks: (() -> Unit)? = null,
 ) {
     var showVersionDetails by rememberSaveable(sealedSummary?.id) { mutableStateOf(false) }
     ServicePage("交付方式", onBack) {
@@ -336,12 +339,32 @@ fun DeliveryOptionsScreen(
                         style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                     Text("${if (sealedSummary.origin == "local") "封存" else "导入"}于 ${formatReleaseDate(sealedSummary.sealedAt)}",
                         style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    sealedRevision?.let { revision ->
+                        Text("封存修订 $revision", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    }
+                }
+                Text("此版本内容已固定，不会随项目草稿更新。", style = MaterialTheme.typography.bodyMedium,
+                    color = ShellColors.Muted)
+                if (sealedRevision != null && currentDraftRevision != null && currentDraftRevision != sealedRevision) {
+                    Column(Modifier.fillMaxWidth().background(ShellColors.Quiet, RoundedCornerShape(8.dp)).padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(if (currentDraftRevision > sealedRevision)
+                            "草稿已更新至修订 $currentDraftRevision，可能包含此版本未收录的后续修改。"
+                        else "当前草稿为修订 $currentDraftRevision，与封存修订 $sealedRevision 不同。",
+                            style = MaterialTheme.typography.bodyMedium, color = ShellColors.Ink)
+                        onBackToChecks?.let { backToChecks ->
+                            TextButton(onClick = backToChecks, enabled = !busy,
+                                modifier = Modifier.heightIn(min = 48.dp)) { Text("返回项目检查") }
+                        }
+                    }
                 }
                 ShellActionRow("版本详情", value = if (showVersionDetails) "收起" else "展开",
                     onClick = { showVersionDetails = !showVersionDetails })
                 if (showVersionDetails) {
                     Text("版本标识", style = MaterialTheme.typography.labelMedium, color = ShellColors.Muted)
                     Text(sealedSummary.id, style = MaterialTheme.typography.bodyMedium)
+                    Text("内容摘要", style = MaterialTheme.typography.labelMedium, color = ShellColors.Muted)
+                    Text(sealedSummary.contentDigest, style = MaterialTheme.typography.bodyMedium)
                 }
             }
             DetailSection("离线观看包", "接收方用 TapScene 导入。") {

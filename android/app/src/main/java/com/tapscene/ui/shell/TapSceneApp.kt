@@ -898,6 +898,15 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                             }
                             "delivery" -> {
                                 val sealed = releaseState.deliveryRelease
+                                val selection = releaseState.deliverySelection?.takeIf {
+                                    sealed != null && it.releaseId == sealed.id && it.contentDigest == sealed.contentDigest
+                                }
+                                // Only compare an actually loaded source project; another project or
+                                // a library-only visit must not manufacture a draft comparison.
+                                val sourceProject = state.project?.takeIf {
+                                    !state.busy && !state.loadFailed && state.route == ProjectRoute.STEPS &&
+                                        it.project.id == selection?.projectId
+                                }
                                 DeliveryOptionsScreen({ releases.leaveDeliveryPage(); pop() }, openReleaseReview, { if (sealed != null) releases.openAiPackage(sealed.id) else releases.clearAiConfiguration(); push("ai") }, { push("account") }, { push("versions") },
                                     sealedSummary = sealed, onExport = sealed?.let { { releases.prepareDeliveryExport() } },
                                     onShare = sealed?.takeIf { it.origin == "local" }?.let { item -> { releases.prepareOfflineShare(item.id) } },
@@ -908,7 +917,20 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                         releases.leaveDeliveryPage(); pages.clear(); library = true
                                         if (state.route == ProjectRoute.STEPS) projects.back()
                                         releases.reloadLibrary()
-                                    })
+                                    }, sealedRevision = selection?.projectRevision,
+                                    currentDraftRevision = sourceProject?.project?.revision,
+                                    onBackToChecks = sourceProject?.let { source -> ({
+                                        val current = projects.state.value
+                                        val delivery = releases.state.value
+                                        if (!current.busy && !current.loadFailed && !delivery.busy &&
+                                            !delivery.shareChooserOpen && delivery.pendingShare == null &&
+                                            delivery.exportFile == null && !exportPickerPending &&
+                                            !media.state.value.busy && current.route == ProjectRoute.STEPS &&
+                                            current.project?.project?.id == source.project.id &&
+                                            delivery.deliverySelection == selection) {
+                                            releases.leaveDeliveryPage(); pages.clear(); library = false; tab = ProjectTab.CHECKS
+                                        }
+                                    }) })
                             }
                             "ai-import" -> AiDraftImportContent(aiImportState,
                                 onBack = { if (!aiImportState.busy) { aiPickerRequested = false; pop(); projects.reload() } },

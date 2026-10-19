@@ -21,7 +21,18 @@ fun DeliveryWithoutSealedVersionPreview() = AvailabilityPreviewSurface {
 @Composable
 fun DeliveryLocalHostingAvailablePreview() = AvailabilityPreviewSurface {
     DeliveryOptionsScreen({}, {}, {}, {}, {}, sealedSummary = ReleasePreviewFixture.summary,
-        onExport = {}, onShare = {}, onOpenSealed = {}, onHosting = {})
+        onExport = {}, onShare = {}, onOpenSealed = {}, onHosting = {},
+        sealedRevision = 3L, currentDraftRevision = 4L, onBackToChecks = {})
+}
+
+@PreviewTest
+@Preview(name = "delivery_updated_draft_landscape", widthDp = 800, heightDp = 480, locale = "zh-rCN", fontScale = 1.2f, showBackground = true)
+@Composable
+fun DeliveryUpdatedDraftLandscapePreview() = AvailabilityPreviewSurface {
+    DeliveryOptionsScreen({}, {}, {}, {}, {},
+        sealedSummary = ReleasePreviewFixture.summary.copy(title = "活动报名：选择活动、核对报名信息并确认结果"),
+        onExport = {}, onShare = {}, onOpenSealed = {},
+        sealedRevision = 3L, currentDraftRevision = 4L, onBackToChecks = {})
 }
 
 @PreviewTest

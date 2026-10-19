@@ -119,7 +119,7 @@ data class AiPackageConfiguration(
 }
 
 /** A deliberate delivery choice, independent from the last seal operation's result. */
-data class DeliverySelection(val releaseId: String, val contentDigest: String, val projectId: String)
+data class DeliverySelection(val releaseId: String, val contentDigest: String, val projectId: String, val projectRevision: Long)
 
 /** A failed result read never authorizes another deletion; retry only checks/finishes its commit. */
 data class ReleaseDeletionCheck(val release: ReleaseSummary, val cleanupPending: Boolean = false)
@@ -382,7 +382,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
             val sealed = withContext(Dispatchers.IO) { store.seal(candidate.id, candidate.contentDigest) }
             val items = withContext(Dispatchers.IO) { store.listReleases() }
             mutableState.update { it.copy(releases = items, lastSealedId = sealed.id,
-                deliverySelection = DeliverySelection(sealed.id, sealed.contentDigest, candidate.projectId), candidate = null,
+                deliverySelection = DeliverySelection(sealed.id, sealed.contentDigest, candidate.projectId, candidate.projectRevision), candidate = null,
                 reviewStateId = null, reviewBitmap = null, reviewRegionId = null, reviewRegionBitmap = null, player = null, playerBitmap = null) }
             message("版本已封存，可保存离线观看包")
         }
@@ -739,7 +739,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
                     ?: error("请选择已复核封存的本机版本。")
                 val binding = withContext(Dispatchers.IO) { store.readHostedRelease(id, summary.contentDigest) }
                 currentCoroutineContext().ensureActive()
-                mutableState.update { it.copy(deliverySelection = DeliverySelection(id, summary.contentDigest, binding.projectId)) }
+                mutableState.update { it.copy(deliverySelection = DeliverySelection(id, summary.contentDigest, binding.projectId, binding.projectRevision)) }
             } finally { deliverySelectionActive = false }
         }
         return true

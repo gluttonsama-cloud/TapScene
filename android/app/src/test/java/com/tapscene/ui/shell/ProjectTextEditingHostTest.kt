@@ -14,9 +14,12 @@ import com.tapscene.data.ProjectStore
 import com.tapscene.data.ReleaseCandidate
 import com.tapscene.data.ReleaseStore
 import com.tapscene.packageformat.ViewerPackageCodec
+import com.tapscene.ui.DeliverySelection
 import com.tapscene.ui.MediaWorkspace
+import com.tapscene.ui.ProjectRoute
 import com.tapscene.ui.ProjectWorkspace
 import com.tapscene.ui.ReleaseWorkspace
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
@@ -248,6 +251,125 @@ class ProjectTextEditingHostTest {
         compose.onNodeWithText("未填写开场说明。").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("确认项目文字").performScrollTo().assertIsEnabled()
         println("HOST_PROJECT_TEXT exact-source/current-prefill/cancel/limits/stale-save/clear/rebuild PASS; device/process-death NOT_RUN")
+    }
+
+    @Test fun selectedSealedVersionSurvivesProjectTextSaveAndComparesOnlyItsLoadedSource() {
+        waitFor("悬浮编排")
+        val app = RuntimeEnvironment.getApplication()
+        val projects = ViewModelProvider(compose.activity)[ProjectWorkspace::class.java]
+        val releases = ViewModelProvider(compose.activity)[ReleaseWorkspace::class.java]
+        val media = ViewModelProvider(compose.activity)[MediaWorkspace::class.java]
+        val store = ProjectStore(app)
+        val releaseStore = ReleaseStore(app)
+        fun awaitIdle() = compose.waitUntil(30_000) {
+            compose.waitForIdle()
+            !projects.state.value.busy && !releases.state.value.busy && !media.state.value.busy
+        }
+        awaitIdle()
+        val sealed = runBlocking(Dispatchers.IO) {
+            val fixture = AiDraftImportFixtures.complete(app)
+            val imports = AiDraftImportStore(app)
+            val input = fixture.zip.inputStream().use { imports.prepare(it) }
+            val projectId = checkNotNull(imports.commit(input.sessionId, input.previewDigest).projectId)
+            // Fixture preparation performs synthetic review, not human privacy review or UI sealing.
+            AiDraftImportFixtures.reviewDraftRegions(store, projectId)
+            val summary = AiDraftImportFixtures.sealFixture(app, projectId, fixture)
+            releaseStore.readHostedRelease(summary.id, summary.contentDigest)
+        }
+        val fixed = DeliverySelection(sealed.summary.id, sealed.summary.contentDigest, sealed.projectId, sealed.projectRevision)
+        val sealedRoot = File(app.noBackupFilesDir, "release-store/releases/${sealed.summary.id}")
+        fun sealedFiles() = sealedRoot.walkTopDown().filter { it.isFile }
+            .associate { it.relativeTo(sealedRoot).path to ViewerPackageCodec.sha256(it) }
+        val sealedBytes = sealedFiles()
+        assertTrue(sealedBytes.isNotEmpty())
+        fun draftWarning(revision: Long) = "草稿已更新至修订 $revision，可能包含此版本未收录的后续修改。"
+        fun assertDeliveryAvailable() {
+            assertEquals(fixed, releases.state.value.deliverySelection)
+            assertEquals(sealed.summary, releases.state.value.deliveryRelease)
+            compose.onNodeWithText("封存修订 ${sealed.projectRevision}").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("保存到文件").performScrollTo().assertIsEnabled()
+            compose.onNodeWithText("系统分享").performScrollTo().assertIsEnabled()
+        }
+
+        compose.runOnIdle { projects.reload(); releases.reloadLibrary() }
+        awaitIdle()
+        compose.onNodeWithText("演示库").performClick()
+        waitForEnabled("交付此版本")
+        compose.onNodeWithText("交付此版本").performScrollTo().performClick()
+        waitFor("封存修订 ${sealed.projectRevision}")
+        awaitIdle()
+        assertNull(projects.state.value.project)
+        assertDeliveryAvailable()
+        compose.onNodeWithText("草稿已更新至修订", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("返回项目检查").assertDoesNotExist()
+
+        compose.onNodeWithContentDescription("返回").performClick()
+        waitFor("离线观看")
+        compose.onNodeWithText("项目").performClick()
+        waitFor("悬浮编排")
+        compose.onNodeWithText(sealed.summary.title).performClick()
+        waitFor("分镜")
+        awaitIdle()
+        assertEquals(sealed.projectId, projects.state.value.project?.project?.id)
+        val before = checkNotNull(store.readProject(sealed.projectId))
+        assertEquals(sealed.projectRevision, before.project.revision)
+        compose.onNodeWithText("更多").performClick()
+        compose.onNodeWithText("项目文字").performClick()
+        waitFor("开场说明（选填）")
+        val editedGoal = "保存后的新开场说明不属于已选封存版本。"
+        compose.onNodeWithText("开场说明（选填）").performTextReplacement(editedGoal)
+        compose.onNodeWithText("保存").assertIsEnabled().performClick()
+        awaitIdle()
+        compose.onNodeWithText("开场说明（选填）").assertDoesNotExist()
+        val saved = checkNotNull(store.readProject(sealed.projectId))
+        assertEquals(before.project.revision + 1, saved.project.revision)
+        assertEquals(editedGoal, saved.project.goal)
+        assertEquals(before.steps, saved.steps)
+        compose.onNodeWithText("检查与交付").performClick()
+        compose.onNodeWithText("查看交付方式").performScrollTo().performClick()
+        waitFor(draftWarning(saved.project.revision))
+        assertDeliveryAvailable()
+        compose.onNodeWithText(draftWarning(saved.project.revision)).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("返回项目检查").performScrollTo().assertIsEnabled().performClick()
+        waitFor("查看交付方式")
+        compose.onNodeWithText("检查与交付").assertIsSelected()
+        assertEquals(ProjectRoute.STEPS, projects.state.value.route)
+        assertEquals(sealed.projectId, projects.state.value.project?.project?.id)
+        assertEquals(fixed, releases.state.value.deliverySelection)
+
+        compose.onNodeWithText("查看交付方式").performScrollTo().performClick()
+        waitFor(draftWarning(saved.project.revision))
+        val other = runBlocking(Dispatchers.IO) {
+            var snapshot = store.createProject(saved.project.title, "同名 B 的独立草稿")
+            while (snapshot.project.revision <= saved.project.revision) {
+                snapshot = store.renameProject(snapshot.project.id, saved.project.title,
+                    "同名 B 的独立修改 ${snapshot.project.revision}")
+            }
+            snapshot
+        }
+        assertNotEquals(sealed.projectId, other.project.id)
+        assertEquals(saved.project.title, other.project.title)
+        // Keep A's delivery route open while the real workspace loads higher-revision, same-title B.
+        compose.runOnIdle { projects.openProject(other.project.id) }
+        awaitIdle()
+        assertEquals(other.project.id, projects.state.value.project?.project?.id)
+        assertDeliveryAvailable()
+        compose.onNodeWithText("草稿已更新至修订", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("返回项目检查").assertDoesNotExist()
+        compose.runOnIdle { projects.openProject(sealed.projectId) }
+        awaitIdle()
+        waitFor(draftWarning(saved.project.revision))
+        compose.onNodeWithText("返回项目检查").performScrollTo().performClick()
+        waitFor("查看交付方式")
+        compose.onNodeWithText("检查与交付").assertIsSelected()
+        assertEquals(sealed.projectId, projects.state.value.project?.project?.id)
+        assertEquals(fixed, releases.state.value.deliverySelection)
+        assertEquals(saved, store.readProject(sealed.projectId))
+        assertEquals(other, store.readProject(other.project.id))
+        assertEquals(sealedBytes, sealedFiles())
+        assertArrayEquals(ViewerPackageCodec.writeScene(sealed.scene),
+            runBlocking(Dispatchers.IO) { ViewerPackageCodec.writeScene(releaseStore.loadRelease(sealed.summary.id)) })
+        println("HOST_SEALED_DRAFT_DIFFERENCE library/text-save/fixed-revision/same-title-isolation/return-checks/fixed-bytes PASS; system picker/share/device NOT_RUN")
     }
 
     private fun assertFixedCandidate(expected: ReleaseCandidate, actual: ReleaseCandidate) {
