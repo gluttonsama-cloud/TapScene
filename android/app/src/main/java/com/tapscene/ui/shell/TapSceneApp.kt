@@ -1129,7 +1129,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                         }
                         else -> ProjectHomeFrame({ push("record") }, requestImport, { push("settings") }, { library = true; releases.reloadLibrary() }, onImportScreenshot = requestScreenshot, onImportAi = openAiImport, onClickPlan = { push("click-plan") }) {
                             ProjectHomeContent(state, { tab = ProjectTab.STEPS; projects.openProject(it) }, { projects.clearMessage(); renaming = it },
-                                { deletingProject = it }, onCopyProject = copyProject)
+                                { if (!unavailable && !mediaState.busy) deletingProject = it }, onCopyProject = copyProject)
                         }
                     }
                 }
@@ -1149,9 +1149,11 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                     }
                 }
             } }
-            deletingProject?.let { item -> ConfirmDelete("删除“${item.title}”？",
-                "项目、${item.stepCount} 个步骤、热点、项目图片、原截图和本机文字建议将删除，无法撤销。原录屏与导出的文件保留；原录屏可在设置的本机保留素材中管理。", !state.busy,
-                { deletingProject = null }, { if (recording.projectId == item.id && (recording.isBusy || recording.canRetry)) {
+            deletingProject?.let { item -> ProjectDeleteDialog(item, state.matchesProjectDeletion(item),
+                !unavailable && !mediaState.busy,
+                { deletingProject = null }, { if (!projects.state.value.matchesProjectDeletion(item)) {
+                    projects.message("项目内容已变化，请取消后重新打开并核对。")
+                } else if (recording.projectId == item.id && (recording.isBusy || recording.canRetry)) {
                     deletingProject = null; projects.message("请先停止或处理这个项目的未完成录制。")
                 } else if (candidateState.projectId == item.id && candidateState.busy) {
                     deletingProject = null; projects.message("请先取消当前分析。")
@@ -1230,7 +1232,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                     ShellActionRow("动画计划", "保留并编辑完整访问与效果", onClick = { projectMore = false; openDraftAi() })
                     ShellActionRow("任务详情", onClick = { projectMore = false; push("task") })
                     ShellActionRow("托管版本", onClick = { projectMore = false; push("versions") })
-                    ShellActionRow("删除项目", onClick = { projectMore = false; deletingProject = state.project?.project })
+                    ShellActionRow("删除项目", enabled = !unavailable && !mediaState.busy,
+                        onClick = { projectMore = false; deletingProject = state.project?.project })
                 }
             }, confirmButton = { TextButton(onClick = { projectMore = false }) { Text("关闭") } })
         }

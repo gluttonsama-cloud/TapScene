@@ -265,7 +265,9 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 131, f"Expected 131 Compose review images, found {len(images)}"
+          assert len(images) == 134, f"Expected 134 Compose review images, found {len(images)}"
+          project_deletion_images = [image for image in images if "ProjectDeletionScreenshotPreviewsKt" in str(image)]
+          assert len(project_deletion_images) == 3, f"Expected three project deletion confirmation images, found {len(project_deletion_images)}"
           screenshot_import_images = [image for image in images if "ScreenshotImportPreviewsKt" in str(image)]
           assert len(screenshot_import_images) == 5, f"Expected five screenshot import/exit images, found {len(screenshot_import_images)}"
           imported_ai_images = [image for image in images if "ImportedAiConfigurationScreenshotPreviewsKt" in str(image)]
@@ -446,6 +448,7 @@ jobs:
             --tests com.tapscene.ui.shell.ScreenshotCreationJourneyHostTest \
             --tests com.tapscene.ui.shell.DeliveryIssueNavigationHostTest \
             --tests com.tapscene.ui.shell.StepDeletionConfirmationHostTest \
+            --tests com.tapscene.ui.shell.ProjectDeletionConfirmationHostTest \
             --tests com.tapscene.ui.shell.CopiedAnimationReadinessHostTest \
             --tests com.tapscene.ui.AnimationReadinessFailureHostTest \
             --tests com.tapscene.ui.shell.AuthoredPathImpactHostTest \
@@ -732,6 +735,9 @@ jobs:
               ("com.tapscene.ui.shell.ProjectTextEditingHostTest", "selectedSealedVersionSurvivesProjectTextSaveAndComparesOnlyItsLoadedSource"): 1,
               ("com.tapscene.ui.shell.ReviewDeliveryJourneyHostTest", "projectChecksReviewTraversalSealAndSaveUseTheSameFixedPackage"): 1,
               ("com.tapscene.ui.shell.ScreenshotCreationJourneyHostTest", "homeCancellationThenTwoReviewedScreenshotsCreateOneProjectAndKeepBothSteps"): 1,
+              ("com.tapscene.ui.shell.ProjectDeletionConfirmationHostTest", "actualHomeMenuIdentifiesSameTitleProjectsAndDeletesOnlyTheConfirmedOne"): 1,
+              ("com.tapscene.ui.shell.ProjectDeletionConfirmationHostTest", "externallyChangedSummaryInvalidatesTheOpenConfirmationUntilCancelledAndReopened"): 1,
+              ("com.tapscene.ui.shell.ProjectDeletionConfirmationHostTest", "sharedContentKeepsLongDetailsScrollableAndBlocksStaleOrBusyConfirmation"): 1,
               ("com.tapscene.ui.shell.AiImportNavigationHostTest", "busyBackPreservesImportAndOnlyExplicitCancelReachesDestructiveCallback"): 1,
               ("com.tapscene.ui.shell.AiImportDifferenceIdentityHostTest", "reviewUsesEachVersionsNamesOrderAndDeletedHotspotWithoutCommitting"): 1,
               ("com.tapscene.ui.shell.AiImportDifferenceIdentityHostTest", "missingMismatchedAndIncompleteSnapshotsNeverBorrowTheOtherSidesIdentity"): 1,
