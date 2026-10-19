@@ -165,9 +165,9 @@ class ProjectHomeReturnContextHostTest {
         assertControlsAbsent(home)
 
         val matches = home.saved.filter { it.project.title.contains(QUERY) }
-        // Search and summary precede the project rows. Then add a nonzero pixel offset;
+        // Creation actions, search and summary precede the rows. Add a nonzero pixel offset;
         // checking only a restored item index would miss this part of the return context.
-        homeList().performScrollToIndex(2 + 8)
+        homeList().performScrollToIndex(3 + 8)
         val offset = with(compose.density) { 28.dp.toPx() }
         homeList().performSemanticsAction(SemanticsActions.ScrollBy) {
             it(0f, offset)
@@ -185,7 +185,7 @@ class ProjectHomeReturnContextHostTest {
 
     private fun assertReturnedContext(home: Home, anchor: Anchor) {
         awaitIdle(home)
-        waitFor("悬浮编排")
+        waitFor("TapScene")
         assertEquals(ProjectRoute.PROJECTS, home.projects.state.value.route)
         assertNull(home.projects.state.value.project)
         compose.onNodeWithText("项目").assertIsSelected()

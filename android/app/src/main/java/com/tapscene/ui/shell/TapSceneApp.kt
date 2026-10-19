@@ -1128,10 +1128,10 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 onHosting = if (BuildConfig.HOSTED_ENABLED) ({ push("hosted") }) else null) }
                             GlobalNavigation(true, { library = false }, {})
                         }
-                        else -> ProjectHomeFrame({ push("record") }, requestImport, { push("settings") }, { library = true; releases.reloadLibrary() }, onImportScreenshot = requestScreenshot, onImportAi = openAiImport, onClickPlan = { push("click-plan") }) {
+                        else -> ProjectHomeFrame({ push("record") }, requestImport, { push("settings") }, { library = true; releases.reloadLibrary() }, onImportScreenshot = requestScreenshot, onImportAi = openAiImport, onClickPlan = { push("click-plan") }) { creationActions ->
                             ProjectHomeContent(state, { tab = ProjectTab.STEPS; projects.openProject(it) }, { projects.clearMessage(); renaming = it },
                                 { if (!unavailable && !mediaState.busy) deletingProject = it }, onCopyProject = copyProject,
-                                homeState = projectHomeState)
+                                homeState = projectHomeState, creationActions = creationActions)
                         }
                     }
                 }

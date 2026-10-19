@@ -33,8 +33,9 @@ fun ProjectsEmptyPreview() {
     ReviewSurface(sample = false) {
         ProjectHomeFrame(
             onRecord = {}, onImportVideo = {}, onSettings = {}, onLibrary = {}, onClickPlan = {},
-        ) {
-            ProjectHomeContent(ProjectUiState(), onOpenProject = {}, onRenameProject = {}, onDeleteProject = {})
+        ) { creationActions ->
+            ProjectHomeContent(ProjectUiState(), onOpenProject = {}, onRenameProject = {}, onDeleteProject = {},
+                creationActions = creationActions)
         }
     }
 }

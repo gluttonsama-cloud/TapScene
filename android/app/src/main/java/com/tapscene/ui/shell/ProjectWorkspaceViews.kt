@@ -100,6 +100,7 @@ fun ProjectHomeContent(
     modifier: Modifier = Modifier,
     onCopyProject: (String) -> Unit = {},
     homeState: ProjectHomeState = rememberProjectHomeState(),
+    creationActions: (@Composable () -> Unit)? = null,
 ) {
     val query = homeState.query
     val visibleProjects = remember(state.projects, query) {
@@ -113,6 +114,7 @@ fun ProjectHomeContent(
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
+        if (creationActions != null) item(key = "create_actions") { creationActions() }
         if (state.projects.isNotEmpty()) {
             item(key = "search") {
                 OutlinedTextField(

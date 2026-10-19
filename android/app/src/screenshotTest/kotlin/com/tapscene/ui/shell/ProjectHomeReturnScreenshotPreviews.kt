@@ -11,6 +11,8 @@ import com.tapscene.ui.ProjectUiState
 /** Production filtered home with synthetic metadata; navigation is checked by the host test. */
 @PreviewTest
 @Preview(name = "project_home_search_small", widthDp = 320, heightDp = 568, fontScale = 1.3f, locale = "zh-rCN", showBackground = true)
+@Preview(name = "project_home_search_landscape", widthDp = 640, heightDp = 320, fontScale = 1.5f, locale = "zh-rCN", showBackground = true)
+@Preview(name = "project_home_search_largest_text", widthDp = 320, heightDp = 480, fontScale = 2f, locale = "zh-rCN", showBackground = true)
 @Composable
 fun ProjectHomeSearchSmallPreview() {
     val home = rememberProjectHomeState()
@@ -21,8 +23,9 @@ fun ProjectHomeSearchSmallPreview() {
     )
     TapSceneTheme {
         Surface(color = ShellColors.Background) {
-            ProjectHomeFrame({}, {}, {}, {}, onClickPlan = {}) {
-                ProjectHomeContent(ProjectUiState(projects = projects), {}, {}, {}, homeState = home)
+            ProjectHomeFrame({}, {}, {}, {}, onClickPlan = {}) { creationActions ->
+                ProjectHomeContent(ProjectUiState(projects = projects), {}, {}, {}, homeState = home,
+                    creationActions = creationActions)
             }
         }
     }
