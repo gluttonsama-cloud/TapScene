@@ -265,7 +265,7 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 127, f"Expected 127 Compose review images, found {len(images)}"
+          assert len(images) == 129, f"Expected 129 Compose review images, found {len(images)}"
           imported_ai_images = [image for image in images if "ImportedAiConfigurationScreenshotPreviewsKt" in str(image)]
           assert len(imported_ai_images) == 3, f"Expected three imported AI configuration images, found {len(imported_ai_images)}"
           resume_images = [image for image in images if "PlaybackResumeScreenshotPreviewsKt" in str(image)]
@@ -285,7 +285,7 @@ jobs:
           click_plan_images = [image for image in images if "ClickPlanScreenshotPreviewsKt" in str(image)]
           assert len(click_plan_images) == 5, f"Expected five click-plan review images, found {len(click_plan_images)}"
           text_region_images = [image for image in images if "TextRegionScreenshotPreviewsKt" in str(image)]
-          assert len(text_region_images) == 3, f"Expected three text-region review images, found {len(text_region_images)}"
+          assert len(text_region_images) == 5, f"Expected five text-region/hotspot review images, found {len(text_region_images)}"
           hosted_images = [image for image in images if "HostingScreenshotPreviewsKt" in str(image)]
           assert len(hosted_images) == 3, f"Expected three local-hosting review images, found {len(hosted_images)}"
           project_copy_images = [image for image in images if "SavedProjectCopyScreenshotPreviewsKt" in str(image)]
