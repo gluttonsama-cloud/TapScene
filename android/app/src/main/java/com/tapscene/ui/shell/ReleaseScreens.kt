@@ -571,7 +571,8 @@ fun OfflineImportContent(
     onOpen: ((String) -> Unit)? = null,
 ) {
     BackHandler(enabled = !state.busy) { onBack() }
-    val imported = state.releases.firstOrNull { it.id == state.lastImportedId }
+    val imported = state.releases.firstOrNull { it.id == state.lastImportedId }.takeUnless { state.libraryReadFailed }
+    val pending = state.importLibraryCheck
     Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
         ShellTopBar("导入离线演示", { if (!state.busy) onBack() })
         Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -581,6 +582,13 @@ fun OfflineImportContent(
                     SectionHeader("正在导入", state.stage ?: "正在读取与校验所选文件")
                     LinearProgressIndicator(Modifier.fillMaxWidth())
                     Text("完整校验并写入后，才会加入演示库。", style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
+                }
+                pending != null -> {
+                    SectionHeader("观看包已登记，演示库待刷新", pending.title)
+                    Text("版本 ID：${pending.id}\n内容 SHA-256：${pending.contentDigest}",
+                        style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    Text("这个观看包已完成本机登记，目前还不能核对完整库列表。请返回刷新，不用重复导入。",
+                        style = MaterialTheme.typography.bodyMedium)
                 }
                 imported != null -> {
                     SectionHeader("已加入演示库", imported.title)
@@ -603,7 +611,11 @@ fun OfflineImportContent(
                 }
                 else -> ScreenEmpty("选择 TapScene 观看包", "导入图片、无声视频过渡和点击路径。完整导入后可离线观看。")
             }
-            if (!state.busy) OutlinedButton(onClick = onChoose, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+            if (!state.busy && (pending != null || state.libraryReadFailed)) OutlinedButton(onClick = onBack,
+                shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                Text("返回演示库核对")
+            }
+            if (!state.busy && pending == null && !state.libraryReadFailed) OutlinedButton(onClick = onChoose, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                 Text(if (imported != null) "再导入一个包" else if (state.message != null) "重新选择观看包" else "选择观看包")
             }
             ShellDivider()

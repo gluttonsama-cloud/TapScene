@@ -158,6 +158,8 @@ data class ReleaseUiState(
     val aiReplacesRetainedConfiguration: Boolean = false,
     /** A save was started; until readback settles it, editing/export cannot assume no commit. */
     val aiSaveNeedsCheck: Boolean = false,
+    /** Store returned this registration, but a complete library read has not confirmed it yet. */
+    val importLibraryCheck: ReleaseSummary? = null,
 ) {
     val deliveryRelease: ReleaseSummary? get() = deliverySelection?.let { selected ->
         releases.singleOrNull { it.id == selected.releaseId && it.contentDigest == selected.contentDigest && it.origin == "local" }
@@ -633,18 +635,45 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         if (active) mutableState.update { it.copy(busy = false, stage = null) }
     }
 
-    fun importPackage(uri: Uri) = execute("隔离验证离线观看包") {
-        mutableState.update { it.copy(lastImportedId = null) }
-        val imported = withContext(Dispatchers.IO) {
-            app.contentResolver.openInputStream(uri)?.use { store.importPackage(it) }
-                ?: error("无法读取选定文件")
+    fun importPackage(uri: Uri) {
+        var registered: ReleaseSummary? = null
+        execute("隔离验证离线观看包", settle = { failure ->
+            // execute keeps busy until this reconciliation finishes. The receipt belongs only
+            // to this import; neither list order nor a same-title version identifies its result.
+            val receipt = registered
+            mutableState.update { current ->
+                if (receipt != null) {
+                    val confirmed = !current.libraryReadFailed && current.releases.singleOrNull { it.id == receipt.id } == receipt
+                    current.copy(lastImportedId = receipt.id.takeIf { confirmed },
+                        importLibraryCheck = receipt.takeUnless { confirmed },
+                        message = when {
+                            !confirmed -> "观看包已完成登记，但暂未核对完整演示库。请返回刷新；取消不会撤回已经登记的副本。"
+                            failure != null -> "已核对，本次观看包已在演示库；处理停止没有撤回已完成的登记。"
+                            else -> "完整观看包已加入演示库；文件校验不代表来源或隐私认证"
+                        })
+                } else {
+                    val detail = when (failure) {
+                        is IllegalArgumentException, is IllegalStateException -> failure.message?.takeIf { it.length <= 240 && '/' !in it && '\\' !in it }
+                        else -> null
+                    }
+                    current.copy(lastImportedId = null, importLibraryCheck = null,
+                        message = if (failure is CancellationException) "已取消本次导入；已经完整保存的版本保留，可返回演示库核对。"
+                        else detail ?: "导入未完成，请检查观看包和可用空间后重试。")
+                }
+            }
+        }) {
+            mutableState.update { it.copy(lastImportedId = null, importLibraryCheck = null) }
+            withContext(Dispatchers.IO) {
+                app.contentResolver.openInputStream(uri)?.use { input ->
+                    // Capture before closing the input or returning to Main: either can fail
+                    // after the Store has already installed (or found) the exact fixed version.
+                    store.importPackage(input).also { registered = it }
+                } ?: error("无法读取选定文件")
+            }
         }
-        val items = withContext(Dispatchers.IO) { store.listReleases() }
-        mutableState.update { it.copy(releases = items, lastImportedId = imported.id) }
-        message("完整观看包已加入演示库；文件校验不代表来源或隐私认证")
     }
 
-    fun clearImportResult() { mutableState.update { it.copy(lastImportedId = null) } }
+    fun clearImportResult() { mutableState.update { it.copy(lastImportedId = null, importLibraryCheck = null) } }
 
     fun deleteRelease(expected: ReleaseSummary) {
         if (state.value.deletionCheck != null) {
@@ -682,6 +711,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
                         playbackResume = current.playbackResume?.takeUnless { it.scene.matches(expected) },
                         lastSealedId = current.lastSealedId?.takeUnless { it == expected.id },
                         lastImportedId = current.lastImportedId?.takeUnless { it == expected.id },
+                        importLibraryCheck = current.importLibraryCheck?.takeUnless { it.sameBinding(expected) },
                         deliverySelection = current.deliverySelection?.takeUnless {
                             it.releaseId == expected.id && it.contentDigest == expected.contentDigest
                         },

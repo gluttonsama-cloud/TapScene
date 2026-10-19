@@ -25,10 +25,17 @@ import com.tapscene.ui.ReleaseUiState
 import com.tapscene.ui.ReleaseWorkspace
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
@@ -44,7 +51,8 @@ import org.robolectric.annotation.GraphicsMode
 import org.robolectric.annotation.LooperMode
 import org.robolectric.annotation.SQLiteMode
 
-/** Real MainActivity/Compose/Store with synthetic PNG packages. System picker/recording/device NOT_RUN. */
+/** Real MainActivity/Compose/Store with synthetic PNG packages supplied as file URIs, not system SAF.
+ * System picker/recording/device/process-death NOT_RUN. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], qualifiers = "w320dp-h800dp-xhdpi", shadows = [HostFileSyncShadow::class])
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -198,6 +206,157 @@ class OfflineImportPlaybackHostTest {
         println("HOST_OFFLINE_IMPORT local-origin/idempotent-summary/cancelled-read PASS; system-picker/recording/device NOT_RUN")
     }
 
+    @Test fun cancellationBeforeImportCommitKeepsLibraryAndAfterCommitShowsExactStoredVersion() {
+        val releases = workspace()
+        val app = RuntimeEnvironment.getApplication()
+        val store = ReleaseStore(app)
+        val existing = packageFixture(app, "cancel-existing", Color.BLUE)
+        val incoming = packageFixture(app, "cancel-incoming", Color.RED)
+        openImportFromHome(releases)
+        importPackage(releases, existing.file)
+        val before = library(store)
+        val existingFiles = fileHashes(releaseDirectory(existing))
+        val packageHash = ViewerPackageCodec.sha256(incoming.file)
+        val lock = ReleaseStore::class.java.getDeclaredField("mutex")
+            .apply { isAccessible = true }.get(null) as Mutex
+        runBlocking { lock.lock() }
+        try {
+            compose.runOnIdle { releases.importPackage(Uri.fromFile(incoming.file)) }
+            compose.waitForIdle()
+            assertTrue(releases.state.value.busy)
+            assertFalse(releaseDirectory(incoming).exists())
+            compose.runOnIdle { cancelRunningImport(releases) }
+        } finally { lock.unlock() }
+        awaitIdle(releases)
+        assertEquals(before, library(store))
+        assertEquals(existingFiles, fileHashes(releaseDirectory(existing)))
+        assertFalse(releaseDirectory(incoming).exists())
+        assertNull(releases.state.value.lastImportedId)
+        compose.onNodeWithText("已加入演示库").assertDoesNotExist()
+        compose.onNodeWithText("立即观看").assertDoesNotExist()
+
+        val committed = CountDownLatch(1)
+        val observed = runBlocking {
+            val observer = async(Dispatchers.IO) {
+                withTimeout(30_000) {
+                    var items = store.listReleases()
+                    while (items.none { it.id == incoming.scene.releaseId }) {
+                        delay(1) // Poll actual storage; elapsed time is never the commit signal.
+                        items = store.listReleases()
+                    }
+                    committed.countDown()
+                    items.single { it.id == incoming.scene.releaseId }
+                }
+            }
+            compose.runOnIdle {
+                releases.importPackage(Uri.fromFile(incoming.file))
+                // Freeze Main after production IO starts. Only a real, independently read
+                // installed summary releases this barrier, before Main accepts the IO result.
+                assertTrue("Import did not reach its atomic install", committed.await(30, TimeUnit.SECONDS))
+                assertNull(releases.state.value.lastImportedId)
+                cancelRunningImport(releases)
+            }
+            observer.await()
+        }
+        awaitIdle(releases)
+        val after = library(store)
+        assertEquals(2, after.size)
+        assertEquals(observed, after.single { it.id == incoming.scene.releaseId })
+        assertEquals(ViewerPackageCodec.contentDigest(incoming.scene), observed.contentDigest)
+        assertEquals(observed.id, releases.state.value.lastImportedId)
+        assertEquals(after, releases.state.value.releases)
+        assertFalse(releases.state.value.libraryReadFailed)
+        assertNull(releases.state.value.stage)
+        assertNull(releases.state.value.player)
+        assertEquals(existingFiles, fileHashes(releaseDirectory(existing)))
+        val asset = runBlocking(Dispatchers.IO) {
+            store.releaseAssetFile(incoming.scene.releaseId, incoming.scene.startStateId)
+        }
+        assertEquals(incoming.scene.assets.single().sha256, ViewerPackageCodec.sha256(asset))
+        assertEquals(packageHash, ViewerPackageCodec.sha256(incoming.file))
+        compose.onNodeWithText("已加入演示库").assertIsDisplayed()
+        compose.onNodeWithText("导入未完成").assertDoesNotExist()
+        compose.onNodeWithText("版本 ${incoming.scene.releaseId.take(12)}").assertIsDisplayed()
+        compose.onNodeWithText("立即观看").performScrollTo().assertIsEnabled().performClick()
+        assertPlayer(releases, incoming)
+        compose.onNodeWithText("退出").performClick()
+        awaitIdle(releases)
+        assertLibrary(releases)
+        compose.onNodeWithText("导入包").assertIsEnabled()
+        assertEquals(after, library(store))
+        assertEquals(existingFiles, fileHashes(releaseDirectory(existing)))
+        println("HOST_OFFLINE_IMPORT pre/post-commit-cancel/exact-stored-result PASS; file-uri only; SAF/device/process-death NOT_RUN")
+    }
+
+    @Test fun committedImportWithUnreadableOtherSummaryShowsReceiptAndRefreshKeepsBothVersions() {
+        val releases = workspace()
+        val app = RuntimeEnvironment.getApplication()
+        val store = ReleaseStore(app)
+        val existing = packageFixture(app, "refresh-existing", Color.BLUE)
+        val incoming = packageFixture(app, "refresh-incoming", Color.RED)
+        openImportFromHome(releases)
+        importPackage(releases, existing.file)
+        val before = library(store).single()
+        val existingFiles = fileHashes(releaseDirectory(existing))
+        val packageHash = ViewerPackageCodec.sha256(incoming.file)
+        compose.onNodeWithText("返回演示库").performScrollTo().assertIsEnabled().performClick()
+        awaitIdle(releases)
+        assertLibrary(releases)
+        openImportFromLibrary()
+        val metadata = File(releaseDirectory(existing), "summary.json")
+        val validMetadata = metadata.readBytes()
+        var committedFiles: Map<String, String> = emptyMap()
+        try {
+            metadata.writeText("{broken unrelated synthetic summary")
+            assertTrue(runBlocking(Dispatchers.IO) { runCatching { store.listReleases() }.isFailure })
+            compose.runOnIdle { releases.importPackage(Uri.fromFile(incoming.file)) }
+            awaitIdle(releases)
+            assertTrue(releases.state.value.libraryReadFailed)
+            assertNull(releases.state.value.lastImportedId)
+            assertNull(releases.state.value.stage)
+            assertNull(releases.state.value.player)
+            val installed = runBlocking(Dispatchers.IO) { store.loadRelease(incoming.scene.releaseId) }
+            val digest = ViewerPackageCodec.contentDigest(installed)
+            assertEquals(ViewerPackageCodec.contentDigest(incoming.scene), digest)
+            val asset = runBlocking(Dispatchers.IO) {
+                store.releaseAssetFile(incoming.scene.releaseId, incoming.scene.startStateId)
+            }
+            assertEquals(incoming.scene.assets.single().sha256, ViewerPackageCodec.sha256(asset))
+            committedFiles = fileHashes(releaseDirectory(incoming))
+            assertTrue(committedFiles.containsKey("summary.json"))
+            compose.onNodeWithText("观看包已登记，演示库待刷新").assertIsDisplayed()
+            compose.onNodeWithText("版本 ID：${incoming.scene.releaseId}", substring = true)
+                .performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("内容 SHA-256：$digest", substring = true)
+                .performScrollTo().assertIsDisplayed()
+            for (text in listOf("已加入演示库", "导入未完成", "立即观看", "再导入一个包", "重新选择观看包", "选择观看包")) {
+                compose.onNodeWithText(text).assertDoesNotExist()
+            }
+            compose.onNodeWithText("返回演示库核对").performScrollTo().assertIsEnabled().performClick()
+            awaitIdle(releases)
+            assertLibrary(releases)
+            compose.onNodeWithText("导入包").assertIsNotEnabled()
+            compose.onNodeWithText("刷新").assertIsEnabled()
+            assertTrue(runBlocking(Dispatchers.IO) { runCatching { store.listReleases() }.isFailure })
+        } finally { metadata.writeBytes(validMetadata) }
+        assertEquals(existingFiles, fileHashes(releaseDirectory(existing)))
+        compose.onNodeWithText("刷新").assertIsEnabled().performClick()
+        awaitIdle(releases)
+        val after = library(store)
+        assertEquals(2, after.size)
+        assertEquals(before, after.single { it.id == existing.scene.releaseId })
+        assertEquals(ViewerPackageCodec.contentDigest(incoming.scene),
+            after.single { it.id == incoming.scene.releaseId }.contentDigest)
+        assertEquals(after, releases.state.value.releases)
+        assertFalse(releases.state.value.libraryReadFailed)
+        assertEquals(existingFiles, fileHashes(releaseDirectory(existing)))
+        assertEquals(committedFiles, fileHashes(releaseDirectory(incoming)))
+        assertEquals(packageHash, ViewerPackageCodec.sha256(incoming.file))
+        assertLibrary(releases)
+        compose.onNodeWithText("导入包").assertIsEnabled()
+        println("HOST_OFFLINE_IMPORT committed/unreadable-sibling/receipt/refresh PASS; file-uri only; SAF/device/process-death NOT_RUN")
+    }
+
     @Test fun importBranchesOnlyExposeCurrentSuccessfulIdAndReselectionClearsSuccess() {
         val old = ReleaseSummary(id("summary-old"), "同名固定演示", "a".repeat(64), 1_000L, 1, 600L, "imported")
         val newer = old.copy(id = id("summary-new"), contentDigest = "b".repeat(64), sealedAt = 2_000L)
@@ -318,6 +477,20 @@ class OfflineImportPlaybackHostTest {
     }
 
     private fun library(store: ReleaseStore): List<ReleaseSummary> = runBlocking(Dispatchers.IO) { store.listReleases() }
+
+    private fun cancelRunningImport(releases: ReleaseWorkspace) {
+        val task = ReleaseWorkspace::class.java.getDeclaredField("task")
+            .apply { isAccessible = true }.get(releases) as Job
+        assertTrue(task.isActive)
+        releases.cancel()
+        assertTrue(task.isCancelled)
+    }
+
+    private fun releaseDirectory(fixture: PackageFixture) = File(RuntimeEnvironment.getApplication().noBackupFilesDir,
+        "release-store/releases/${fixture.scene.releaseId}")
+
+    private fun fileHashes(root: File) = root.walkTopDown().filter { it.isFile }
+        .associate { it.relativeTo(root).path to ViewerPackageCodec.sha256(it) }
 
     private data class PackageFixture(val scene: ViewerScene, val file: File, val color: Int)
 

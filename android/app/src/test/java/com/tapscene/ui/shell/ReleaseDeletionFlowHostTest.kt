@@ -194,7 +194,8 @@ class ReleaseDeletionFlowHostTest {
         // This seeds only UI state; deletion/inspection and every byte of storage remain production IO.
         val resume = runBlocking(Dispatchers.IO) { ReleaseStore(app).openPlayback(target.summary.id) }
         compose.runOnIdle { mutableState(workspace).value = workspace.state.value.copy(
-            playbackResume = resume, lastSealedId = target.summary.id, lastImportedId = other.summary.id) }
+            playbackResume = resume, lastSealedId = target.summary.id, lastImportedId = other.summary.id,
+            importLibraryCheck = target.summary) }
         val beforeState = workspace.state.value
         assertNotNull(beforeState.player)
         assertNotNull(beforeState.aiConfiguration)
@@ -229,6 +230,7 @@ class ReleaseDeletionFlowHostTest {
         assertNull(after.playbackResume)
         assertNull(after.lastSealedId)
         assertEquals(other.summary.id, after.lastImportedId)
+        assertNull(after.importLibraryCheck)
         assertNull(after.deletionCheck)
         assertTrue(after.libraryReadFailed)
         assertFalse(after.busy)
