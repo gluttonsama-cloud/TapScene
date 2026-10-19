@@ -486,7 +486,7 @@ fun AiPackageScreen(
                 } else if (config == null || chooseSource) {
                     if (state.releases.isEmpty()) Text("先完成成品复核与封存，再选择固定版本。", color = ShellColors.Muted)
                     state.releases.forEach { item ->
-                        ShellActionRow(item.title, "${item.stepCount} 个步骤 · ${formatReleaseDate(item.sealedAt)} · ${if (item.origin == "local") "本机成品" else "导入版本"}",
+                        ShellActionRow(item.title, "${item.stepCount} 个步骤 · ${formatReleaseDate(item.sealedAt)} · ${if (item.origin == "local") "本机成品" else "导入版本"}\n版本 ID：${item.id}",
                             onClick = {
                                 if (item.id == config?.scene?.releaseId) chooseSource = false
                                 else if (hasPendingChanges) { requestedReleaseId = item.id; discardAnnotationRequested = true }

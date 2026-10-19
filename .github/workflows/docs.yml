@@ -779,6 +779,7 @@ jobs:
               ("com.tapscene.ui.AiConfigurationRetentionHostTest", "unfinishedConfigurationTracksFieldChangesAndRestoringValuesClearsChanges"): 1,
               ("com.tapscene.ui.AiConfigurationRetentionHostTest", "successfulExportBecomesCleanAndPickerCancellationPreservesExactPlanOnReopen"): 1,
               ("com.tapscene.ui.shell.AiAnnotationInputHostTest", "appliedBackAndVersionSelectionPreservePendingText"): 1,
+              ("com.tapscene.ui.shell.AiAnnotationInputHostTest", "sameNamedVersionsChooseByFullIdAndReviewOnlySelectedIdentity"): 1,
               ("com.tapscene.ui.shell.AiAnnotationInputHostTest", "busyBackNeverLeavesWhileCleanAndDraftBoundConfigurationsCanReturn"): 1,
               ("com.tapscene.ui.shell.AiAnnotationInputHostTest", "pendingTextSurvivesCollapseAndBothBacksButNeverLeaksToAnotherVersion"): 1,
               ("com.tapscene.ui.shell.AiAnnotationInputHostTest", "editingExistingTextRequiresApplyAndEmptyInputNeverMeansDelete"): 1,

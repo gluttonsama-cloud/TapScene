@@ -45,10 +45,13 @@ private object AiPreviewFixture {
 }
 
 @PreviewTest
-@Preview(name = "19_ai_source_sample", widthDp = 412, heightDp = 915, locale = "zh-rCN", showBackground = true)
+@Preview(name = "19_ai_source_sample", widthDp = 320, heightDp = 568, fontScale = 1.3f, locale = "zh-rCN", showBackground = true)
 @Composable
 fun AiSourceSamplePreview() {
-    AiReviewSurface { AiPackageScreen({}, ReleasePreviewFixture.libraryState) }
+    val first = ReleasePreviewFixture.summary
+    AiReviewSurface { AiPackageScreen({}, ReleaseUiState(releases = listOf(
+        first, first.copy(id = AiPreviewFixture.id("same-title-release")),
+    ))) }
 }
 
 @PreviewTest

@@ -243,6 +243,60 @@ class AiAnnotationInputHostTest {
         assertEquals(2, backs)
     }
 
+    @Test fun sameNamedVersionsChooseByFullIdAndReviewOnlySelectedIdentity() {
+        // Production selection/review UI with synthetic configurations; no Store, SAF or ZIP read.
+        val template = configuration(false)
+        fun version(release: String): AiPackageConfiguration {
+            val scene = template.scene
+            return template.copy(scene = ViewerScene(scene.schemaVersion, scene.policyVersion, scene.compilerVersion,
+                id(release), "同名演示", scene.goal, scene.createdAt, scene.startStateId,
+                scene.states, scene.edges, scene.hotspots, scene.regions, scene.assets))
+        }
+        val versionA = version("A")
+        val versionB = version("B")
+        val digestA = ViewerPackageCodec.contentDigest(versionA.scene)
+        val digestB = ViewerPackageCodec.contentDigest(versionB.scene)
+        assertFalse(digestA == digestB)
+        fun summary(config: AiPackageConfiguration) = ReleaseSummary(config.scene.releaseId, config.scene.title,
+            ViewerPackageCodec.contentDigest(config.scene), 1, config.scene.states.size, 100, "local")
+        val state = mutableStateOf(ReleaseUiState(
+            releases = listOf(summary(versionA), summary(versionB)), aiConfiguration = versionA))
+        val selectedVersions = mutableListOf<String>()
+        compose.activity.setContent { TapSceneTheme {
+            AiPackageScreen(onBack = {}, state = state.value, onChooseRelease = { releaseId ->
+                selectedVersions += releaseId
+                state.value = state.value.copy(aiConfiguration = listOf(versionA, versionB)
+                    .single { it.scene.releaseId == releaseId })
+            })
+        } }
+        compose.onNodeWithText("换一个版本").performScrollTo().performClick()
+        compose.onAllNodesWithText("同名演示").assertCountEquals(2)
+        compose.onNodeWithText("版本 ID：${versionA.scene.releaseId}", substring = true)
+            .performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("版本 ID：${versionB.scene.releaseId}", substring = true)
+            .performScrollTo().assertIsDisplayed().assertIsEnabled().performClick()
+        assertEquals(listOf(versionB.scene.releaseId), selectedVersions)
+        assertEquals(versionB, state.value.aiConfiguration)
+
+        // Selecting the current version must only close the chooser, without requesting a reread.
+        compose.onNodeWithText("换一个版本").performScrollTo().performClick()
+        compose.onNodeWithText("版本 ID：${versionB.scene.releaseId}", substring = true)
+            .performScrollTo().performClick()
+        assertEquals(listOf(versionB.scene.releaseId), selectedVersions)
+        assertEquals(versionB, state.value.aiConfiguration)
+        compose.onNodeWithText("检查并保存").assertIsEnabled().performClick()
+        compose.onNodeWithText("保存 AI 动画包？").assertIsDisplayed()
+        compose.onNode(hasText("展开技术详情与文件清单") and hasAnyAncestor(isDialog()))
+            .performScrollTo().performClick()
+        compose.onNode(hasText("版本 ${versionB.scene.releaseId}", substring = true) and hasAnyAncestor(isDialog()))
+            .performScrollTo().assertIsDisplayed()
+            .assertTextContains("内容 SHA-256 $digestB", substring = true)
+        compose.onNode(hasText(versionA.scene.releaseId, substring = true) and hasAnyAncestor(isDialog()))
+            .assertDoesNotExist()
+        compose.onNode(hasText(digestA, substring = true) and hasAnyAncestor(isDialog())).assertDoesNotExist()
+        compose.onNodeWithText("选择保存位置").assertIsEnabled()
+    }
+
     @Test fun busyBackNeverLeavesWhileCleanAndDraftBoundConfigurationsCanReturn() {
         val config = configuration(true)
         val state = mutableStateOf(ReleaseUiState(aiConfiguration = config, aiConfigurationChanged = true,
