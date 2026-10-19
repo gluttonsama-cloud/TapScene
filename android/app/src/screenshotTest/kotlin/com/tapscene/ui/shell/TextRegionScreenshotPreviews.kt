@@ -65,6 +65,20 @@ fun TextRegionRequiresTargetSmallPreview() = TextRegionFormSurface(false)
 @Composable
 fun TextRegionStaleSourceLandscapePreview() = TextRegionFormSurface(true)
 
+@PreviewTest
+@Preview(name = "manual_hotspot_requires_target_small", widthDp = 320, heightDp = 640, locale = "zh-rCN", fontScale = 1.2f, showBackground = true)
+@Preview(name = "manual_hotspot_requires_target_landscape", widthDp = 740, heightDp = 360, locale = "zh-rCN", fontScale = 1.2f, showBackground = true)
+@Composable
+fun ManualHotspotRequiresTargetPreview() {
+    TapSceneTheme {
+        Surface(Modifier.fillMaxSize().padding(top = 20.dp), color = MaterialTheme.colorScheme.background) {
+            HotspotFormContent(TextRegionLayout.form.copy(label = "下一步", textRegionSource = null),
+                null, TextRegionLayout.project.steps, true, true, DraftRecoveryStatus.STAGED, null,
+                {}, {}, {}, true, true, {}, {}, {})
+        }
+    }
+}
+
 @Composable
 private fun TextRegionFormSurface(stale: Boolean) {
     TapSceneTheme {

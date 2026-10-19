@@ -172,6 +172,11 @@ class DeliveryIssueNavigationHostTest {
         compose.onNodeWithText("保存本步").assertIsNotEnabled()
         val label = "打开复制终点"
         compose.onNodeWithText("动作名称").performTextReplacement(label)
+        // A name alone must never silently create an ending instead of a connection.
+        compose.onNodeWithText("保存本步").assertIsNotEnabled()
+        compose.onNodeWithText("请选择目标步骤或结束演示。").performScrollTo().assertIsDisplayed()
+        assertFalse(checkNotNull(projects.state.value.stepDraft?.pendingForm).endsDemo)
+        assertNull(projects.state.value.stepDraft?.pendingForm?.targetStepId)
         compose.onNodeWithText("$copyOrdinal  ${copy.title}").performScrollTo().performClick()
         waitForEnabled("保存本步")
         assertEquals(copyId, projects.state.value.stepDraft?.pendingForm?.targetStepId)
@@ -308,13 +313,22 @@ class DeliveryIssueNavigationHostTest {
         assertTrue(projects.state.value.dirtyStepIds.isEmpty())
 
         compose.onNodeWithText("热点").performClick()
-        waitForEnabled("按比例添加（无需拖动）")
-        compose.onNodeWithText("按比例添加（无需拖动）").performScrollTo().performClick()
+        waitForEnabled("+ 新增热点")
+        compose.onNodeWithText("+ 新增热点").performScrollTo().performClick()
+        compose.onNodeWithContentDescription("新增热点模式：拖出矩形；也可使用精调表单")
+            .assertIsDisplayed().performTouchInput {
+                swipe(androidx.compose.ui.geometry.Offset(width * .25f, height * .3f),
+                    androidx.compose.ui.geometry.Offset(width * .75f, height * .7f), durationMillis = 240)
+            }
         waitFor("动作名称")
         compose.onNodeWithText("保存本步").assertIsNotEnabled()
         val label = "结束本轮演示"
         val endLabel = "已完成循环演示"
         compose.onNodeWithText("动作名称").performTextReplacement(label)
+        compose.onNodeWithText("保存本步").assertIsNotEnabled()
+        compose.onNodeWithText("请选择目标步骤或结束演示。").performScrollTo().assertIsDisplayed()
+        assertFalse(checkNotNull(projects.state.value.stepDraft?.pendingForm).endsDemo)
+        assertNull(projects.state.value.stepDraft?.pendingForm?.targetStepId)
         compose.onNodeWithText("结束演示").performScrollTo().performClick()
         waitFor("结束说明")
         compose.onNodeWithText("结束说明").performScrollTo().performTextReplacement(endLabel)
@@ -343,7 +357,20 @@ class DeliveryIssueNavigationHostTest {
         assertEquals(before.steps.filter { it.id != target.id }, saved.steps.filter { it.id != target.id })
         assertTrue(ProjectWorkspace.graphIssues(saved).isEmpty())
 
-        // The editor returns to the original checks tab after leaving Hotspots mode.
+        // Editing an existing ending retains its explicit destination and original text.
+        compose.onNodeWithText("分支").performClick()
+        val endingOrdinal = savedTarget.hotspots.indexOfFirst { it.id == added.id } + 1
+        compose.onNodeWithText("$endingOrdinal  $label").performScrollTo().performClick()
+        waitFor("动作名称")
+        assertTrue(checkNotNull(projects.state.value.stepDraft?.pendingForm).endsDemo)
+        assertNull(projects.state.value.stepDraft?.pendingForm?.targetStepId)
+        compose.onNodeWithText("结束说明").assertTextContains(endLabel)
+        compose.onNodeWithText("保存本步").assertIsEnabled()
+        compose.onNodeWithText("取消").performClick()
+        awaitIdle()
+        assertEquals(saved, store.readProject(projectId))
+
+        // The editor returns to the original checks tab after leaving Branches mode.
         compose.onNodeWithText("返回").performClick()
         waitFor("名称与讲解")
         compose.onNodeWithText("返回").performClick()

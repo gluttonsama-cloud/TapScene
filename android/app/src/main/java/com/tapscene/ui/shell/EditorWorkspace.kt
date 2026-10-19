@@ -149,7 +149,7 @@ fun EditorWorkspaceContent(
         if (canAdd) {
             callbacks.onCancelTextRegions()
             callbacks.onPendingFormChange(ProjectHotspot(UUID.randomUUID().toString(), "", rect, null,
-                "演示结束", UUID.randomUUID().toString()).toPendingForm())
+                null, UUID.randomUUID().toString()).toPendingForm())
             adding = false
         }
     }
@@ -558,6 +558,8 @@ internal fun HotspotFormContent(form: EditorPendingForm, original: ProjectHotspo
             OutlinedTextField(form.label, { onChange(form.copy(label = it)) }, label = { Text("动作名称") }, singleLine = true,
                 enabled = enabled, modifier = Modifier.fillMaxWidth().onFocusChanged { if (!it.isFocused) onTextEditEnd() })
             Text("点击后前往", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 8.dp))
+            if (!validTarget && !form.endsDemo) Text("请选择目标步骤或结束演示。",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             EditorTargetRow("结束演示", null, form.endsDemo, enabled) { onChange(form.copy(endsDemo = true)) }
             if (form.endsDemo) OutlinedTextField(form.endLabel, { onChange(form.copy(endLabel = it)) }, label = { Text("结束说明") },
                 enabled = enabled, modifier = Modifier.fillMaxWidth().onFocusChanged { if (!it.isFocused) onTextEditEnd() })
