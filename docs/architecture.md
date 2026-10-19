@@ -10,7 +10,7 @@
 
 API 32+ 利用系统等比 fit/居中输出固定编码画布，旋转和窗口变化可产生留边；API 34 记录内容尺寸回调及粗略 fit 区域，但时间不是媒体 PTS，不能用于触点映射。API 26–31 检测显示变化即结束本段。画面候选使用一个 Media3 Surface 会话，最多 361 次时间请求、30 个候选；32×32 特征比较并按实际帧 PTS 去重，毫秒精度。独立私有 SQLite 保存 source SHA、算法版本、检查点和人工选择；确认 PNG 保存为步骤后以稳定 captureId 对账，不把候选选择当复核。
 
-授权只在点击开始时请求；前台通知可停止，通知权限拒绝仍可回 App 停止。基础手动录制使用 mediaProjection 前台服务及通知权限，没有音频、网络或广泛存储权限；预编排点击链另有下文的用户开启手势服务。画面可能含可见密码/键盘输入，不能承诺自动排除；尊重 FLAG_SECURE。预编排点击链增量使用用户主动开启的手势服务，窗口元数据仅作运行期守卫；点击链共帧证据使用独立私有侧车，消费 UI 待后续接入。官方约束参见 [MediaProjection 会话与尺寸变化](https://developer.android.com/media/grow/media-projection)、[前台服务类型](https://developer.android.com/develop/background-work/services/fgs/service-types#media-projection)、[受保护窗口](https://developer.android.com/reference/android/view/WindowManager.LayoutParams#FLAG_SECURE)。
+授权只在点击开始时请求；前台通知可停止，通知权限拒绝仍可回 App 停止。基础手动录制使用 mediaProjection 前台服务及通知权限，没有音频、网络或广泛存储权限；预编排点击链另有下文的用户开启手势服务。画面可能含可见密码/键盘输入，不能承诺自动排除；尊重 FLAG_SECURE。预编排点击链增量使用用户主动开启的手势服务，窗口元数据仅作运行期守卫；点击链共帧证据使用独立私有侧车，整理工作台通过独立会话复核画面与动作后生成新项目，原项目保持不变。官方约束参见 [MediaProjection 会话与尺寸变化](https://developer.android.com/media/grow/media-projection)、[前台服务类型](https://developer.android.com/develop/background-work/services/fgs/service-types#media-projection)、[受保护窗口](https://developer.android.com/reference/android/view/WindowManager.LayoutParams#FLAG_SECURE)。
 
 
 离线 OCR 使用官方 PP-OCRv6_tiny ONNX 模型、官方 Maven ONNX Runtime 1.31.0 及 OpenCV 4.14.0 core/imgproc 源码；模型与字典随包、摘要固定，无运行时下载。受限 Bitmap RGB → 检测/裁切/识别/CTC 管线在单一后台任务运行，关闭 runtime 遥测并丢弃引擎日志。原始行/像素框按项目、源 SHA、实际帧时间/精度和模型版本保存在排除备份的私有 SQLite，不进入离线包。取消或切换保留已完成帧；删除项目/来源撤销在途写入并清除结果。标题只由用户显式采用且不覆盖已有文字，框仅供人工遮挡，遮挡后仍须重生成并复核实际输出。依赖与限额见 [原生实现](../tools/ocr-native/README.md)；主机合成图不代替 Android 性能或隐私覆盖验收。

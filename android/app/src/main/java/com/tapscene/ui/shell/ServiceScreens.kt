@@ -565,7 +565,8 @@ fun AiPackageScreen(
                 }
                 DetailSection("保存前检查") {
                     ShellLabelValue("视频时长", plan?.let { "约 ${aiSeconds(it.totalFrames)} 秒 · ${it.visits.size} 步" } ?: "请先选好播放顺序并检查效果")
-                    Text("包含这个版本的全部已复核画面、裁片和过渡视频，也保留未选分支。原始录屏不会打包。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    Text("包含这个固定版本的全部画面、裁片和过渡视频，也保留未选分支。原始录屏不会打包。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    Text("导入内容不继承本机作者复核；文件完整性校验不代表隐私已获认证。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                     Text("改停留时间会保留效果；超出新停留范围时会阻止保存，请调整后再检查。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                     Text("手机保存动画数据包，再交给电脑上的配套渲染工具生成 MP4。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                     if (plan != null) AiTechnicalDetails(config, plan)
@@ -776,12 +777,13 @@ internal fun AiExportReviewContent(config: AiPackageConfiguration, plan: RenderP
             Text("${index + 1}. ${step.title} · 停留 ${aiSeconds(visit.holdFrames)} 秒", style = MaterialTheme.typography.titleSmall)
             if (edge != null) Text(if (edge.toStateId == null) "结束：${edge.endLabel ?: edge.label}" else "接着：${edge.label}",
                 style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-            if (edge?.transitionAssetId != null) Text("播放已复核过渡视频", style = MaterialTheme.typography.bodySmall)
+            if (edge?.transitionAssetId != null) Text("播放固定版本的过渡视频", style = MaterialTheme.typography.bodySmall)
             plan.effects.filter { it.visitId == visit.visitId }.forEach {
                 Text(aiEffectLabel(config, it), style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
             }
         }
-        Text("包含全部已复核画面、裁片和过渡视频，保留未选分支。请确认文字标注和区域名称。", style = MaterialTheme.typography.bodySmall)
+        Text("包含全部固定画面、裁片和过渡视频，保留未选分支。请确认文字标注和区域名称。", style = MaterialTheme.typography.bodySmall)
+        Text("导入内容不继承本机作者复核；文件完整性校验不代表隐私已获认证。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
         AiTechnicalDetails(config, plan)
     }
 }

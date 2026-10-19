@@ -107,6 +107,15 @@ fun AuthoredPathScreen(
                         modifier = Modifier.semantics { heading() })
                     Text("作者编排 · 上下移动调整本次顺序", style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(if (project.project.startStepId in stepById) "项目起点：${stepLabel(project.project.startStepId)}"
+                        else "项目尚未设置有效起点。", style = MaterialTheme.typography.bodySmall)
+                    Text("生成通路不会更改项目起点。", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    val firstId = selectedIds.firstOrNull()
+                    if (firstId != null && firstId in stepById && firstId != project.project.startStepId) {
+                        Text("本次通路第一步不是项目起点。要从${stepLabel(firstId)}开始，请返回分镜，在该步更多菜单选择“设为起点”。",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             }
             itemsIndexed(selectedIds, key = { _, id -> "selected_$id" }) { index, id ->
@@ -191,8 +200,8 @@ fun AuthoredPathScreen(
                 Checkbox(checked = markLastTerminal, onCheckedChange = null, enabled = !busy && last != null)
                 Text("最后一步设为终点", Modifier.padding(start = 8.dp), style = MaterialTheme.typography.bodyMedium)
             }
-            Text(if (changedTargetCount > 0) "将改写 $changedTargetCount 个下一步目标；手动热点保留。"
-                else "按上方顺序连接；手动热点与分镜排序保留。",
+            Text(if (changedTargetCount > 0) "将改写 $changedTargetCount 个下一步目标；手动热点与项目起点保留。"
+                else "按上方顺序连接；手动热点、项目起点与分镜排序保留。",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (removedTransitionIds.isNotEmpty()) {
                 Text("将移除 ${removedTransitionIds.size} 个原视频过渡；生成后需重新设置。",

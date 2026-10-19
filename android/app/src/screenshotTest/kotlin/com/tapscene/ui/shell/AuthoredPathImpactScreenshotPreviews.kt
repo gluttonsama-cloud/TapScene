@@ -20,13 +20,15 @@ fun AuthoredPathTransitionImpactPreview() {
             0L, 480, 840, 1_000_000L),
         base.steps.first().source!!, 0L, 1_000_000L, emptyList(), "layout-review-metadata",
     )
-    val project = base.copy(steps = base.steps.mapIndexed { index, step ->
+    val namedSteps = base.steps.mapIndexed { index, step ->
         step.copy(title = "核对报名信息与参与人数", isTerminal = false,
             nextAction = if (index == 0) ProjectNextAction("layout-next", "继续", base.steps[1].id, transition) else null)
-    })
+    }
+    val project = base.copy(project = base.project.copy(startStepId = namedSteps[0].id),
+        steps = listOf(namedSteps[1], namedSteps[0], namedSteps[2]).mapIndexed { index, step -> step.copy(sortOrder = index) })
     TapSceneTheme {
         Surface(color = ShellColors.Background) {
-            AuthoredPathScreen(project, listOf(project.steps[0].id, project.steps[2].id, project.steps[1].id),
+            AuthoredPathScreen(project, project.steps.map { it.id },
                 false, {}, { _, _, _ -> }, {}, initialMarkLastTerminal = false)
         }
     }

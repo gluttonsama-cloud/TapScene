@@ -82,6 +82,44 @@ class AiAnnotationInputHostTest {
         compose.waitForIdle()
     }
 
+    @Test fun importedContentReviewHintsStayTruthfulThroughExplicitExportConfirmation() {
+        val config = configuration(true)
+        val summary = ReleaseSummary(config.scene.releaseId, config.scene.title,
+            ViewerPackageCodec.contentDigest(config.scene), 1, 1, 100, "imported")
+        val state = ReleaseUiState(releases = listOf(summary), aiConfiguration = config)
+        val warning = "导入内容不继承本机作者复核；文件完整性校验不代表隐私已获认证。"
+        var exports = 0
+        assertEquals(1, config.resolve().visits.size)
+        assertEquals("imported", config.scene.states.single().sourceKind)
+        compose.activity.setContent { TapSceneTheme { AiPackageScreen(onBack = {}, state = state, onExport = { exports++ }) } }
+
+        compose.onNodeWithText("保存前检查").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("包含这个固定版本的全部画面、裁片和过渡视频，也保留未选分支。原始录屏不会打包。")
+            .performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(warning).performScrollTo().assertIsDisplayed()
+        compose.onAllNodesWithText("已复核", substring = true).assertCountEquals(0)
+        assertEquals(0, exports)
+
+        compose.onNodeWithText("检查并保存").assertIsEnabled().performClick()
+        compose.onNodeWithText("保存 AI 动画包？").assertIsDisplayed()
+        assertEquals(0, exports)
+        compose.onNode(hasText("包含全部固定画面、裁片和过渡视频，保留未选分支。请确认文字标注和区域名称。") and hasAnyAncestor(isDialog()))
+            .performScrollTo().assertIsDisplayed()
+        compose.onNode(hasText(warning) and hasAnyAncestor(isDialog())).performScrollTo().assertIsDisplayed()
+        compose.onAllNodesWithText("已复核", substring = true).assertCountEquals(0)
+        compose.onNodeWithText("返回调整").performClick()
+        compose.onNodeWithText("保存 AI 动画包？").assertDoesNotExist()
+        assertEquals(0, exports)
+
+        compose.onNodeWithText("检查并保存").assertIsEnabled().performClick()
+        compose.onNode(hasText(warning) and hasAnyAncestor(isDialog())).performScrollTo().assertIsDisplayed()
+        assertEquals(0, exports)
+        compose.onNodeWithText("选择保存位置").assertIsDisplayed().assertIsEnabled().performClick()
+        assertEquals(1, exports)
+        compose.onNodeWithText("保存 AI 动画包？").assertDoesNotExist()
+        assertEquals(config, state.aiConfiguration)
+    }
+
     @Test fun pendingTextSurvivesCollapseAndBothBacksButNeverLeaksToAnotherVersion() {
         val state = mutableStateOf(ReleaseUiState(aiConfiguration = configuration(false)))
         var backs = 0
