@@ -470,6 +470,7 @@ jobs:
             --tests com.tapscene.ui.AiConfigurationRetentionHostTest \
             --tests com.tapscene.data.ImportedAiConfigurationHostTest \
             --tests com.tapscene.ui.ImportedAiConfigurationFlowHostTest \
+            --tests com.tapscene.ui.LocalAiConfigurationFlowHostTest \
             --tests com.tapscene.ui.AiAnnotationEditsTest \
             --tests com.tapscene.ui.shell.AiAnnotationInputHostTest \
             --tests com.tapscene.ui.shell.HomeMaterialPagesHostTest \
@@ -780,6 +781,8 @@ jobs:
               ("com.tapscene.ui.ImportedAiConfigurationFlowHostTest", "failedOpenPreservesEditorBaselineAndStaleChoicesCannotReplaceAnotherOwner"): 1,
               ("com.tapscene.ui.ImportedAiConfigurationFlowHostTest", "cancellationAtRealCommitBoundariesReportsDiskTruthRatherThanCacheSuccess"): 1,
               ("com.tapscene.ui.ImportedAiConfigurationFlowHostTest", "unknownAndChangedReadbackBlockWritesUntilReadOnlyRecheckFindsTarget"): 1,
+              ("com.tapscene.ui.LocalAiConfigurationFlowHostTest", "cancellationAtRealCommitBoundariesUpdatesBaselineFromDisk"): 1,
+              ("com.tapscene.ui.LocalAiConfigurationFlowHostTest", "failedAndChangedReadbackBlockOverwriteUntilTargetRecheckRestoresBaseline"): 1,
               ("com.tapscene.ui.shell.AiAnnotationInputHostTest", "retainedChoiceUsesExactOwnerAndUnknownSaveRequiresRecheckOrExplicitExit"): 1,
               ("com.tapscene.ui.AiConfigurationRetentionHostTest", "unfinishedConfigurationTracksFieldChangesAndRestoringValuesClearsChanges"): 1,
               ("com.tapscene.ui.AiConfigurationRetentionHostTest", "successfulExportBecomesCleanAndPickerCancellationPreservesExactPlanOnReopen"): 1,

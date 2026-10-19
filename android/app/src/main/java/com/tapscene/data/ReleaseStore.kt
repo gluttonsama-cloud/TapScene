@@ -445,21 +445,23 @@ class ReleaseStore(context: Context) {
         val summary = readReleaseDirectory(location)
         val scene = readScene(File(location, "package"))
         if (summary.origin == "imported") {
-            val (snapshot, bytes) = readImportedAiConfiguration(releaseId)
+            val (snapshot, bytes) = readRetainedAiConfiguration(releaseId)
             val plan = bytes?.let {
                 try { RenderPlan.parse(scene, it) } catch (_: IllegalArgumentException) { null }
             }
             AiConfigurationOpen(summary, scene, plan, false, snapshot)
         } else {
-            val saved = File(aiConfigs, "$releaseId.json")
+            val (snapshot, savedBytes) = readRetainedAiConfiguration(releaseId)
             val draft = File(location, "draft-plan.json")
-            val file = if (saved.exists()) saved else draft
-            val plan = if (!file.exists()) null else {
-                check(file.canonicalFile == file.absoluteFile && file.isFile &&
-                    file.length() in 1..RenderPlan.MAX_BYTES.toLong()) { "动画配置无效，请重新配置。" }
-                RenderPlan.parse(scene, file.readBytes())
+            val plan = if (savedBytes != null) {
+                check(savedBytes.isNotEmpty()) { "动画配置无效，请重新配置。" }
+                RenderPlan.parse(scene, savedBytes)
+            } else if (!draft.exists()) null else {
+                check(draft.canonicalFile == draft.absoluteFile && draft.isFile &&
+                    draft.length() in 1..RenderPlan.MAX_BYTES.toLong()) { "动画配置无效，请重新配置。" }
+                RenderPlan.parse(scene, draft.readBytes())
             }
-            AiConfigurationOpen(summary, scene, plan, draft.exists(), null)
+            AiConfigurationOpen(summary, scene, plan, draft.exists(), null, snapshot)
         }
     }
 
@@ -501,10 +503,21 @@ class ReleaseStore(context: Context) {
         }
     }
 
-    /** No recovery, directory creation or writes. Read failures remain unknown to the caller. */
     suspend fun inspectImportedAiConfiguration(expected: ReleaseSummary,
-        previousSnapshot: ImportedAiConfigurationSnapshot, targetPlan: RenderPlan): ImportedAiConfigurationState = mutex.withLock {
+        previousSnapshot: ImportedAiConfigurationSnapshot, targetPlan: RenderPlan): ImportedAiConfigurationState {
         check(expected.origin == "imported") { "请选择当前导入版本。" }
+        return inspectAiConfiguration(expected, previousSnapshot, targetPlan)
+    }
+
+    suspend fun inspectLocalAiConfiguration(expected: ReleaseSummary,
+        previousSnapshot: ImportedAiConfigurationSnapshot, targetPlan: RenderPlan): ImportedAiConfigurationState {
+        check(expected.origin == "local") { "请选择当前本机封存版本。" }
+        return inspectAiConfiguration(expected, previousSnapshot, targetPlan)
+    }
+
+    /** No recovery, directory creation or writes. Read failures remain unknown to the caller. */
+    private suspend fun inspectAiConfiguration(expected: ReleaseSummary,
+        previousSnapshot: ImportedAiConfigurationSnapshot, targetPlan: RenderPlan): ImportedAiConfigurationState = mutex.withLock {
         listOf(root, releases, aiConfigs).forEach { location ->
             check(location.canonicalFile == location.absoluteFile &&
                 Files.readAttributes(location.toPath(), BasicFileAttributes::class.java,
@@ -517,7 +530,7 @@ class ReleaseStore(context: Context) {
         }
         val scene = readScene(File(location, "package"))
         val target = RenderPlan.parse(scene, targetPlan.toBytes()).toBytes()
-        val (current, bytes) = readImportedAiConfiguration(expected.id)
+        val (current, bytes) = readRetainedAiConfiguration(expected.id)
         when {
             bytes != null && bytes.contentEquals(target) -> ImportedAiConfigurationState.MATCHES_TARGET
             current == previousSnapshot -> ImportedAiConfigurationState.PREVIOUS_UNCHANGED
@@ -537,13 +550,13 @@ class ReleaseStore(context: Context) {
             sameDeletionTarget(readReleaseDirectory(child(releases, expected.id), verifyAssets = false), expected)) {
             "这个版本已改变，请重新打开并核对动画配置。"
         }
-        check(readImportedAiConfiguration(expected.id).first == snapshot) {
+        check(readRetainedAiConfiguration(expected.id).first == snapshot) {
             "本机保留的动画配置已改变，请重新打开并核对，原配置未覆盖。"
         }
     }
 
     /** Absence is only ENOENT; unreadable, oversized and non-regular paths are not defaults. */
-    private fun readImportedAiConfiguration(releaseId: String): Pair<ImportedAiConfigurationSnapshot, ByteArray?> {
+    private fun readRetainedAiConfiguration(releaseId: String): Pair<ImportedAiConfigurationSnapshot, ByteArray?> {
         validId(releaseId)
         check(aiConfigs.canonicalFile == aiConfigs.absoluteFile &&
             Files.readAttributes(aiConfigs.toPath(), BasicFileAttributes::class.java,

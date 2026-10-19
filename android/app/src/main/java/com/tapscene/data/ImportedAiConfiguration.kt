@@ -10,6 +10,8 @@ data class AiConfigurationOpen(
     val plan: RenderPlan?,
     val fromDraft: Boolean,
     val importedSnapshot: ImportedAiConfigurationSnapshot?,
+    // The same raw-byte fingerprint, kept separate from imported-source choice semantics.
+    val localSnapshot: ImportedAiConfigurationSnapshot? = null,
 )
 
 /** Fingerprint of actual bytes, including invalid/empty JSON. Both null means proven absence. */

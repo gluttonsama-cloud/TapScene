@@ -978,46 +978,41 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     }
     fun prepareAiExport() {
         if (state.value.aiSaveNeedsCheck) { message("请先核对上次保存结果。"); return }
-        val source = aiConfigurationSource?.takeIf { it.importedSnapshot != null }
-        if (source == null) { prepareLocalAiExport(); return }
+        val source = aiConfigurationSource ?: run { message("请重新选择固定版本。"); return }
         val config = state.value.aiConfiguration ?: return
         val owner = state.value.aiConfigurationOwner ?: return
         val plan = runCatching { config.resolve() }.getOrElse { message("请先选好播放顺序并检查效果。"); return }
         val check = AiSaveCheck(owner, source, config, plan)
-        execute("生成并回读验证 AI 数据包", settle = { failure -> settleImportedAiSave(check, failure) }) {
+        execute("生成并回读验证 AI 数据包", refreshLibrary = false, settle = { failure -> settleAiSave(check, failure) }) {
             aiSaveCheck = check
             mutableState.update { it.copy(aiSaveNeedsCheck = true, exportFile = null) }
             exportDigest = null; exportLength = null; pendingExportFile = null; exportDeliverySelection = null
             val file = withContext(Dispatchers.IO) {
-                store.exportImportedAiRelease(source.summary, checkNotNull(source.importedSnapshot), plan)
+                if (source.summary.origin == "imported") {
+                    store.exportImportedAiRelease(source.summary, checkNotNull(source.importedSnapshot), plan)
+                } else {
+                    checkNotNull(source.localSnapshot) { "请重新打开本机版本并核对动画配置。" }
+                    store.exportAiRelease(config.scene.releaseId, plan, expectedLocal = source.summary)
+                }
             }
             exportDigest = withContext(Dispatchers.IO) { ViewerPackageCodec.sha256(file) }; exportLength = file.length()
             mutableState.update { it.copy(exportFile = file) }
         }
     }
 
-    private fun prepareLocalAiExport() = execute("生成并回读验证 AI 数据包") {
-        val config = state.value.aiConfiguration ?: error("请先选择固定版本。")
-        val plan = config.resolve()
-        exportDigest = null; exportLength = null; pendingExportFile = null; exportDeliverySelection = null
-        mutableState.update { it.copy(exportFile = null) }
-        val source = checkNotNull(aiConfigurationSource) { "请重新选择固定版本。" }
-        val file = withContext(Dispatchers.IO) { store.exportAiRelease(config.scene.releaseId, plan, expectedLocal = source.summary) }
-        // The store has confirmed its local configuration write, before hashing or the system picker.
-        aiConfigurationBaseline = config
-        mutableState.update { it.copy(aiConfigurationChanged = false) }
-        exportDigest = withContext(Dispatchers.IO) { ViewerPackageCodec.sha256(file) }; exportLength = file.length()
-        mutableState.update { it.copy(exportFile = file) }
-    }
-
     fun recheckAiSave() {
         val pending = aiSaveCheck ?: return
-        execute("核对本机动画配置", settle = { failure -> settleImportedAiSave(pending, failure) }) {}
+        execute("核对本机动画配置", refreshLibrary = false, settle = { failure -> settleAiSave(pending, failure) }) {}
     }
 
-    private suspend fun settleImportedAiSave(check: AiSaveCheck, failure: Throwable?) {
-        val result = runCatching { store.inspectImportedAiConfiguration(check.source.summary,
-            checkNotNull(check.source.importedSnapshot), check.plan) }.getOrNull()
+    private suspend fun settleAiSave(check: AiSaveCheck, failure: Throwable?) {
+        val imported = check.source.summary.origin == "imported"
+        val result = runCatching {
+            if (imported) store.inspectImportedAiConfiguration(check.source.summary,
+                checkNotNull(check.source.importedSnapshot), check.plan)
+            else store.inspectLocalAiConfiguration(check.source.summary,
+                checkNotNull(check.source.localSnapshot), check.plan)
+        }.getOrNull()
         withContext(Dispatchers.Main) {
             if (state.value.aiConfigurationOwner != check.owner || aiSaveCheck !== check) return@withContext
             val matches = result == ImportedAiConfigurationState.MATCHES_TARGET
@@ -1025,8 +1020,9 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
             if (matches) {
                 val bytes = check.plan.toBytes()
                 val digest = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
-                aiConfigurationSource = check.source.copy(plan = check.plan,
-                    importedSnapshot = ImportedAiConfigurationSnapshot(bytes.size.toLong(), digest))
+                val snapshot = ImportedAiConfigurationSnapshot(bytes.size.toLong(), digest)
+                aiConfigurationSource = if (imported) check.source.copy(plan = check.plan, importedSnapshot = snapshot)
+                    else check.source.copy(plan = check.plan, localSnapshot = snapshot)
                 aiConfigurationBaseline = check.config
             }
             if (matches || unchanged) aiSaveCheck = null
@@ -1042,7 +1038,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
             }
             mutableState.update { it.copy(aiSaveNeedsCheck = !matches && !unchanged,
                 aiConfigurationChanged = if (matches) false else it.aiConfigurationChanged,
-                aiReplacesRetainedConfiguration = matches || it.aiReplacesRetainedConfiguration,
+                aiReplacesRetainedConfiguration = (imported && matches) || it.aiReplacesRetainedConfiguration,
                 exportFile = it.exportFile.takeIf { matches && failure == null }, message = note) }
         }
     }
@@ -1188,7 +1184,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     fun message(text: String) { mutableState.update { it.copy(message = text) } }
     fun clearMessage() { mutableState.update { it.copy(message = null) } }
 
-    private fun execute(label: String, settle: (suspend (Throwable?) -> Unit)? = null, block: suspend () -> Unit) {
+    private fun execute(label: String, refreshLibrary: Boolean = true, settle: (suspend (Throwable?) -> Unit)? = null, block: suspend () -> Unit) {
         if (state.value.busy || savePickerPending || state.value.shareChooserOpen || state.value.pendingShare != null || state.value.exportFile != null) return
         cancellationNote = null
         mutableState.update { it.copy(busy = true, stage = label, message = null) }
@@ -1217,11 +1213,15 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
                 // deleting the successfully published version or manufacturing a success message.
                 withContext(NonCancellable + Dispatchers.IO) {
                     try {
-                        runCatching { store.listReleases() }.fold(
-                            onSuccess = { items -> mutableState.update { it.copy(releases = items, libraryReadFailed = false) } },
-                            onFailure = { mutableState.update { it.copy(libraryReadFailed = true) } },
-                        )
-                        runCatching { store.listCandidates() }.getOrNull()?.let { candidates -> mutableState.update { it.copy(pendingCandidates = candidates) } }
+                        // AI configuration checks must not recreate missing storage or recover
+                        // unrelated library writes before deciding whether the result is unknown.
+                        if (refreshLibrary) {
+                            runCatching { store.listReleases() }.fold(
+                                onSuccess = { items -> mutableState.update { it.copy(releases = items, libraryReadFailed = false) } },
+                                onFailure = { mutableState.update { it.copy(libraryReadFailed = true) } },
+                            )
+                            runCatching { store.listCandidates() }.getOrNull()?.let { candidates -> mutableState.update { it.copy(pendingCandidates = candidates) } }
+                        }
                     } finally {
                         // Returning to a cancelled dispatcher can throw again. Clear inside this
                         // barrier, last: busy prevents another operation from starting before here.
