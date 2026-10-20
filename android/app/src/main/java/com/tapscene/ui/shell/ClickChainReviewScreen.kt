@@ -167,10 +167,12 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
     }
     val thumbnails = loaded?.takeIf { it.runId == state.runId && it.requests == requests }?.bitmaps.orEmpty()
     fun thumbnail(frame: ClickChainFrameRow?, visible: Boolean): Bitmap? {
+        // Only synthetic previews supply pixels directly; Layoutlib may not settle viewport state.
+        frame?.thumbnail?.let { return it }
         if (!visible) return null
         val source = frame?.thumbnailSource ?: return null
         val request = ClickChainThumbnailRequest(frame.key, source)
-        return if (request in requests) frame.thumbnail ?: thumbnails[request] else null
+        return if (request in requests) thumbnails[request] else null
     }
     BackHandler { if (!state.busy) callbacks.onBack() }
     Column(Modifier.fillMaxSize().imePadding()) {
