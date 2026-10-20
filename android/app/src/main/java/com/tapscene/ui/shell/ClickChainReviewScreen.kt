@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -112,23 +113,28 @@ internal data class ClickChainReviewCallbacks(
 /** One workbench, with focused image/action subpanels rather than a multi-page wizard. */
 @Composable
 internal fun ClickChainReviewContent(state: ClickChainReviewUiState, callbacks: ClickChainReviewCallbacks) {
-    when {
-        state.frameEditor != null -> ClickChainFramePanel(state.frameEditor, state, callbacks)
-        state.actionEditor != null -> ClickChainActionPanel(state.actionEditor, state, callbacks)
-        else -> ClickChainWorkbench(state, callbacks)
+    // Editors replace the workbench, but must not discard this run's reading position.
+    // A different recording starts at its own beginning, even at the same navigation slot.
+    key(state.runId) {
+        val listState = rememberLazyListState()
+        when {
+            state.frameEditor != null -> ClickChainFramePanel(state.frameEditor, state, callbacks)
+            state.actionEditor != null -> ClickChainActionPanel(state.actionEditor, state, callbacks)
+            else -> ClickChainWorkbench(state, callbacks, listState)
+        }
     }
 }
 
 @Composable
-private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: ClickChainReviewCallbacks) {
+private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: ClickChainReviewCallbacks,
+    listState: LazyListState) {
     val editable = !state.busy && !state.loading && !state.editingLocked && state.createdProjectId == null && !state.outcomeUnknown
     val next = state.nextRequiredReview()
     val validation = state.validationIssue()
     val largeText = LocalDensity.current.fontScale > 1.2f
     var settingsExpanded by rememberSaveable(state.runId) { mutableStateOf(false) }
     LaunchedEffect(validation) { if (validation != null) settingsExpanded = true }
-    val listState = rememberLazyListState()
-    val visibleKeys by remember { derivedStateOf { listState.layoutInfo.visibleItemsInfo.map { it.key }.toSet() } }
+    val visibleKeys by remember(listState) { derivedStateOf { listState.layoutInfo.visibleItemsInfo.map { it.key }.toSet() } }
     val frames = remember(state.frames) { state.frames.associateBy { it.key } }
     BackHandler { if (!state.busy) callbacks.onBack() }
     Column(Modifier.fillMaxSize().imePadding()) {
