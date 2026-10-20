@@ -527,6 +527,16 @@ private fun ClickChainActionPanel(editor: ClickChainActionEditor, state: ClickCh
     val bitmap = editor.bitmap?.takeUnless { it.isRecycled }
     val target = editor.targetThumbnail?.takeUnless { it.isRecycled }
     val idle = !state.busy
+    val precisionEnabled = idle && !state.loading && !state.editingLocked && !state.outcomeUnknown &&
+        state.createdProjectId == null && bitmap != null && target != null
+    // Only this editor opening and actual source image own the raw strings. They are not saved
+    // across configuration/process recreation, or borrowed by a replacement run/action/image.
+    var precisionForm by remember(state.runId, editor.actionId, editor.instanceKey, bitmap) {
+        mutableStateOf<ClickChainRectPercentages?>(null)
+    }
+    var precisionOriginal by remember(state.runId, editor.actionId, editor.instanceKey, bitmap) {
+        mutableStateOf(editor.rect)
+    }
     val close: () -> Unit = { if (idle) callbacks.onCloseEditor() }
     BackHandler(onBack = close)
     // Re-keying resets EditorCanvas's in-flight drag on a different action or safe image.
@@ -550,6 +560,8 @@ private fun ClickChainActionPanel(editor: ClickChainActionEditor, state: ClickCh
                 Column(modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("拖动区域移动，拖右下角调整大小。", style = MaterialTheme.typography.bodySmall)
+                    OutlinedButton({ precisionOriginal = editor.rect; precisionForm = ClickChainRectPercentages.from(editor.rect) },
+                        enabled = precisionEnabled, modifier = Modifier.heightIn(min = 48.dp)) { Text("范围精调") }
                     editor.selectionNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                     OutlinedTextField(editor.label, callbacks.onActionLabelChange, Modifier.fillMaxWidth(),
                         enabled = idle, label = { Text("动作名称") }, singleLine = true)
@@ -582,6 +594,16 @@ private fun ClickChainActionPanel(editor: ClickChainActionEditor, state: ClickCh
         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         ClickChainEditorFooter(state.busy, callbacks.onCancel, close, "确认点击区域与后继",
             idle && bitmap != null && target != null && editor.label.isNotBlank(), callbacks.onConfirmAction)
+    }
+    precisionForm?.let { form ->
+        ClickChainActionPrecisionDialog(precisionOriginal, form, precisionEnabled,
+            onChange = { precisionForm = it }, onDismiss = { precisionForm = null }, onApply = { rect ->
+                if (precisionEnabled && precisionForm != null) {
+                    precisionForm = null
+                    // Opening, dismissing and applying unchanged geometry must not clear confirmation.
+                    if (rect != editor.rect) callbacks.onActionRectChange(rect)
+                }
+            })
     }
 }
 

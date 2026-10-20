@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -54,7 +53,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.tapscene.data.EditorFormKind
@@ -739,14 +737,6 @@ private fun DraftConflictDialog(project: ProjectSnapshot, draft: StepEditDraft, 
         confirmButton = { TextButton(onClick = { onResolve(true) }, enabled = enabled) { Text("保留我的修改") } },
         dismissButton = { TextButton(onClick = { onResolve(false) }, enabled = enabled) { Text("使用已保存内容") } },
     )
-}
-
-@Composable
-private fun EditorPercentageField(label: String, value: String, onValue: (String) -> Unit, enabled: Boolean, modifier: Modifier,
-    onTextEditEnd: () -> Unit) {
-    OutlinedTextField(value, onValue, label = { Text(label) }, enabled = enabled, singleLine = true,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-        modifier = modifier.onFocusChanged { if (!it.isFocused) onTextEditEnd() })
 }
 
 @Composable

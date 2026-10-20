@@ -60,6 +60,7 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
     private var stagingFailure = false
     private var selectedFrame: String? = null
     private var selectedAction: String? = null
+    private var actionEditorInstanceKey = Any()
     private var editorBitmap: Bitmap? = null
     private var outputBitmap: Bitmap? = null
     private var actionBitmap: Bitmap? = null
@@ -274,7 +275,7 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
                 val frame = edit?.fromKey?.let(current.frames::get)
                 if (action == null || edit == null || frame == null) null else ClickChainActionEditor(id,edit.label,edit.rect,actionBitmap,targetBitmap,
                     titleForFrame(edit.toKey),ClickChainRoutePolicy.point(action.action,frame),edit.fromKey == edit.toKey,
-                    actions.count { saved.actions[it.actionId]?.fromKey == edit.fromKey },action.before?.selectionNotice)
+                    actions.count { saved.actions[it.actionId]?.fromKey == edit.fromKey },action.before?.selectionNotice,actionEditorInstanceKey)
             }) }
     }
 
@@ -411,6 +412,7 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
                 Bitmap.createScaledBitmap(target,(target.width * factor).roundToInt().coerceAtLeast(1),(target.height * factor).roundToInt().coerceAtLeast(1),true)
             }
             if (targetBitmap !== target) target.recycle()
+            actionEditorInstanceKey = Any()
             selectedFrame = null;selectedAction = actionId;refresh()
         }
     }

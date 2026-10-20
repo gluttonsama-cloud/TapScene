@@ -118,7 +118,9 @@ internal data class ClickChainFrameEditor(val key: String, val title: String, va
 internal data class ClickChainActionEditor(val actionId: String, val label: String, val rect: OpaqueMask,
     val bitmap: Bitmap?, val targetThumbnail: Bitmap?, val targetTitle: String,
     val point: Pair<Float, Float>, val selfLoop: Boolean, val samePageActionCount: Int,
-    val selectionNotice: String? = null)
+    val selectionNotice: String? = null,
+    // Presentation identity only; stable through refresh, replaced on every editor opening.
+    val instanceKey: Any = Any())
 internal data class ClickChainReviewUiState(val runId: String? = null, val title: String = "点击链演示",
     val runLabel: String = "", val firstAction: String = "1", val lastAction: String = "1",
     val totalActions: Int = 0, val framesOnly: Boolean = false,
