@@ -244,12 +244,14 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
     var showNotice by rememberSaveable(projectId) { mutableStateOf(false) }
     var showLeave by rememberSaveable(projectId) { mutableStateOf(false) }
     var leaveForManualRecording by rememberSaveable(projectId) { mutableStateOf(false) }
+    var leaveForCreatedProjectId by rememberSaveable(projectId) { mutableStateOf<String?>(null) }
     var showReload by rememberSaveable(projectId) { mutableStateOf(false) }
     var showResetGeometry by rememberSaveable(projectId) { mutableStateOf(false) }
     var pendingTarget by remember { mutableStateOf<ClickTargetApp?>(null) }
     var expandedActionId by rememberSaveable(projectId) { mutableStateOf<String?>(null) }
     val canEdit = !loading && !loadFailed && !saving && !playback.busy && !playback.overlayVisible && !conflict
     val currentSaving by rememberUpdatedState(saving)
+    val currentProjectId by rememberUpdatedState(projectId)
 
     DisposableEffect(lifecycle, projectId) {
         val observer = LifecycleEventObserver { _, event ->
@@ -300,6 +302,8 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
             saveFailed = false
             message = null
             val input = draft
+            val createdProjectId = leaveForCreatedProjectId.takeIf { leave }
+            val manualRecording = leaveForManualRecording
             scope.launch {
                 try {
                     val plan = input.toPlan(projectId)
@@ -308,6 +312,7 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
                         store.savePlan(plan, input.revision.takeIf { it > 0 })
                         check(store.getPlan(projectId)?.digest == plan.digest)
                     }
+                    if (currentProjectId != projectId) return@launch
                     draft = plan.toDraft()
                     dirty = false
                     conflict = false
@@ -315,7 +320,10 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
                     if (openEditor) {
                         ClickPlayback.openEditor(context, plan)
                     } else if (leave) {
-                        if (leaveForManualRecording) onManualRecording() else onBack()
+                        showLeave = false
+                        leaveForCreatedProjectId = null
+                        if (createdProjectId != null) onOpenProject(createdProjectId)
+                        else if (manualRecording) onManualRecording() else onBack()
                     }
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (_: Exception) {
@@ -334,20 +342,77 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
     }
     val leaveTo: (Boolean) -> Unit = { manualRecording ->
         if (!saving) {
+            leaveForCreatedProjectId = null
             leaveForManualRecording = manualRecording
             if (dirty) showLeave = true else if (manualRecording) onManualRecording() else onBack()
         }
     }
     val leave: () -> Unit = { leaveTo(false) }
+    val error = clickPlanInputError(draft.targetPackage, draft.width, draft.height, draft.displayId, draft.points)
+    val dismissLeave: () -> Unit = {
+        if (!saving) {
+            showLeave = false
+            leaveForCreatedProjectId = null
+            leaveForManualRecording = false
+        }
+    }
+    // This dialog also belongs to the review branch: opening its result removes this draft route.
+    if (showLeave) {
+        val createdProjectId = leaveForCreatedProjectId
+        AlertDialog(onDismissRequest = dismissLeave, title = { Text("保留当前修改？") },
+            text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(if (createdProjectId != null) "点击计划有尚未保存的修改。可保存后打开新项目，或放弃本次修改。已生成的新项目不会改变。"
+                    else "点击计划有尚未保存的修改。可保存后返回，或放弃本次修改。")
+                if (createdProjectId != null) {
+                    error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    if (!geometryMatches) Text("请恢复原方向及全屏，或返回点击计划按当前屏幕重新编排。",
+                        color = MaterialTheme.colorScheme.error)
+                    message?.takeIf { it != error }?.let { Text(it) }
+                    if (saving) LinearProgressIndicator(Modifier.fillMaxWidth())
+                }
+            } },
+            confirmButton = { TextButton(enabled = canEdit && geometryMatches && error == null, onClick = {
+                if (currentProjectId == projectId && showLeave && !saving && leaveForCreatedProjectId == createdProjectId) {
+                    if (createdProjectId == null) showLeave = false
+                    save(false, true)
+                }
+            }) { Text(if (createdProjectId != null) "保存并打开" else "保存并返回") } },
+            dismissButton = { Column {
+                TextButton(enabled = !saving, onClick = dismissLeave) {
+                    Text(if (createdProjectId != null) "暂不打开" else "继续编辑")
+                }
+                TextButton(enabled = !saving, onClick = {
+                    if (currentProjectId == projectId && showLeave && !saving && leaveForCreatedProjectId == createdProjectId) {
+                        showLeave = false
+                        leaveForCreatedProjectId = null
+                        if (createdProjectId != null) onOpenProject(createdProjectId)
+                        else if (leaveForManualRecording) onManualRecording() else onBack()
+                    }
+                }) { Text(if (createdProjectId != null) "放弃修改并打开"
+                    else if (leaveForManualRecording) "放弃修改并继续" else "放弃修改并返回") }
+            } })
+    }
     if (reviewRunId != null) {
-        ClickChainReviewRoute(requireNotNull(reviewRunId), onBack = { reviewRunId = null }, onOpenProject = onOpenProject)
+        ClickChainReviewRoute(requireNotNull(reviewRunId), onBack = {
+            if (currentProjectId == projectId && !saving && !showLeave) {
+                leaveForCreatedProjectId = null
+                reviewRunId = null
+            }
+        }, onOpenProject = { createdProjectId ->
+            if (currentProjectId == projectId && !saving && !showLeave) {
+                leaveForManualRecording = false
+                if (dirty) {
+                    leaveForCreatedProjectId = createdProjectId
+                    showLeave = true
+                } else onOpenProject(createdProjectId)
+            }
+        })
         return
     }
     BackHandler(onBack = leave)
     val run = playback.run?.takeIf { it.projectId == projectId } ?: recordedRuns.firstOrNull()
     val reviewable = (listOfNotNull(run?.takeIf { it.terminal }) + recordedRuns).distinctBy { it.runId }
     val target = apps.firstOrNull { it.packageName == draft.targetPackage }
-    val error = clickPlanInputError(draft.targetPackage, draft.width, draft.height, draft.displayId, draft.points)
     ClickPlanContent(
         state = ClickPlanUiState(
             targetLabel = target?.label,
@@ -449,16 +514,6 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
             } catch (_: Exception) { message = "无法读取当前屏幕，计划尚未改变。" }
         }) { Text("清空点位并重新编排") } },
         dismissButton = { TextButton(onClick = { showResetGeometry = false }) { Text("取消") } })
-    if (showLeave) AlertDialog(onDismissRequest = { showLeave = false }, title = { Text("保留当前修改？") },
-        text = { Text("点击计划有尚未保存的修改。可保存后返回，或放弃本次修改。") },
-        confirmButton = { TextButton(enabled = canEdit && geometryMatches && error == null, onClick = { showLeave = false; save(false, true) }) { Text("保存并返回") } },
-        dismissButton = { Row {
-            TextButton(onClick = { showLeave = false }) { Text("继续编辑") }
-            TextButton(onClick = {
-                showLeave = false
-                if (leaveForManualRecording) onManualRecording() else onBack()
-            }) { Text(if (leaveForManualRecording) "放弃修改并继续" else "放弃修改并返回") }
-        } })
     if (showReload) AlertDialog(onDismissRequest = { showReload = false }, title = { Text("重新载入已保存计划？") },
         text = { Text("当前尚未保存的输入会被替换。") },
         confirmButton = { TextButton(onClick = { showReload = false; dirty = false; initialized = false; saveFailed = false; message = null; refresh++ }) { Text("重新载入") } },
