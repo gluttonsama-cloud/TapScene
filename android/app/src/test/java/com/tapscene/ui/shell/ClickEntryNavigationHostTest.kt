@@ -242,7 +242,10 @@ class ClickEntryNavigationHostTest {
             compose.onNodeWithText("素材").assertIsNotSelected().performClick()
             compose.onNodeWithText("素材").assertIsNotSelected()
             compose.onNodeWithText("悬浮编排").assertDoesNotExist()
-            println("HOST_PROJECT_TAB busy=${reopenedProjects.state.value.busy}; sources click retains Steps while refresh is blocked")
+            compose.onNodeWithText("检查与交付").assertIsNotEnabled().assertIsNotSelected().performClick()
+            compose.onNodeWithText("检查与交付").assertIsNotEnabled().assertIsNotSelected()
+            compose.onNodeWithText("查看交付方式").assertDoesNotExist()
+            println("HOST_PROJECT_TAB busy=${reopenedProjects.state.value.busy}; sources/checks clicks retain Steps while refresh is blocked")
             compose.onNodeWithText("素材").assertIsNotEnabled()
         } finally {
             finishRefresh.countDown(); refreshHolder.join(10_000)
@@ -560,7 +563,11 @@ class ClickEntryNavigationHostTest {
         waitFor("另一个项目 B")
         compose.onNodeWithText("另一个项目 B").performClick()
         waitFor("检查与交付")
-        compose.onNodeWithText("检查与交付").performClick()
+        // The tab is mounted before the project/media refresh finishes; wait for its real readiness.
+        compose.waitUntil(30_000) {
+            compose.onAllNodes(hasText("检查与交付") and isEnabled()).fetchSemanticsNodes().size == 1
+        }
+        compose.onNodeWithText("检查与交付").assertIsEnabled().performClick().assertIsSelected()
         compose.onNodeWithText("查看交付方式").performScrollTo().performClick()
         waitFor("当前未选择封存版本")
         assertNull(releases.state.value.deliveryRelease)
