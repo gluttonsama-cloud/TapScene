@@ -74,11 +74,15 @@ class ClickChainReviewNavigationHostTest {
         }
         compose.waitForIdle()
         workbench().performScrollToIndex(16)
+        val anchorTitle = if (framesOnly) "合成画面 15" else "合成画面 8"
+        val unshifted = compose.onNodeWithText(anchorTitle).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
         workbench().performSemanticsAction(SemanticsActions.ScrollBy) { it(0f, 29f) }
         compose.waitForIdle()
-        val before = scrollPosition()
-        assertTrue("The test must start in the middle of the route", before > 10f)
-        assertTrue("The starting item must include a pixel offset", before != before.toInt().toFloat())
+        val before = compose.onNodeWithText(anchorTitle).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        assertTrue("The test must start in the middle of the route", scrollPosition() > 10f)
+        // Lazy-list accessibility reports an item-based value, not its pixel offset.
+        // Prove the extra scroll actually happened using the rendered row instead.
+        assertEquals(unshifted.top - 29f, before.top, 1f)
 
         repeat(2) {
             val buttons = compose.onAllNodesWithText(button)
@@ -87,8 +91,9 @@ class ClickChainReviewNavigationHostTest {
             compose.onNodeWithText(editorTitle).assertIsDisplayed()
             compose.onNodeWithContentDescription("返回").performClick()
             compose.waitForIdle()
-            // No test-side scroll on return: index and fractional item offset must survive.
-            assertEquals(before, scrollPosition(), 0f)
+            // No test-side scroll on return: the actual same row and pixel offset must survive.
+            val returned = compose.onNodeWithText(anchorTitle).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+            assertEquals(before, returned)
             assertEquals(it + 1, opens)
             assertEquals(0, creates)
         }
