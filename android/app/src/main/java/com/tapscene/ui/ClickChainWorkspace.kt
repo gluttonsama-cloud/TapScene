@@ -249,6 +249,7 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
             !saved.framesOnly && path.issue != null -> path.issue
             !saved.framesOnly && path.stages.dropLast(1).mapNotNull { it.selectedKey }.groupingBy { it }.eachCount().any { it.value > 6 } -> "同一画面最多 6 个热点，请缩小范围。"
             saved.markLastTerminal && !saved.framesOnly && path.stages.lastOrNull()?.selectedKey in path.stages.dropLast(1).map { it.selectedKey } -> "末页还有动作，不能同时设为终点。请取消终点选项。"
+            keys.any { titleForFrame(it).isBlank() } -> "请补全所选画面的名称。已有画面复核与遮挡会保留。"
             else -> null
         }
         val reviewedCount = keys.count(::frameReviewed)
@@ -381,7 +382,7 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
     }
     fun confirmFrame(digest: String) {
         val key = selectedFrame ?: return; val frame = frameDraft(key)
-        if (outputBitmap?.isRecycled != false || frame.output?.sha256 != digest || state.value.busy) return
+        if (frame.title.isBlank() || outputBitmap?.isRecycled != false || frame.output?.sha256 != digest || state.value.busy) return
         execute("保存画面复核") {
             val output = checkNotNull(frame.output)
             withContext(Dispatchers.IO) { validateOutput(output,frame.masks) }
@@ -459,7 +460,9 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
         val saved = checkNotNull(draft);val current = checkNotNull(capture);val path = route();val keys = selectedKeys(path)
         check(saved.framesOnly || path.issue == null) { path.issue.orEmpty() }
         val frames = keys.map { key ->
-            val frame = frameDraft(key);check(frame.reviewed);val output = checkNotNull(frame.output)
+            val frame = frameDraft(key)
+            check(frame.title.isNotBlank()) { "请补全所选画面的名称。" }
+            check(frame.reviewed);val output = checkNotNull(frame.output)
             val proof = current.frames.getValue(key)
             ClickChainReviewedFrame(proof,ReviewedStepInput(reviews.outputFile(saved.runId,output),output.sha256,output.width,output.height,
                 current.source,proof.containerPtsUs,1L,frame.masks,"click-frame:${saved.runId}:${proof.ticket.sourceFrameId}:${output.sha256}"),frame.title)

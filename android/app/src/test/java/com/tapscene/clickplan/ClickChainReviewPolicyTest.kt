@@ -148,6 +148,37 @@ class ClickChainReviewPolicyTest {
         check(state.copy(frames = emptyList()).nextRequiredReview() == null)
     }
 
+    @Test fun reviewedBlankNamesNeedSelectedMetadataRepairWithoutChangingReviewOrLockSemantics() {
+        val choices = listOf(ClickChainStageChoice("unused","上一动作后"),ClickChainStageChoice("selected","下一动作前"))
+        val stage = ClickChainStageRow(1," ",choices,"selected",true)
+        val chain = ClickChainReviewUiState(totalActions = 2,lastAction = "2",
+            stages = listOf(stage,stage.copy(index = 2)),
+            frames = listOf(ClickChainFrameRow("unused","",true),ClickChainFrameRow("selected"," ",true)),
+            actions = listOf(reviewAction("action",confirmed = true)))
+        val framesOnly = chain.copy(framesOnly = true,frames = chain.frames.map {
+            if (it.key == "unused") it.copy(selected = false) else it
+        })
+        listOf("", " ", "\t\n", "\u3000").forEach { blank ->
+            val candidates = listOf(chain.copy(stages = chain.stages.map { it.copy(title = blank) }),
+                framesOnly.copy(frames = framesOnly.frames.map { if (it.selected) it.copy(title = blank) else it }))
+            candidates.forEach { state ->
+                check(state.nextRequiredReview() == ClickChainReviewTarget.Frame("selected"))
+                check(state.frames.all { it.reviewed } && state.actions.all { it.confirmed })
+                listOf(state.copy(busy = true),state.copy(loading = true),state.copy(editingLocked = true),
+                    state.copy(outcomeUnknown = true),state.copy(createdProjectId = "created")).forEach {
+                    check(it.nextRequiredReview() == null)
+                }
+            }
+        }
+        check(chain.copy(stages = chain.stages.map { it.copy(title = "已补名称") }).nextRequiredReview() == null)
+        check(framesOnly.copy(frames = framesOnly.frames.map {
+            if (it.selected) it.copy(title = "已补名称") else it
+        }).nextRequiredReview() == null)
+        // Even blank titles never authorize navigation to a missing or stale representative.
+        check(chain.copy(stages = listOf(stage.copy(selectedKey = null),
+            stage.copy(selectedKey = "outside-choices"))).nextRequiredReview() == null)
+    }
+
     @Test fun nextActionReviewSkipsConfirmedAndDisabledUnknownActionsInListOrder() {
         // The workspace makes unknown outcomes disabled; status text is a display label, not a second policy.
         val unknown = reviewAction("unknown",1,enabled = false).copy(status = "结果待确认")

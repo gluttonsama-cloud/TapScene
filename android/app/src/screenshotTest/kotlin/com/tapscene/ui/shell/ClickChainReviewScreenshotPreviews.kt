@@ -54,6 +54,22 @@ fun ClickChainReviewCompletePreview() {
 }
 
 @PreviewTest
+@Preview(name = "click_chain_review_name_repair", widthDp = 320, heightDp = 800, locale = "zh-rCN", showBackground = true)
+@Composable
+fun ClickChainReviewNameRepairPreview() {
+    ClickChainReviewPreviewSurface {
+        val state = clickChainWorkbenchFixture(true)
+        ClickChainReviewContent(state.copy(
+            stages = state.stages.mapIndexed { index, stage -> if (index == 0) stage.copy(title = "") else stage },
+            frames = state.frames.mapIndexed { index, frame -> if (index == 0) frame.copy(title = "") else frame },
+            actions = state.actions.map { it.copy(fromTitle = "") },
+            issue = "请补全所选画面的名称。已有画面复核与遮挡会保留。",
+            canCreate = false,
+        ), ClickChainReviewCallbacks())
+    }
+}
+
+@PreviewTest
 @Preview(name = "click_chain_review_missing", widthDp = 320, heightDp = 800, locale = "zh-rCN", showBackground = true)
 @Composable
 fun ClickChainReviewMissingPreview() {

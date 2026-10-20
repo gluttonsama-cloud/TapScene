@@ -142,6 +142,17 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
     LaunchedEffect(validation) { if (validation != null) settingsExpanded = true }
     val visibleKeys by remember(listState) { derivedStateOf { listState.layoutInfo.visibleItemsInfo.map { it.key }.toSet() } }
     val frames = remember(state.frames) { state.frames.associateBy { it.key } }
+    val nextFrame = (next as? ClickChainReviewTarget.Frame)?.let { frames[it.key] }
+    val nextStage = (next as? ClickChainReviewTarget.Frame)?.let { target ->
+        state.stages.firstOrNull { it.selectedKey == target.key }
+    }
+    val nameRepair = next is ClickChainReviewTarget.Frame &&
+        (if (state.framesOnly) nextFrame?.let { it.reviewed && it.title.isBlank() } == true
+            else nextStage?.let { it.reviewed && it.title.isBlank() } == true)
+    val nextFrameLabel = if (next is ClickChainReviewTarget.Frame) {
+        (if (state.framesOnly) nextFrame?.title else nextStage?.title)?.takeIf { it.isNotBlank() }
+            ?: "画面 ${if (state.framesOnly) state.frames.indexOfFirst { it.key == next.key } + 1 else (nextStage?.index ?: 0) + 1}"
+    } else null
     val requests = state.visibleThumbnailRequests(visibleKeys)
     val loader by rememberUpdatedState(callbacks.loadThumbnails)
     val loaded by produceState<ClickChainThumbnailBatch?>(null, state.runId, requests) {
@@ -270,7 +281,7 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
                 if (state.framesOnly) " · 仅加入画面" else " · 动作 ${state.confirmedActionCount}/${state.actions.size}",
                 style = MaterialTheme.typography.labelLarge)
             if (editable && next != null) Text(when (next) {
-                is ClickChainReviewTarget.Frame -> "下一项：${frames[next.key]?.title ?: state.stages.firstOrNull { it.selectedKey == next.key }?.title.orEmpty()}"
+                is ClickChainReviewTarget.Frame -> "下一项：$nextFrameLabel${if (nameRepair) " · 补全名称" else ""}"
                 is ClickChainReviewTarget.Action -> "下一项：核对动作 ${state.actions.firstOrNull { it.actionId == next.actionId }?.number} 的点击区域与去向"
             }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (state.retryCreate && state.editingLocked && !state.busy && !state.loading && !state.outcomeUnknown)
@@ -281,7 +292,9 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
                 state.createdProjectId != null -> Button({ callbacks.onOpenProject(state.createdProjectId) }, button) { Text("打开新项目") }
                 state.outcomeUnknown -> Button(callbacks.onRetry, button) { Text("核对生成结果") }
                 state.issue?.startsWith("输入尚未保存") == true -> Button(callbacks.onRetry, button) { Text("重试保存输入") }
-                next is ClickChainReviewTarget.Frame -> Button({ callbacks.onReviewFrame(next.key) }, button) { Text("继续复核画面") }
+                next is ClickChainReviewTarget.Frame -> Button({ callbacks.onReviewFrame(next.key) }, button) {
+                    Text(if (nameRepair) "补全画面名称" else "继续复核画面")
+                }
                 next is ClickChainReviewTarget.Action -> Button({ callbacks.onReviewAction(next.actionId) }, button) { Text("继续核对动作") }
                 state.editingLocked && !state.retryCreate -> OutlinedButton(callbacks.onBack, button) { Text("返回录制") }
                 else -> Button(callbacks.onCreate, button, enabled = state.canCreate) {
@@ -301,7 +314,7 @@ private fun ClickChainStageContent(stage: ClickChainStageRow, frame: ClickChainF
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("画面 ${(stage.index + 1).toString().padStart(2, '0')}${if (revisit) " · 回访" else ""}",
                     style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                Text(stage.title.ifBlank { "待补画面" }, style = MaterialTheme.typography.titleSmall,
+                Text(stage.title.ifBlank { if (stage.selectedKey == null) "待补画面" else "未填写名称" }, style = MaterialTheme.typography.titleSmall,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Text(when { stage.selectedKey == null -> "缺少画面证据"; frame != null -> frame.thumbnailLabel(); stage.reviewed -> "已复核"; else -> "待复核" },
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -328,7 +341,7 @@ private fun ClickChainFrameRowContent(frame: ClickChainFrameRow, editable: Boole
         Checkbox(frame.selected, { callbacks.onToggleFrame(frame.key, it) }, enabled = editable)
         ClickChainThumbnail(frame, false, thumbnail)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(frame.title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(frame.title.ifBlank { "未填写名称" }, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text(frame.thumbnailLabel(), style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             frame.selectionNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
@@ -416,7 +429,10 @@ private fun ClickChainFramePanel(editor: ClickChainFrameEditor, state: ClickChai
                 Column(modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     OutlinedTextField(editor.title, callbacks.onFrameTitleChange, Modifier.fillMaxWidth(),
-                        enabled = idle, label = { Text("画面标题") }, singleLine = true)
+                        enabled = idle, label = { Text("画面标题") }, singleLine = true, isError = editor.title.isBlank(),
+                        supportingText = if (editor.title.isBlank()) {
+                            { Text("请填写画面名称；已有画面复核与遮挡会保留。") }
+                        } else null)
                     editor.selectionNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                     if (reviewMode) Text("可双指放大检查完整输出，确认没有遗漏的敏感内容。", style = MaterialTheme.typography.bodySmall)
                     else {

@@ -265,7 +265,7 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 141, f"Expected 141 Compose review images, found {len(images)}"
+          assert len(images) == 142, f"Expected 142 Compose review images, found {len(images)}"
           project_deletion_images = [image for image in images if "ProjectDeletionScreenshotPreviewsKt" in str(image)]
           assert len(project_deletion_images) == 3, f"Expected three project deletion confirmation images, found {len(project_deletion_images)}"
           screenshot_import_images = [image for image in images if "ScreenshotImportPreviewsKt" in str(image)]
@@ -285,7 +285,7 @@ jobs:
           delivery_images = [image for image in images if "DeliveryAvailabilityScreenshotPreviewsKt" in str(image)]
           assert len(delivery_images) == 4, f"Expected four delivery availability images, found {len(delivery_images)}"
           click_review_images = [image for image in images if "ClickChainReviewScreenshotPreviewsKt" in str(image)]
-          assert len(click_review_images) == 9, f"Expected nine click-chain author review images, found {len(click_review_images)}"
+          assert len(click_review_images) == 10, f"Expected ten click-chain author review images, found {len(click_review_images)}"
           click_plan_images = [image for image in images if "ClickPlanScreenshotPreviewsKt" in str(image)]
           assert len(click_plan_images) == 5, f"Expected five click-plan review images, found {len(click_plan_images)}"
           text_region_images = [image for image in images if "TextRegionScreenshotPreviewsKt" in str(image)]
@@ -493,6 +493,7 @@ jobs:
             --tests com.tapscene.recording.FrameEvidenceThumbnailHostTest \
             --tests com.tapscene.ui.ClickChainThumbnailBatchHostTest \
             --tests com.tapscene.ui.shell.ClickChainThumbnailHostTest \
+            --tests com.tapscene.ui.shell.ClickChainNameReadinessHostTest \
             --tests com.tapscene.data.ClickChainImportHostTest \
             --tests com.tapscene.recording.RecordingClickGateTest \
             --tests com.tapscene.recording.RecordingFrameLedgerTest \
@@ -646,6 +647,7 @@ jobs:
               ("com.tapscene.clickplan.ClickChainReviewPolicyTest", "nextReviewUsesChosenRepresentativeAndNeverFabricatesMissingOrStaleKeys"): 1,
               ("com.tapscene.clickplan.ClickChainReviewPolicyTest", "nextReviewAfterRangeNarrowingUsesOnlyCurrentRouteFramesAndActions"): 1,
               ("com.tapscene.clickplan.ClickChainReviewPolicyTest", "framesOnlyReviewSkipsDeselectedFramesAndNeverNavigatesToActions"): 1,
+              ("com.tapscene.clickplan.ClickChainReviewPolicyTest", "reviewedBlankNamesNeedSelectedMetadataRepairWithoutChangingReviewOrLockSemantics"): 1,
               ("com.tapscene.clickplan.ClickChainReviewPolicyTest", "nextActionReviewSkipsConfirmedAndDisabledUnknownActionsInListOrder"): 1,
               ("com.tapscene.clickplan.ClickChainReviewPolicyTest", "nextReviewIsSuppressedByEveryLockAndEitherOpenEditor"): 1,
               ("com.tapscene.clickplan.ClickChainReviewPolicyTest", "nextReviewIsPureAndDoesNotUseOrInferCreationPermission"): 1,
@@ -674,6 +676,10 @@ jobs:
               ("com.tapscene.ui.shell.ClickChainThumbnailHostTest", "leavingVisibleRowsCancelsTheOldBatchAndRequestsOnlyTheNewViewport"): 1,
               ("com.tapscene.ui.shell.ClickChainThumbnailHostTest", "replacingWorkbenchWithEitherEditorCancelsItsThumbnailRequest"): 1,
               ("com.tapscene.ui.shell.ClickChainThumbnailHostTest", "revisitsShareOneBitmapAndReplacingOutputDropsButDoesNotRecycleDisplayedPixels"): 1,
+              ("com.tapscene.ui.shell.ClickChainNameReadinessHostTest", "chainNameRepairSurvivesReturnAndReopenWithoutLosingSafeOutputOrActions"): 1,
+              ("com.tapscene.ui.shell.ClickChainNameReadinessHostTest", "framesOnlyWhitespaceRepairIgnoresDeselectedNamesAndKeepsReviewedPixels"): 1,
+              ("com.tapscene.ui.shell.ClickChainNameReadinessHostTest", "sharedFrameNameRepairUpdatesEveryVisitWithoutDuplicatingReviewOrResettingActions"): 1,
+              ("com.tapscene.ui.shell.ClickChainNameReadinessHostTest", "directFrameConfirmationRejectsBlankNameWithoutMarkingOutputReviewed"): 1,
               ("com.tapscene.data.ClickChainImportHostTest", "reviewedRouteCreatesIndependentProjectAndReceiptOutlivesBothOwners"): 1,
               ("com.tapscene.data.ClickChainImportHostTest", "failedCommitCancellationAndRetryAreAtomic"): 1,
               ("com.tapscene.data.ClickChainImportHostTest", "tamperedMediaWrongPixelsAndUnknownActionsCannotBecomeEvidence"): 1,

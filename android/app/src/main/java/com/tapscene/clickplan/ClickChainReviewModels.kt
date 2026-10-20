@@ -140,8 +140,10 @@ internal sealed interface ClickChainReviewTarget {
 internal fun ClickChainReviewUiState.nextRequiredReview(): ClickChainReviewTarget? {
     if (busy || loading || editingLocked || createdProjectId != null || outcomeUnknown ||
         frameEditor != null || actionEditor != null) return null
-    if (framesOnly) return frames.firstOrNull { it.selected && !it.reviewed }?.let { ClickChainReviewTarget.Frame(it.key) }
-    stages.firstOrNull { stage -> !stage.reviewed && stage.selectedKey != null &&
+    // A name repair is metadata work, not a revocation of the already-reviewed safe pixels.
+    if (framesOnly) return frames.firstOrNull { it.selected && (!it.reviewed || it.title.isBlank()) }
+        ?.let { ClickChainReviewTarget.Frame(it.key) }
+    stages.firstOrNull { stage -> (!stage.reviewed || stage.title.isBlank()) && stage.selectedKey != null &&
         stage.choices.any { it.frameKey == stage.selectedKey } }?.selectedKey?.let { return ClickChainReviewTarget.Frame(it) }
     return actions.firstOrNull { it.enabled && !it.confirmed }?.let { ClickChainReviewTarget.Action(it.actionId) }
 }
