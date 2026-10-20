@@ -64,6 +64,7 @@ import org.robolectric.annotation.SQLiteMode
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class ClickChainActionPrecisionHostTest {
+    private var previousRequestedSize: String? = null
     private val bitmaps = mutableListOf<Bitmap>()
     private val stores = mutableListOf<ProjectStore>()
     private val workspaces = mutableListOf<Pair<ViewModelStoreOwner, ClickChainWorkspace>>()
@@ -73,8 +74,17 @@ class ClickChainActionPrecisionHostTest {
             resetFactory()
             HostSqlite.configure()
             HostFileSyncShadow.begin(RuntimeEnvironment.getApplication().noBackupFilesDir)
+            // Pinned Robolectric otherwise ignores WRAP_CONTENT window size/gravity. Honor
+            // measured modal bounds instead of changing production layout or idle assertions.
+            previousRequestedSize = System.setProperty("robolectric.windowManager.useRequestedSize", "true")
         }
-        override fun after() { HostFileSyncShadow.reset(); resetFactory() }
+        override fun after() {
+            try { HostFileSyncShadow.reset() } finally {
+                resetFactory()
+                val key = "robolectric.windowManager.useRequestedSize"
+                previousRequestedSize?.let { System.setProperty(key, it) } ?: System.clearProperty(key)
+            }
+        }
     }
     @get:Rule(order = 1) val compose = createAndroidComposeRule<MainActivity>()
 

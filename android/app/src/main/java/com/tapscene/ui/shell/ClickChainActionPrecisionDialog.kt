@@ -61,9 +61,9 @@ internal fun ClickChainActionPrecisionContent(original: OpaqueMask, form: ClickC
                     EditorPercentageField("底部 %", form.bottom, { onChange(form.copy(bottom = it)) }, enabled, Modifier.weight(1f))
                 }
             }
-            if (rectangle == null) Text("范围须在 0–100% 内，右边大于左边，底部大于顶部。",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         }
+        if (rectangle == null) Text("范围须在 0–100% 内，右边大于左边，底部大于顶部。",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
             TextButton(onDismiss, Modifier.heightIn(min = 48.dp)) { Text("取消") }
             Button({ if (enabled && rectangle != null) onApply(rectangle) }, Modifier.heightIn(min = 48.dp),
