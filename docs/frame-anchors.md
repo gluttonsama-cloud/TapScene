@@ -33,7 +33,7 @@ SurfaceTexture 的时间起点属于其生产者，只用于真实源身份和�
 
 FrameEvidenceStore.listBoundaries(sessionId) 仅返回动作身份、边界、epoch、ticketId 或 Missing 原因，无原图路径。readCandidate 与 SourceRepository.frameEvidenceSourceAccessor 重新核对当前登记归属、真实 MP4 长度/SHA、实际样本序号、PNG SHA/完整像素和几何，全部满足才返回可用于私有复核的元数据。
 
-withDecodedFrameSuspending 提供自动回收的 Bitmap 作用域，供现有 SafeMediaWriter 生成真实遮挡 PNG；不能把原 Bitmap 传到导出或托管资产。正式步骤仍须显示并由作者确认实际派生 PNG。此增量不自动建立步骤、热点、分支或隐私复核标志，候选 UI 接入为后续独立增量。
+withDecodedFrameSuspending 提供自动回收的 Bitmap 作用域，供现有 SafeMediaWriter 生成真实遮挡 PNG；不能把原 Bitmap 传到导出或托管资产。readUnreviewedThumbnail 使用相同证据门禁，检查完整 PNG 的所有原像素后直接采样为最多 220,000 像素的私有列表图，明确标记“原始画面 · 未复核”；不先解码完整 Bitmap，不写入复核或资产记录。可见批次每次重新观察原片，不保留跨批验证缓存。正式步骤仍须显示并由作者确认实际派生 PNG；已接入的点击链整理页面不会因缩略图成功而自动建立步骤、热点、分支或隐私复核标志。
 
 固定几何为显式等比居中变换：frameX = displayX × scale + offsetX，Y 同理。SurfaceTexture 变换矩阵逐帧用于规范化采样。点坐标可转换，按钮范围仍需作者调整；缺 after、跨 epoch 或失效来源不能猜目的状态。已有点击日志的 Unknown/空帧字段保留兼容，独立证据侧车不回写终态动作。
 

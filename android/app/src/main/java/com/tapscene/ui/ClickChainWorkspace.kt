@@ -44,6 +44,9 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
     private val reviews = ClickChainReviewStore(app)
     private val evidence = FrameEvidenceStore(app)
     private val sourceAccessor = SourceRepository(app).frameEvidenceSourceAccessor()
+    private val thumbnailSourceAccessor: (() -> Unit) -> FrameSourceAccessor = { checkActive ->
+        SourceRepository(app).frameEvidenceSourceAccessor(checkActive)
+    }
     private val writer = SafeMediaWriter(app)
     private val mutable = MutableStateFlow(ClickChainReviewUiState())
     val state = mutable.asStateFlow()
@@ -255,7 +258,7 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
             stages = path.stages.map { stage -> ClickChainStageRow(stage.index,stage.selectedKey?.let(::titleForFrame) ?: "画面待补",
                 stage.choices,stage.selectedKey,stage.selectedKey?.let(::frameReviewed) == true) },actions = actions,
             frames = allFrames.map { key -> ClickChainFrameRow(key,titleForFrame(key),frameReviewed(key),saved.selectedFrameKeys?.contains(key) != false,
-                thumbnailDigest = saved.frames[key]?.takeIf { it.reviewed && it.originalPngSha256 == current.frames[key]?.pngSha256 }?.output?.sha256,
+                thumbnailSource = current.thumbnailSource(saved, key),
                 selectionNotice = current.frames[key]?.selectionNotice) },
             frameCount = keys.size,reviewedFrameCount = reviewedCount,confirmedActionCount = confirmedCount,
             markLastTerminal = saved.markLastTerminal,issue = issue,
@@ -476,22 +479,78 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
         BitmapFactory.decodeFile(file.path) ?: error("已生成画面无法读取，请重新生成。")
     }
 
-    /** A single sampled decode at a time; late images cannot cross runs, owners or replaced outputs. */
-    suspend fun loadReviewedThumbnail(key: String, digest: String): Bitmap? {
-        val saved = draft ?: return null
-        val frame = saved.frames[key]?.takeIf { it.reviewed && it.originalPngSha256 == capture?.frames?.get(key)?.pngSha256 } ?: return null
-        val output = frame.output?.takeIf { it.sha256 == digest } ?: return null
-        val request = generation
-        val bitmap = try {
-            thumbnailReads.withLock {
-                withContext(Dispatchers.IO) { readClickChainThumbnail(reviews.outputFile(saved.runId, output), output) }
-            }
+    /** One bounded visible-row batch. Original pixels never become review inputs or saved outputs. */
+    suspend fun loadThumbnails(requests: List<ClickChainThumbnailRequest>): Map<ClickChainThumbnailRequest, Bitmap> {
+        val saved = draft ?: return emptyMap()
+        val captured = capture ?: return emptyMap()
+        val requestedGeneration = generation
+        val wanted = requests.distinct()
+        if (wanted.isEmpty() || wanted.size > MAX_VISIBLE_CLICK_CHAIN_THUMBNAILS) return emptyMap()
+        if (wanted.any { captured.thumbnailSource(saved, it.frameKey) != it.source }) return emptyMap()
+        return try {
+            readClickChainThumbnailBatch(thumbnailReads, read = { images ->
+                val context = currentCoroutineContext()
+                val checkActive = { context.ensureActive() }
+                checkActive()
+                check(reviews.readExisting(saved.runId)?.owner == saved.owner)
+                val originals = wanted.filter { it.source is ClickChainThumbnailSource.OriginalUnreviewed }
+                var originalBoundaries: List<FrameBoundaryMetadata>? = null
+                fun discardOriginals() {
+                    originals.forEach { request -> images.remove(request)?.let { if (!it.isRecycled) it.recycle() } }
+                }
+                if (originals.isNotEmpty()) try {
+                    WorkspaceStore.withProjectCopyLock {
+                        checkActive()
+                        check(projects.readProject(captured.run.projectId) != null)
+                        check(WorkspaceStore(app, captured.run.projectId).read().any { it.source == captured.source })
+                        originalBoundaries = evidence.listBoundaries(captured.run.recordingSessionId)
+                        // Expensive MP4 hash/sample inspection happens once per current batch, not once per row.
+                        val observed = checkNotNull(thumbnailSourceAccessor(checkActive).registeredSource(
+                            captured.run.projectId, captured.run.recordingSessionId, captured.run.sourceId))
+                        val bounded = FrameSourceAccessor { project, session, source ->
+                            checkActive()
+                            observed.takeIf { project == captured.run.projectId &&
+                                session == captured.run.recordingSessionId && source == captured.run.sourceId }
+                        }
+                        originals.forEach { request ->
+                            checkActive()
+                            try {
+                                images[request] = evidence.readUnreviewedThumbnail(
+                                    captured.frames.getValue(request.frameKey), bounded, checkActive)
+                            } catch (cancelled: CancellationException) { throw cancelled }
+                            catch (_: Exception) { /* A failed preview does not rewrite evidence or review state. */ }
+                        }
+                    }
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { discardOriginals() }
+                wanted.filter { it.source is ClickChainThumbnailSource.ReviewedOutput }.forEach { request ->
+                    checkActive()
+                    try {
+                        val output = checkNotNull(saved.frames[request.frameKey]?.output)
+                        images[request] = readClickChainThumbnail(reviews.outputFile(saved.runId, output), output)
+                    } catch (cancelled: CancellationException) { throw cancelled }
+                    catch (_: Exception) { /* Never substitute an original for an unreadable reviewed output. */ }
+                }
+                checkActive()
+                if (originals.any { it in images }) try {
+                    // Project deletion does not take the workspace lock. Recheck at the batch boundary.
+                    WorkspaceStore.withProjectCopyLock {
+                        checkActive()
+                        check(projects.readProject(captured.run.projectId) != null)
+                        check(WorkspaceStore(app, captured.run.projectId).read().any { it.source == captured.source })
+                        check(evidence.listBoundaries(captured.run.recordingSessionId) == originalBoundaries)
+                    }
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { discardOriginals() }
+                check(reviews.readExisting(saved.runId)?.owner == saved.owner)
+            }, stillCurrent = {
+                val current = draft
+                requestedGeneration == generation && capture === captured && current != null &&
+                    current.runId == saved.runId && current.owner == saved.owner &&
+                    wanted.all { captured.thumbnailSource(current, it.frameKey) == it.source }
+            })
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { return null }
-        val current = draft
-        return if (request == generation && current != null && current.runId == saved.runId && current.owner == saved.owner &&
-            current.frames[key]?.let { it.reviewed && it.output == output && it.originalPngSha256 == frame.originalPngSha256 } == true) bitmap
-        else { bitmap.recycle(); null }
+        catch (_: Exception) { emptyMap() }
     }
     private suspend fun validateOutput(output: ClickChainOutput,masks: List<OpaqueMask>): File {
         val file = reviews.outputFile(checkNotNull(draft).runId,output)

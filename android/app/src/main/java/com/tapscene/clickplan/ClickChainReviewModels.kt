@@ -105,7 +105,7 @@ internal object ClickChainRoutePolicy {
 }
 
 internal data class ClickChainFrameRow(val key: String, val title: String, val reviewed: Boolean,
-    val selected: Boolean = true, val thumbnail: Bitmap? = null, val thumbnailDigest: String? = null,
+    val selected: Boolean = true, val thumbnail: Bitmap? = null, val thumbnailSource: ClickChainThumbnailSource? = null,
     val selectionNotice: String? = null)
 internal data class ClickChainStageRow(val index: Int, val title: String, val choices: List<ClickChainStageChoice>,
     val selectedKey: String?, val reviewed: Boolean)

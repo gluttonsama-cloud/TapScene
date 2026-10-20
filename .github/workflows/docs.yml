@@ -490,6 +490,9 @@ jobs:
             --tests com.tapscene.clickplan.ClickChainReviewPolicyTest \
             --tests com.tapscene.clickplan.ClickChainReviewStoreHostTest \
             --tests com.tapscene.ui.shell.ClickChainReviewNavigationHostTest \
+            --tests com.tapscene.recording.FrameEvidenceThumbnailHostTest \
+            --tests com.tapscene.ui.ClickChainThumbnailBatchHostTest \
+            --tests com.tapscene.ui.shell.ClickChainThumbnailHostTest \
             --tests com.tapscene.data.ClickChainImportHostTest \
             --tests com.tapscene.recording.RecordingClickGateTest \
             --tests com.tapscene.recording.RecordingFrameLedgerTest \
@@ -651,6 +654,26 @@ jobs:
               ("com.tapscene.clickplan.ClickChainReviewStoreHostTest", "reviewedThumbnailRequiresExactOutputAndBoundsDecodeWithoutChangingReview"): 1,
               ("com.tapscene.ui.shell.ClickChainReviewNavigationHostTest", "frameEditorReturnsPreserveMiddlePositionAndDifferentRunStartsAtTop"): 1,
               ("com.tapscene.ui.shell.ClickChainReviewNavigationHostTest", "actionEditorReturnsPreserveMiddlePositionAndDifferentRunStartsAtTop"): 1,
+              ("com.tapscene.recording.FrameEvidenceThumbnailHostTest", "opaqueRgbAndRgbaAllFiltersCrossPixelRowAndInflateBufferBoundaries"): 1,
+              ("com.tapscene.recording.FrameEvidenceThumbnailHostTest", "transparentOriginalPixelOmittedByNativeSamplingStillFailsTheWholePngGate"): 1,
+              ("com.tapscene.recording.FrameEvidenceThumbnailHostTest", "malformedCrcLengthsDeflateFiltersColorInterlaceAndSuffixAreRejected"): 1,
+              ("com.tapscene.recording.FrameEvidenceThumbnailHostTest", "thumbnailUsesBoundedArgbPixelsAndLeavesOriginalEvidenceAndFullDecodeUnchanged"): 1,
+              ("com.tapscene.recording.FrameEvidenceThumbnailHostTest", "thumbnailRequiresExactCandidateFreshOwnershipShaGeometryAndContainerSample"): 1,
+              ("com.tapscene.recording.FrameEvidenceThumbnailHostTest", "sourceObservationIsOutsideEvidenceLockAndChangedOrRevokedSessionsFailClosed"): 1,
+              ("com.tapscene.recording.FrameEvidenceThumbnailHostTest", "cancellationPropagatesThroughSourceHashAndEveryPngDecodeCheckpoint"): 1,
+              ("com.tapscene.recording.FrameEvidenceThumbnailHostTest", "containerTraversalCancellationStopsReadingAndReleasesExtractor"): 1,
+              ("com.tapscene.ui.ClickChainThumbnailBatchHostTest", "visibleOriginalBatchSharesFreshObservationAndLeavesReviewAndProjectUntouched"): 1,
+              ("com.tapscene.ui.ClickChainThumbnailBatchHostTest", "sameDigestDifferentKindAndChangedOwnerOrGenerationCannotReuseOriginalImages"): 1,
+              ("com.tapscene.ui.ClickChainThumbnailBatchHostTest", "unavailableOriginalDoesNotHideReviewedOutputAndReviewedFailureNeverFallsBack"): 1,
+              ("com.tapscene.ui.ClickChainThumbnailBatchHostTest", "revocationAndCommittedProjectDeletionDuringSourceObservationRejectOriginalBatch"): 1,
+              ("com.tapscene.ui.ClickChainThumbnailBatchHostTest", "queuedCancellationAndPromptIoCancellationRecycleOnlyUndeliveredBatchImages"): 1,
+              ("com.tapscene.ui.shell.ClickChainThumbnailHostTest", "visibleRequestsExcludeOffscreenDeduplicateRevisitsAndCapEight"): 1,
+              ("com.tapscene.ui.shell.ClickChainThumbnailHostTest", "thumbnailLabelsAndAccessibilityDistinguishOriginalFromReviewedWithSameDigest"): 1,
+              ("com.tapscene.ui.shell.ClickChainThumbnailHostTest", "thumbnailFailuresKeepReviewControlsAndNeverMasqueradeAsMissingEvidence"): 1,
+              ("com.tapscene.ui.shell.ClickChainThumbnailHostTest", "lateRunSourceKindAndOutputResultsCannotPaintCurrentState"): 1,
+              ("com.tapscene.ui.shell.ClickChainThumbnailHostTest", "leavingVisibleRowsCancelsTheOldBatchAndRequestsOnlyTheNewViewport"): 1,
+              ("com.tapscene.ui.shell.ClickChainThumbnailHostTest", "replacingWorkbenchWithEitherEditorCancelsItsThumbnailRequest"): 1,
+              ("com.tapscene.ui.shell.ClickChainThumbnailHostTest", "revisitsShareOneBitmapAndReplacingOutputDropsButDoesNotRecycleDisplayedPixels"): 1,
               ("com.tapscene.data.ClickChainImportHostTest", "reviewedRouteCreatesIndependentProjectAndReceiptOutlivesBothOwners"): 1,
               ("com.tapscene.data.ClickChainImportHostTest", "failedCommitCancellationAndRetryAreAtomic"): 1,
               ("com.tapscene.data.ClickChainImportHostTest", "tamperedMediaWrongPixelsAndUnknownActionsCannotBecomeEvidence"): 1,

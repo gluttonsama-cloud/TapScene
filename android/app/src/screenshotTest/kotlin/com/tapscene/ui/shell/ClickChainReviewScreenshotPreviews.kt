@@ -14,6 +14,7 @@ import com.tapscene.clickplan.ClickChainReviewUiState
 import com.tapscene.clickplan.ClickChainFrameRow
 import com.tapscene.clickplan.ClickChainStageChoice
 import com.tapscene.clickplan.ClickChainStageRow
+import com.tapscene.clickplan.ClickChainThumbnailSource
 import com.tapscene.clickplan.INITIAL_SNAPSHOT_NOTICE
 import com.tapscene.media.OpaqueMask
 
@@ -130,14 +131,18 @@ private fun clickChainWorkbenchFixture(complete: Boolean = false): ClickChainRev
     return ClickChainReviewUiState(runId = "layout-run", title = "活动报名演示", firstAction = "1", lastAction = "1",
         runLabel = "3 个编排动作 · 录屏保存在本机", totalActions = 3,
         stages = listOf(
-            ClickChainStageRow(0, "选择活动", listOf(ClickChainStageChoice("layout-before", "首次点击前的初始快照")), "layout-before", true),
+            ClickChainStageRow(0, "选择活动", listOf(ClickChainStageChoice("layout-before", "首次点击前的初始快照")), "layout-before", complete),
             ClickChainStageRow(1, "填写信息", listOf(ClickChainStageChoice("layout-after", "最后动作后")), "layout-after", complete),
         ),
         actions = listOf(ClickChainActionRow("layout-action", 1, "手势已完成", "选择活动", "填写信息", complete, complete,
             selectionNotice = INITIAL_SNAPSHOT_NOTICE)),
-        frames = listOf(ClickChainFrameRow("layout-before", "选择活动", true, thumbnail = before, selectionNotice = INITIAL_SNAPSHOT_NOTICE),
-            ClickChainFrameRow("layout-after", "填写信息", complete, thumbnail = after.takeIf { complete })),
-        frameCount = 2, reviewedFrameCount = if (complete) 2 else 1, confirmedActionCount = if (complete) 1 else 0,
+        frames = listOf(ClickChainFrameRow("layout-before", "选择活动", complete, thumbnail = before,
+            thumbnailSource = if (complete) ClickChainThumbnailSource.ReviewedOutput("synthetic-before")
+                else ClickChainThumbnailSource.OriginalUnreviewed("synthetic-before"), selectionNotice = INITIAL_SNAPSHOT_NOTICE),
+            ClickChainFrameRow("layout-after", "填写信息", complete, thumbnail = after,
+                thumbnailSource = if (complete) ClickChainThumbnailSource.ReviewedOutput("synthetic-after")
+                    else ClickChainThumbnailSource.OriginalUnreviewed("synthetic-after"))),
+        frameCount = 2, reviewedFrameCount = if (complete) 2 else 0, confirmedActionCount = if (complete) 1 else 0,
         canCreate = complete)
 }
 

@@ -22,6 +22,6 @@ internal fun ClickChainReviewRoute(runId: String, onBack: () -> Unit, onOpenProj
         onFrameTitleChange = workspace::frameTitle,onAddMask = workspace::addMask,onUndoMask = workspace::undoMask,
         onGenerateFrame = workspace::generateFrame,onConfirmFrame = workspace::confirmFrame,
         onActionLabelChange = workspace::actionLabel,onActionRectChange = workspace::actionRect,onConfirmAction = workspace::confirmAction,
-        loadThumbnail = workspace::loadReviewedThumbnail,
+        loadThumbnails = workspace::loadThumbnails,
     ))
 }

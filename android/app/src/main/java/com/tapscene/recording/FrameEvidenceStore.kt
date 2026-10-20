@@ -2,13 +2,10 @@ package com.tapscene.recording
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Color
 import android.system.Os
 import android.system.OsConstants
 import android.util.AtomicFile
 import java.io.ByteArrayOutputStream
-import java.io.DataInputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -16,8 +13,7 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
-import java.util.zip.CRC32
-import java.util.zip.Inflater
+import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -162,7 +158,7 @@ internal class FrameEvidenceStore(context: Context) {
         val frame = requireTicket(session, ticket)
         check(frame.missingReason == null) { "Missing frame evidence cannot be resumed" }
         val geometry = ticket.geometry
-        decodePng(bytes, geometry.frameWidth, geometry.frameHeight).recycle()
+        FrameEvidencePng.decodeOriginal(bytes, geometry.frameWidth, geometry.frameHeight).recycle()
         val digest = sha256(bytes)
         val png = Png(digest, bytes.size.toLong(), geometry.frameWidth, geometry.frameHeight)
         if (frame.png != null) {
@@ -282,48 +278,26 @@ internal class FrameEvidenceStore(context: Context) {
      */
     fun readCandidate(sessionId: String, ticketId: String, sources: FrameSourceAccessor): FrameCandidateResult {
         try {
-            // No repository callback while holding the evidence lock: deletion takes repository
-            // locks first and must never deadlock with this read-only consumer.
-            val observed = synchronized(lock) { read(sessionId) }
-            requireFrameUuid(ticketId)
-            val source = if (observed.sealed && observed.registered) {
-                sources.registeredSource(observed.projectId, observed.sessionId, observed.sourceId)
-            } else null
-            return synchronized(lock) {
-                val session = read(sessionId)
-                check(session == observed) { "Evidence changed during source validation" }
-                val frame = session.frames.firstOrNull { it.ticket.ticketId == ticketId }
-                    ?: return@synchronized FrameCandidateResult.Missing(FrameMissingReason.EvidenceUnavailable)
-                frame.missingReason?.let { return@synchronized FrameCandidateResult.Missing(it) }
-                if (!session.sealed) return@synchronized FrameCandidateResult.Missing(FrameMissingReason.SourceUnsealed)
-                if (!session.registered || source == null) {
-                    return@synchronized FrameCandidateResult.Missing(FrameMissingReason.SourceUnregistered)
-                }
-                if (source.projectId != session.projectId || source.sessionId != session.sessionId ||
-                    source.sourceId != session.sourceId || source.sourceSha256 != session.sourceSha256 ||
-                    source.sourceSha256 != frame.sourceSha256) {
-                    return@synchronized FrameCandidateResult.Missing(FrameMissingReason.SourceMismatch)
-                }
-                val geometry = frame.ticket.geometry
-                if (source.frameWidth != geometry.frameWidth || source.frameHeight != geometry.frameHeight) {
-                    return@synchronized FrameCandidateResult.Missing(FrameMissingReason.GeometryUnverified)
-                }
-                val ordinal = frame.muxSampleOrdinal
-                if (ordinal == null || frame.encoderPtsUs != frame.ticket.submittedPtsUs ||
-                    source.samplePtsUs.size !in 1..MAX_SAMPLES || ordinal < 0 || ordinal >= source.samplePtsUs.size ||
-                    frame.containerPtsUs == null || source.samplePtsUs[ordinal.toInt()] != frame.containerPtsUs) {
-                    return@synchronized FrameCandidateResult.Missing(FrameMissingReason.SampleMismatch)
-                }
-                val png = frame.png ?: return@synchronized FrameCandidateResult.Missing(FrameMissingReason.PngFailed)
-                val bytes = readPng(session, frame)
-                decodePng(bytes, png.width, png.height).recycle()
-                FrameCandidateResult.Available(FrameEvidenceCandidate(frame.ticket, png.sha256, png.width, png.height,
-                    checkNotNull(frame.encoderPtsUs), ordinal, frame.containerPtsUs, source.sourceSha256))
-            }
+            val decoded = decodeValidatedCandidate(sessionId, ticketId, sources)
+            decoded.bitmap.recycle()
+            return FrameCandidateResult.Available(decoded.candidate)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (missing: EvidenceMissing) {
+            return FrameCandidateResult.Missing(missing.reason)
         } catch (_: Exception) {
             return FrameCandidateResult.Missing(FrameMissingReason.EvidenceUnavailable)
         }
     }
+
+    /**
+     * ORIGINAL / UNREVIEWED display only. The caller owns/recycles this bounded bitmap. A fresh
+     * source observation and every original PNG pixel are checked before a sampled decode; no
+     * full-resolution Bitmap is allocated. This never creates review or output authority.
+     */
+    fun readUnreviewedThumbnail(candidate: FrameEvidenceCandidate, sources: FrameSourceAccessor,
+        checkActive: () -> Unit = {}): Bitmap = decodeValidatedCandidate(candidate.ticket.action.sessionId,
+        candidate.ticket.ticketId, sources, candidate, thumbnail = true, checkActive = checkActive).bitmap
 
     /**
      * Scoped, private redaction input only. The callback must not retain/recycle the bitmap; it is
@@ -342,13 +316,61 @@ internal class FrameEvidenceStore(context: Context) {
         try { return consume(bitmap) } finally { bitmap.recycle() }
     }
 
-    private fun decodeCandidate(candidate: FrameEvidenceCandidate, sources: FrameSourceAccessor): Bitmap {
-        val current = readCandidate(candidate.ticket.action.sessionId, candidate.ticket.ticketId, sources)
-        check(current is FrameCandidateResult.Available && current.candidate == candidate) { "Frame evidence is no longer valid" }
+    private fun decodeCandidate(candidate: FrameEvidenceCandidate, sources: FrameSourceAccessor): Bitmap =
+        decodeValidatedCandidate(candidate.ticket.action.sessionId, candidate.ticket.ticketId, sources, candidate).bitmap
+
+    private data class DecodedCandidate(val candidate: FrameEvidenceCandidate, val bitmap: Bitmap)
+    private class EvidenceMissing(val reason: FrameMissingReason) : IllegalStateException("Frame evidence is unavailable: $reason")
+
+    /** All consumers share the same gate. Only the final decode size differs, never validation. */
+    private fun decodeValidatedCandidate(sessionId: String, ticketId: String, sources: FrameSourceAccessor,
+        expectedCandidate: FrameEvidenceCandidate? = null, thumbnail: Boolean = false,
+        checkActive: () -> Unit = {}): DecodedCandidate {
+        checkActive()
+        // Deletion acquires repository locks before the evidence lock. Never call a repository
+        // while holding this lock. Batch callers hold the project-copy lock and supply a fresh,
+        // invocation-local observation; neither this store nor the PNG reader caches it.
+        val observed = synchronized(lock) { read(sessionId, checkActive = checkActive) }
+        requireFrameUuid(ticketId)
+        val source = if (observed.sealed && observed.registered) {
+            sources.registeredSource(observed.projectId, observed.sessionId, observed.sourceId)
+        } else null
+        checkActive()
         return synchronized(lock) {
-            val session = read(candidate.ticket.action.sessionId)
-            val frame = requireTicket(session, candidate.ticket)
-            decodePng(readPng(session, frame), candidate.width, candidate.height)
+            val session = read(sessionId, checkActive = checkActive)
+            check(session == observed) { "Evidence changed during source validation" }
+            val frame = session.frames.firstOrNull { it.ticket.ticketId == ticketId }
+                ?: throw EvidenceMissing(FrameMissingReason.EvidenceUnavailable)
+            frame.missingReason?.let { throw EvidenceMissing(it) }
+            if (!session.sealed) throw EvidenceMissing(FrameMissingReason.SourceUnsealed)
+            if (!session.registered || source == null) throw EvidenceMissing(FrameMissingReason.SourceUnregistered)
+            if (source.projectId != session.projectId || source.sessionId != session.sessionId ||
+                source.sourceId != session.sourceId || source.sourceSha256 != session.sourceSha256 ||
+                source.sourceSha256 != frame.sourceSha256) throw EvidenceMissing(FrameMissingReason.SourceMismatch)
+            val geometry = frame.ticket.geometry
+            if (source.frameWidth != geometry.frameWidth || source.frameHeight != geometry.frameHeight) {
+                throw EvidenceMissing(FrameMissingReason.GeometryUnverified)
+            }
+            val ordinal = frame.muxSampleOrdinal
+            if (ordinal == null || frame.encoderPtsUs != frame.ticket.submittedPtsUs ||
+                source.samplePtsUs.size !in 1..MAX_SAMPLES || ordinal < 0 || ordinal >= source.samplePtsUs.size ||
+                frame.containerPtsUs == null || source.samplePtsUs[ordinal.toInt()] != frame.containerPtsUs) {
+                throw EvidenceMissing(FrameMissingReason.SampleMismatch)
+            }
+            val png = frame.png ?: throw EvidenceMissing(FrameMissingReason.PngFailed)
+            val candidate = FrameEvidenceCandidate(frame.ticket, png.sha256, png.width, png.height,
+                checkNotNull(frame.encoderPtsUs), ordinal, frame.containerPtsUs, source.sourceSha256)
+            check(expectedCandidate == null || candidate == expectedCandidate) { "Frame evidence is no longer valid" }
+            val bytes = readPng(session, frame, checkActive)
+            val bitmap = if (thumbnail) FrameEvidencePng.decodeThumbnail(bytes, png.width, png.height, checkActive)
+                else FrameEvidencePng.decodeOriginal(bytes, png.width, png.height, checkActive)
+            try {
+                checkActive()
+                // Also catches a same-thread revocation during a supplied cancellation callback.
+                check(read(sessionId, checkActive = checkActive) == session) { "Evidence changed during PNG validation" }
+                checkActive()
+                DecodedCandidate(candidate, bitmap)
+            } catch (failure: Throwable) { bitmap.recycle(); throw failure }
         }
     }
 
@@ -433,10 +455,10 @@ internal class FrameEvidenceStore(context: Context) {
         }!!
     }
 
-    private fun readPng(session: Session, frame: FrameRecord): ByteArray {
+    private fun readPng(session: Session, frame: FrameRecord, checkActive: () -> Unit = {}): ByteArray {
         val png = checkNotNull(frame.png)
-        val bytes = readBounded(child(session.sessionId, "${frame.ticket.ticketId}.png"), MAX_PNG_BYTES)
-        check(bytes.size.toLong() == png.bytes && sha256(bytes) == png.sha256) { "Private frame PNG changed" }
+        val bytes = readBounded(child(session.sessionId, "${frame.ticket.ticketId}.png"), MAX_PNG_BYTES, checkActive)
+        check(bytes.size.toLong() == png.bytes && sha256(bytes, checkActive) == png.sha256) { "Private frame PNG changed" }
         check(png.width == frame.ticket.geometry.frameWidth && png.height == frame.ticket.geometry.frameHeight)
         return bytes
     }
@@ -471,9 +493,10 @@ internal class FrameEvidenceStore(context: Context) {
         }
     }
 
-    private fun read(sessionId: String, allowRevoked: Boolean = false): Session {
+    private fun read(sessionId: String, allowRevoked: Boolean = false, checkActive: () -> Unit = {}): Session {
+        checkActive()
         check(allowRevoked || !isRevoked(sessionId)) { "Evidence session was deleted" }
-        val json = JSONObject(String(readAtomic(atomic(sessionId)), Charsets.UTF_8))
+        val json = JSONObject(String(readAtomic(atomic(sessionId), checkActive), Charsets.UTF_8))
         val version = json.getInt("version")
         check(version in 1..2) { "Unsupported frame evidence version" }
         val projectId = json.getString("projectId").also(::requireFrameUuid)
@@ -482,12 +505,13 @@ internal class FrameEvidenceStore(context: Context) {
         val hash = json.nullableString("sourceSha256")?.also(::requireHash)
         val array = json.getJSONArray("frames")
         check(array.length() <= MAX_IMAGES)
-        val frames = (0 until array.length()).map { readFrame(array.getJSONObject(it), version) }
+        val frames = (0 until array.length()).map { checkActive(); readFrame(array.getJSONObject(it), version) }
         val admissions = frames.count { it.ticket.admission != null }
         check(if (version == 1) admissions == 0 else admissions == 1) { "Invalid admission evidence version" }
         val missingArray = json.optJSONArray("misses") ?: JSONArray()
         check(array.length() + missingArray.length() <= MAX_IMAGES)
         val misses = (0 until missingArray.length()).map { index ->
+            checkActive()
             val value = missingArray.getJSONObject(index)
             MissingBoundary(readAction(value.getJSONObject("action")), FrameBoundary.valueOf(value.getString("boundary")),
                 value.getLong("epoch"), FrameMissingReason.valueOf(value.getString("reason"))).also { check(it.epoch >= 0) }
@@ -518,6 +542,7 @@ internal class FrameEvidenceStore(context: Context) {
         frames.forEachIndexed { index, frame ->
             check(array.getJSONObject(index).getString("status") == frameJson(frame, registered).getString("status"))
         }
+        checkActive()
         return Session(projectId, sessionId, sourceId, sealed, registered, hash, frames, misses)
     }
 
@@ -656,8 +681,8 @@ internal class FrameEvidenceStore(context: Context) {
         return AtomicFile(child(sessionId, "evidence.json"))
     }
 
-    private fun readAtomic(atomic: AtomicFile): ByteArray = atomic.openRead().use { input ->
-        val bytes = input.readBytesBounded(MAX_JSON_BYTES)
+    private fun readAtomic(atomic: AtomicFile, checkActive: () -> Unit = {}): ByteArray = atomic.openRead().use { input ->
+        val bytes = input.readBytesBounded(MAX_JSON_BYTES, checkActive)
         check(bytes.isNotEmpty())
         bytes
     }
@@ -689,16 +714,19 @@ internal class FrameEvidenceStore(context: Context) {
     private fun isPrivateRegularFile(file: File): Boolean =
         file.canonicalFile == file && Files.isRegularFile(file.toPath(), LinkOption.NOFOLLOW_LINKS)
 
-    private fun readBounded(file: File, limit: Int): ByteArray {
+    private fun readBounded(file: File, limit: Int, checkActive: () -> Unit = {}): ByteArray {
+        checkActive()
         check(isPrivateRegularFile(file) && file.length() in 1..limit.toLong()) { "Private frame bytes missing or too large" }
-        return file.inputStream().use { it.readBytesBounded(limit) }
+        return file.inputStream().use { it.readBytesBounded(limit, checkActive) }
     }
 
-    private fun java.io.InputStream.readBytesBounded(limit: Int): ByteArray {
+    private fun java.io.InputStream.readBytesBounded(limit: Int, checkActive: () -> Unit = {}): ByteArray {
         val output = LimitedBytes(limit)
         val buffer = ByteArray(32 * 1024)
         while (true) {
+            checkActive()
             val count = read(buffer)
+            checkActive()
             if (count < 0) return output.toByteArray()
             check(count > 0) { "Incomplete evidence read" }
             output.write(buffer, 0, count)
@@ -744,82 +772,19 @@ internal class FrameEvidenceStore(context: Context) {
         private const val MAX_SAMPLES = 30_000
         private val lock = Any()
         private fun requireHash(value: String) { require(value.matches(Regex("[0-9a-f]{64}"))) }
-        private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes)
-            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        private fun sha256(bytes: ByteArray, checkActive: () -> Unit = {}): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            var offset = 0
+            while (offset < bytes.size) {
+                checkActive()
+                val count = minOf(64 * 1024, bytes.size - offset)
+                digest.update(bytes, offset, count)
+                offset += count
+            }
+            checkActive()
+            return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        }
         private fun JSONObject.nullableString(name: String): String? = if (isNull(name)) null else getString(name)
         private fun JSONObject.nullableLong(name: String): Long? = if (isNull(name)) null else getLong(name)
-
-        /** Strict finite PNG, CRC, declared dimensions and every decoded alpha are checked. */
-        private fun decodePng(bytes: ByteArray, width: Int, height: Int): Bitmap {
-            require(bytes.size in 1..MAX_PNG_BYTES && width > 0 && height > 0 && width.toLong() * height <= 12_000_000)
-            DataInputStream(bytes.inputStream()).use { input ->
-                val signature = ByteArray(8).also(input::readFully)
-                check(signature.contentEquals(byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10)))
-                var header = false
-                var pixels = false
-                var ended = false
-                var channels = 0
-                val compressed = LimitedBytes(MAX_PNG_BYTES)
-                while (!ended) {
-                    check(input.available() >= 12)
-                    val length = input.readInt()
-                    check(length >= 0 && length <= input.available() - 8)
-                    val typeBytes = ByteArray(4).also(input::readFully)
-                    val type = String(typeBytes, Charsets.US_ASCII)
-                    check(type in setOf("IHDR", "IDAT", "IEND", "sRGB", "gAMA", "cHRM", "sBIT"))
-                    check(header || type == "IHDR")
-                    val payload = ByteArray(length).also(input::readFully)
-                    val crc = CRC32().apply { update(typeBytes); update(payload) }
-                    check((input.readInt().toLong() and 0xffffffffL) == crc.value)
-                    when (type) {
-                        "IHDR" -> {
-                            check(!header && length == 13)
-                            DataInputStream(payload.inputStream()).use {
-                                check(it.readInt() == width && it.readInt() == height && it.readUnsignedByte() == 8)
-                                channels = when (it.readUnsignedByte()) { 2 -> 3; 6 -> 4; else -> error("Unexpected PNG color type") }
-                                check(it.readUnsignedByte() == 0 && it.readUnsignedByte() == 0 && it.readUnsignedByte() == 0)
-                            }
-                            header = true
-                        }
-                        "IDAT" -> { pixels = true; compressed.write(payload) }
-                        "IEND" -> { check(pixels && length == 0); ended = true }
-                    }
-                }
-                check(input.available() == 0)
-                val inflater = Inflater()
-                try {
-                    inflater.setInput(compressed.toByteArray())
-                    val rowLength = width.toLong() * channels + 1
-                    val expected = rowLength * height
-                    val buffer = ByteArray(32 * 1024)
-                    var decodedBytes = 0L
-                    while (!inflater.finished()) {
-                        val count = inflater.inflate(buffer)
-                        if (count == 0) { check(inflater.finished()) { "Incomplete PNG pixel stream" }; break }
-                        check(decodedBytes + count <= expected) { "Incomplete PNG pixel stream" }
-                        for (index in 0 until count) {
-                            if ((decodedBytes + index) % rowLength == 0L) check(buffer[index].toInt() in 0..4)
-                        }
-                        decodedBytes += count
-                    }
-                    check(decodedBytes == expected && inflater.remaining == 0) { "PNG pixel length differs" }
-                } finally { inflater.end() }
-            }
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-            check(bounds.outMimeType == "image/png" && bounds.outWidth == width && bounds.outHeight == height)
-            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply {
-                inPreferredConfig = Bitmap.Config.ARGB_8888; inScaled = false
-            }) ?: throw IOException("Frame PNG does not fully decode")
-            try {
-                check(bitmap.width == width && bitmap.height == height)
-                val row = IntArray(width)
-                for (y in 0 until height) {
-                    bitmap.getPixels(row, 0, width, 0, y, width, 1)
-                    check(row.all { Color.alpha(it) == 255 }) { "Frame PNG contains transparent pixels" }
-                }
-                return bitmap
-            } catch (failure: Throwable) { bitmap.recycle(); throw failure }
-        }
     }
 }
