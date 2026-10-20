@@ -1,12 +1,22 @@
 package com.tapscene.ui.shell
 
 import android.app.Application
+import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteOpenHelper
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.os.Looper
+import android.view.ViewGroup
 import androidx.activity.compose.setContent
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import com.tapscene.MainActivity
 import com.tapscene.clickplan.*
 import com.tapscene.data.HostFileSyncShadow
@@ -22,14 +32,21 @@ import com.tapscene.ui.ClickChainWorkspace
 import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
+import org.junit.After
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.ExternalResource
 import org.junit.runner.RunWith
+import org.junit.runners.model.MultipleFailureException
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.annotation.LooperMode
@@ -43,6 +60,9 @@ import org.robolectric.annotation.SQLiteMode
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class ClickChainNameReadinessHostTest {
+    private val stores = mutableListOf<ProjectStore>()
+    private val workspaces = mutableListOf<Pair<ViewModelStoreOwner, ClickChainWorkspace>>()
+
     @get:Rule(order = 0) val database = object : ExternalResource() {
         override fun before() {
             resetFactory()
@@ -52,6 +72,53 @@ class ClickChainNameReadinessHostTest {
         override fun after() { HostFileSyncShadow.reset(); resetFactory() }
     }
     @get:Rule(order = 1) val compose = createAndroidComposeRule<MainActivity>()
+
+    @After fun closeOwnedResources() = finishWorkspaces(closeStores = true)
+
+    private fun finishWorkspaces(closeStores: Boolean = false) {
+        val failures = mutableListOf<Throwable>()
+        fun attempt(block: () -> Unit) {
+            runCatching(block).exceptionOrNull()?.let { failures += it }
+        }
+        var stopped = workspaces.isEmpty()
+        if (workspaces.isNotEmpty()) {
+            val jobs = workspaces.map { checkNotNull(it.second.viewModelScope.coroutineContext[Job]) }
+            val locks = workspaces.flatMap { (_, workspace) ->
+                listOf("thumbnailReads", "writes").map { field(workspace, it) as Mutex }
+            }
+            var disposed = false
+            attempt {
+                compose.runOnUiThread {
+                    val content = compose.activity.findViewById<ViewGroup>(android.R.id.content)
+                    val view = content.getChildAt(0) as ComposeView
+                    // A later layout may recreate this attached view's composition; keep it empty.
+                    view.setContent { }
+                    view.disposeComposition()
+                    disposed = true
+                }
+            }
+            // A disposal failure must not skip cancellation of the remaining test owners.
+            workspaces.forEach { (owner, _) -> attempt { compose.runOnUiThread { owner.viewModelStore.clear() } } }
+            jobs.forEach { it.cancel() }
+            attempt {
+                // Thumbnail IO belongs to the disposed composition, not the ViewModel scope.
+                compose.waitUntil(30_000) {
+                    shadowOf(Looper.getMainLooper()).idle()
+                    jobs.all { it.isCompleted } && locks.none { it.isLocked }
+                }
+                runBlocking {
+                    withTimeout(10_000) {
+                        jobs.forEach { it.join() }
+                        locks.forEach { it.withLock { } }
+                    }
+                }
+                stopped = disposed
+            }
+        }
+        // Never close under unfinished IO. RunAfters preserves test and cleanup failures together.
+        if (closeStores && stopped) stores.forEach { store -> attempt { closeStore(store) } }
+        MultipleFailureException.assertEmpty(failures)
+    }
 
     @Test fun chainNameRepairSurvivesReturnAndReopenWithoutLosingSafeOutputOrActions() {
         val f = fixture()
@@ -185,7 +252,8 @@ class ClickChainNameReadinessHostTest {
         unreviewedFirst: Boolean = false): Fixture = runBlocking {
         compose.waitForIdle()
         val app: Application = RuntimeEnvironment.getApplication()
-        val projects = ProjectStore(app)
+        // Own the store before setup can fail, not just after Fixture has been returned.
+        val projects = ProjectStore(app).also { stores += it }
         val project = projects.createProject("合成名称修正项目").project.id
         val sourceId = id()
         val raw = File(app.noBackupFilesDir, "sources/$sourceId.mp4").apply {
@@ -282,7 +350,14 @@ class ClickChainNameReadinessHostTest {
         lateinit var workspace: ClickChainWorkspace
         fun mount() {
             compose.runOnUiThread {
-                workspace = ViewModelProvider(compose.activity)["click-chain-review", ClickChainWorkspace::class.java]
+                val owner = object : ViewModelStoreOwner {
+                    override val viewModelStore = ViewModelStore()
+                }
+                workspace = ViewModelProvider(owner, ViewModelProvider.AndroidViewModelFactory.getInstance(app))[
+                    "click-chain-review", ClickChainWorkspace::class.java]
+                // Retain old owners and helpers across reopen, even after workspace is replaced.
+                workspaces += owner to workspace
+                stores += field(workspace, "projects") as ProjectStore
                 // Replace only host-unavailable MP4 inspection. Production activate reads the run,
                 // ownership, evidence, saved inputs and PNGs, and all assertions use public state.
                 field(workspace, "sourceAccessor", accessor)
@@ -292,7 +367,11 @@ class ClickChainNameReadinessHostTest {
                     }
                 }
                 field(workspace, "thumbnailSourceAccessor", thumbnails)
-                compose.activity.setContent { TapSceneTheme { ClickChainReviewRoute(run.runId, {}, {}) } }
+                compose.activity.setContent {
+                    CompositionLocalProvider(LocalViewModelStoreOwner provides owner) {
+                        TapSceneTheme { ClickChainReviewRoute(run.runId, {}, {}) }
+                    }
+                }
             }
             compose.waitUntil(30_000) {
                 compose.waitForIdle()
@@ -301,9 +380,7 @@ class ClickChainNameReadinessHostTest {
             }
         }
         fun reopen() {
-            compose.runOnUiThread { compose.activity.setContent { } }
-            compose.waitForIdle()
-            compose.runOnUiThread { compose.activity.viewModelStore.clear() }
+            finishWorkspaces()
             mount()
         }
         fun settled() = compose.waitUntil(30_000) {
@@ -320,6 +397,15 @@ class ClickChainNameReadinessHostTest {
 
     private fun field(target: Any, name: String, value: Any) {
         target.javaClass.getDeclaredField(name).apply { isAccessible = true }.set(target, value)
+    }
+    private fun field(target: Any, name: String): Any? =
+        target.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(target)
+    private fun closeStore(store: ProjectStore) {
+        val helper = field(store, "helper") as SQLiteOpenHelper
+        val database = SQLiteOpenHelper::class.java.getDeclaredField("mDatabase")
+            .apply { isAccessible = true }.get(helper) as SQLiteDatabase?
+        helper.close()
+        assertTrue("Test-owned project database is still open", database == null || !database.isOpen)
     }
     private fun resetFactory() {
         ViewModelProvider.AndroidViewModelFactory::class.java.getDeclaredField("_instance")

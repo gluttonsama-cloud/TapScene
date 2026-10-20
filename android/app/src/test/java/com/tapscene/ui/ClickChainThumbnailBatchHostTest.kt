@@ -1,8 +1,13 @@
 package com.tapscene.ui
 
 import android.app.Application
+import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteOpenHelper
 import android.graphics.Bitmap
 import android.graphics.Color
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.viewModelScope
 import com.tapscene.clickplan.*
 import com.tapscene.data.HostFileSyncShadow
 import com.tapscene.data.HostSqlite
@@ -16,6 +21,7 @@ import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
@@ -23,11 +29,14 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.junit.runners.model.MultipleFailureException
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
@@ -43,6 +52,9 @@ import org.robolectric.annotation.SQLiteMode
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
 class ClickChainThumbnailBatchHostTest {
     private lateinit var app: Application
+    private val stores = mutableListOf<ProjectStore>()
+    private val workspaces = mutableListOf<ClickChainWorkspace>()
+    private val owner = ViewModelStore()
 
     @Before fun begin() {
         app = RuntimeEnvironment.getApplication()
@@ -50,7 +62,27 @@ class ClickChainThumbnailBatchHostTest {
         HostFileSyncShadow.begin(app.noBackupFilesDir)
     }
 
-    @After fun end() = HostFileSyncShadow.reset()
+    @After fun end() {
+        val failures = mutableListOf<Throwable>()
+        try {
+            // Keep every fixture, including the second one in a test, until its work is stopped.
+            val jobs = workspaces.map { checkNotNull(it.viewModelScope.coroutineContext[Job]) }
+            owner.clear()
+            runBlocking {
+                withTimeout(10_000) {
+                    jobs.forEach { it.cancelAndJoin() }
+                    workspaces.forEach { workspace ->
+                        listOf("thumbnailReads", "writes").forEach { name ->
+                            (field(workspace, name) as Mutex).withLock { }
+                        }
+                    }
+                }
+            }
+            stores.forEach { store -> runCatching { closeStore(store) }.exceptionOrNull()?.let { failures += it } }
+        } catch (failure: Throwable) { failures += failure }
+        finally { runCatching { HostFileSyncShadow.reset() }.exceptionOrNull()?.let { failures += it } }
+        MultipleFailureException.assertEmpty(failures)
+    }
 
     @Test fun visibleOriginalBatchSharesFreshObservationAndLeavesReviewAndProjectUntouched() = runBlocking {
         val f = fixture()
@@ -207,7 +239,8 @@ class ClickChainThumbnailBatchHostTest {
     }
 
     private fun fixture(): Fixture {
-        val projects = ProjectStore(app)
+        // Register before the first write so a failed fixture setup still closes its helper.
+        val projects = ProjectStore(app).also { stores += it }
         val project = projects.createProject("合成缩略图项目").project.id
         val sourceId = id()
         val raw = File(app.noBackupFilesDir, "sources/$sourceId.mp4").apply {
@@ -254,7 +287,11 @@ class ClickChainThumbnailBatchHostTest {
             ClickActionStatus.Completed, candidates[0], candidates[1], null, null)))
         val reviews = ClickChainReviewStore(app)
         val saved = reviews.open(run.runId, source.metadata.sha256, 1)
-        val workspace = ClickChainWorkspace(app)
+        val workspace = ViewModelProvider(owner, ViewModelProvider.AndroidViewModelFactory(app))[
+            "click-chain-${workspaces.size}", ClickChainWorkspace::class.java].also {
+            workspaces += it
+            stores += field(it, "projects") as ProjectStore
+        }
         return Fixture(projects, source, raw, run, evidence, capture, reviews, saved, workspace).apply {
             field(workspace, "capture", capture)
             field(workspace, "draft", saved)
@@ -302,6 +339,16 @@ class ClickChainThumbnailBatchHostTest {
 
     private fun field(target: Any, name: String, value: Any) {
         target.javaClass.getDeclaredField(name).apply { isAccessible = true }.set(target, value)
+    }
+    private fun field(target: Any, name: String): Any? =
+        target.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(target)
+    private fun closeStore(store: ProjectStore) {
+        val helper = field(store, "helper") as SQLiteOpenHelper
+        // Inspect the existing handle, without opening a database during cleanup.
+        val database = SQLiteOpenHelper::class.java.getDeclaredField("mDatabase")
+            .apply { isAccessible = true }.get(helper) as SQLiteDatabase?
+        helper.close()
+        assertTrue("Test-owned project database is still open", database == null || !database.isOpen)
     }
     private fun id() = UUID.randomUUID().toString()
     private fun sha(file: File): String = MessageDigest.getInstance("SHA-256").digest(file.readBytes())
