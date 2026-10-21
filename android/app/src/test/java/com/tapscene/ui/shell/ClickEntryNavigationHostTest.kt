@@ -344,11 +344,15 @@ class ClickEntryNavigationHostTest {
         }
     }
 
+    @Config(qualifiers = "w320dp-h568dp-xhdpi")
     @Test fun dirtyPlanCreatedProjectExitCancelAndDiscardKeepTheOriginalSavedPlan() {
         val fixture = dirtyPlanCreatedProjectFixture(throughRecording = false, waitInput = "900")
         repeat(2) {
             compose.onNodeWithText("打开新项目").assertIsEnabled().performClick()
             waitFor("保留当前修改？")
+            compose.onNodeWithText("保存并打开").assertIsDisplayed()
+            compose.onNodeWithText("放弃修改并打开").assertIsDisplayed()
+            compose.onNodeWithText("暂不打开").assertIsDisplayed()
             compose.onNodeWithText("暂不打开").performClick()
             waitFor("打开新项目")
             assertOriginalProjectSelected(fixture)
@@ -408,6 +412,7 @@ class ClickEntryNavigationHostTest {
         assertCommittedNavigationFixture(fixture)
     }
 
+    @Config(qualifiers = "w740dp-h360dp-xhdpi")
     @Test fun createdProjectExitSaveConflictRetainsInputResultAndDoesNotRetargetOrdinaryBack() {
         val fixture = dirtyPlanCreatedProjectFixture(throughRecording = false, waitInput = "1400")
         compose.onNodeWithText("打开新项目").performClick()
@@ -424,6 +429,9 @@ class ClickEntryNavigationHostTest {
         compose.onNodeWithText("保留当前修改？").assertIsDisplayed()
         compose.onNodeWithText("保存或打开定位未完成。输入已保留，请重试；若计划已有更新，请重新载入。")
             .assertIsDisplayed()
+        compose.onNodeWithText("保存并打开").assertIsDisplayed()
+        compose.onNodeWithText("放弃修改并打开").assertIsDisplayed()
+        compose.onNodeWithText("暂不打开").assertIsDisplayed()
         assertOriginalProjectSelected(fixture)
         assertEquals(newer, store.getPlan(saved.projectId))
         assertCommittedNavigationFixture(fixture)

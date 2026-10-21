@@ -359,37 +359,39 @@ fun ClickPlanRoute(projectId: String, onBack: () -> Unit, onOpenProject: (String
     // This dialog also belongs to the review branch: opening its result removes this draft route.
     if (showLeave) {
         val createdProjectId = leaveForCreatedProjectId
-        AlertDialog(onDismissRequest = dismissLeave, title = { Text("保留当前修改？") },
-            text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(if (createdProjectId != null) "点击计划有尚未保存的修改。可保存后打开新项目，或放弃本次修改。已生成的新项目不会改变。"
-                    else "点击计划有尚未保存的修改。可保存后返回，或放弃本次修改。")
-                if (createdProjectId != null) {
-                    error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                    if (!geometryMatches) Text("请恢复原方向及全屏，或返回点击计划按当前屏幕重新编排。",
-                        color = MaterialTheme.colorScheme.error)
-                    message?.takeIf { it != error }?.let { Text(it) }
-                    if (saving) LinearProgressIndicator(Modifier.fillMaxWidth())
-                }
-            } },
-            confirmButton = { TextButton(enabled = canEdit && geometryMatches && error == null, onClick = {
+        if (createdProjectId != null) ClickPlanCreatedProjectExitDialog(
+            error = error, geometryMatches = geometryMatches, message = message, saving = saving,
+            saveEnabled = canEdit && geometryMatches && error == null,
+            onDismiss = dismissLeave,
+            onSave = {
                 if (currentProjectId == projectId && showLeave && !saving && leaveForCreatedProjectId == createdProjectId) {
-                    if (createdProjectId == null) showLeave = false
                     save(false, true)
                 }
-            }) { Text(if (createdProjectId != null) "保存并打开" else "保存并返回") } },
-            dismissButton = { Column {
-                TextButton(enabled = !saving, onClick = dismissLeave) {
-                    Text(if (createdProjectId != null) "暂不打开" else "继续编辑")
+            },
+            onDiscard = {
+                if (currentProjectId == projectId && showLeave && !saving && leaveForCreatedProjectId == createdProjectId) {
+                    showLeave = false
+                    leaveForCreatedProjectId = null
+                    onOpenProject(createdProjectId)
                 }
+            },
+        ) else AlertDialog(onDismissRequest = dismissLeave, title = { Text("保留当前修改？") },
+            text = { Text("点击计划有尚未保存的修改。可保存后返回，或放弃本次修改。") },
+            confirmButton = { TextButton(enabled = canEdit && geometryMatches && error == null, onClick = {
+                if (currentProjectId == projectId && showLeave && !saving && leaveForCreatedProjectId == createdProjectId) {
+                    showLeave = false
+                    save(false, true)
+                }
+            }) { Text("保存并返回") } },
+            dismissButton = { Column {
+                TextButton(enabled = !saving, onClick = dismissLeave) { Text("继续编辑") }
                 TextButton(enabled = !saving, onClick = {
                     if (currentProjectId == projectId && showLeave && !saving && leaveForCreatedProjectId == createdProjectId) {
                         showLeave = false
                         leaveForCreatedProjectId = null
-                        if (createdProjectId != null) onOpenProject(createdProjectId)
-                        else if (leaveForManualRecording) onManualRecording() else onBack()
+                        if (leaveForManualRecording) onManualRecording() else onBack()
                     }
-                }) { Text(if (createdProjectId != null) "放弃修改并打开"
-                    else if (leaveForManualRecording) "放弃修改并继续" else "放弃修改并返回") }
+                }) { Text(if (leaveForManualRecording) "放弃修改并继续" else "放弃修改并返回") }
             } })
     }
     if (reviewRunId != null) {

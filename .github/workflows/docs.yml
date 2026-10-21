@@ -265,7 +265,7 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 145, f"Expected 145 Compose review images, found {len(images)}"
+          assert len(images) == 147, f"Expected 147 Compose review images, found {len(images)}"
           project_deletion_images = [image for image in images if "ProjectDeletionScreenshotPreviewsKt" in str(image)]
           assert len(project_deletion_images) == 3, f"Expected three project deletion confirmation images, found {len(project_deletion_images)}"
           screenshot_import_images = [image for image in images if "ScreenshotImportPreviewsKt" in str(image)]
@@ -288,6 +288,8 @@ jobs:
           assert len(click_review_images) == 10, f"Expected ten click-chain author review images, found {len(click_review_images)}"
           click_precision_images = [image for image in images if "ClickChainActionPrecisionScreenshotPreviewsKt" in str(image)]
           assert len(click_precision_images) == 3, f"Expected three click-region precision images, found {len(click_precision_images)}"
+          click_exit_images = [image for image in images if "ClickPlanCreatedProjectExitScreenshotPreviewsKt" in str(image)]
+          assert len(click_exit_images) == 2, f"Expected two unsaved click-plan generated-project exit images, found {len(click_exit_images)}"
           click_plan_images = [image for image in images if "ClickPlanScreenshotPreviewsKt" in str(image)]
           assert len(click_plan_images) == 5, f"Expected five click-plan review images, found {len(click_plan_images)}"
           text_region_images = [image for image in images if "TextRegionScreenshotPreviewsKt" in str(image)]
@@ -330,7 +332,7 @@ jobs:
               assert data[:8] == b"\x89PNG\r\n\x1a\n", image
               width, height = struct.unpack(">II", data[16:24])
               assert width > 0 and height > 0, image
-              if any(name in str(image) for name in ("EditorDraftRecovery", "SafeImage", "ScreenshotImport", "EditorNavigation", "ReviewAiNavigation", "AiDraftScreenshot", "OfflineShareScreenshot", "SavedStepCopyScreenshot", "SavedProjectCopyScreenshot", "HostingScreenshot", "ClickPlanScreenshot", "ClickChainReviewScreenshot")):
+              if any(name in str(image) for name in ("EditorDraftRecovery", "SafeImage", "ScreenshotImport", "EditorNavigation", "ReviewAiNavigation", "AiDraftScreenshot", "OfflineShareScreenshot", "SavedStepCopyScreenshot", "SavedProjectCopyScreenshot", "HostingScreenshot", "ClickPlanScreenshot", "ClickPlanCreatedProjectExitScreenshot", "ClickChainReviewScreenshot")):
                   # A modal window can yield a valid but blank PNG in Layoutlib. Reject that
                   # before treating form and AI import images as usable review evidence.
                   import zlib
