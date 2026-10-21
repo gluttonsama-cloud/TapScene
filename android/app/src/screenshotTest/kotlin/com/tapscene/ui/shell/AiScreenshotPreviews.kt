@@ -45,10 +45,13 @@ private object AiPreviewFixture {
 }
 
 @PreviewTest
-@Preview(name = "19_ai_source_sample", widthDp = 412, heightDp = 915, locale = "zh-rCN", showBackground = true)
+@Preview(name = "19_ai_source_sample", widthDp = 320, heightDp = 568, fontScale = 1.3f, locale = "zh-rCN", showBackground = true)
 @Composable
 fun AiSourceSamplePreview() {
-    AiReviewSurface { AiPackageScreen({}, ReleasePreviewFixture.libraryState) }
+    val first = ReleasePreviewFixture.summary
+    AiReviewSurface { AiPackageScreen({}, ReleaseUiState(releases = listOf(
+        first, first.copy(id = AiPreviewFixture.id("same-title-release")),
+    ))) }
 }
 
 @PreviewTest
@@ -60,6 +63,7 @@ fun AiPathSamplePreview() {
 
 @PreviewTest
 @Preview(name = "21_fixed_region_review_sample", widthDp = 412, heightDp = 915, locale = "zh-rCN", showBackground = true)
+@Preview(name = "21_fixed_region_review_small", widthDp = 320, heightDp = 568, fontScale = 1.5f, locale = "zh-rCN", showBackground = true)
 @Composable
 fun FixedRegionReviewSamplePreview() {
     val scene = AiPreviewFixture.scene
@@ -68,7 +72,9 @@ fun FixedRegionReviewSamplePreview() {
     val candidate = ReleaseCandidate(scene.releaseId, AiPreviewFixture.id("project"), 5L, scene, ViewerPackageCodec.contentDigest(scene))
     AiReviewSurface {
         ReleaseReviewContent(ReleaseUiState(candidate = candidate, reviewRegionId = AiPreviewFixture.region.id,
-            reviewRegionBitmap = crop), 5L, {}, {}, {}, {}, {}, {}, {}, {}, initialSection = 5)
+            reviewRegionBitmap = crop), 6L, {}, {}, {}, {}, {}, {}, {}, {}, initialSection = 5,
+            editableSourceRegions = mapOf(AiPreviewFixture.region.id to AiPreviewFixture.region.stateId),
+            onEditSourceRegion = { _, _ -> })
     }
 }
 

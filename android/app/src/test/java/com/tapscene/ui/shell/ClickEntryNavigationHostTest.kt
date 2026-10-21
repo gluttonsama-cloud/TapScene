@@ -31,6 +31,8 @@ import com.tapscene.clickplan.ClickDevice
 import com.tapscene.clickplan.ClickPlan
 import com.tapscene.clickplan.ClickRun
 import com.tapscene.clickplan.ClickChainReviewUiState
+import com.tapscene.clickplan.ClickChainReviewDraft
+import com.tapscene.clickplan.ClickChainReviewStore
 import com.tapscene.ui.ClickChainWorkspace
 import com.tapscene.ui.MediaWorkspace
 import androidx.lifecycle.ViewModelProvider
@@ -40,6 +42,7 @@ import kotlinx.coroutines.sync.Mutex
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.UUID
+import java.io.File
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -242,7 +245,10 @@ class ClickEntryNavigationHostTest {
             compose.onNodeWithText("素材").assertIsNotSelected().performClick()
             compose.onNodeWithText("素材").assertIsNotSelected()
             compose.onNodeWithText("悬浮编排").assertDoesNotExist()
-            println("HOST_PROJECT_TAB busy=${reopenedProjects.state.value.busy}; sources click retains Steps while refresh is blocked")
+            compose.onNodeWithText("检查与交付").assertIsNotEnabled().assertIsNotSelected().performClick()
+            compose.onNodeWithText("检查与交付").assertIsNotEnabled().assertIsNotSelected()
+            compose.onNodeWithText("查看交付方式").assertDoesNotExist()
+            println("HOST_PROJECT_TAB busy=${reopenedProjects.state.value.busy}; sources/checks clicks retain Steps while refresh is blocked")
             compose.onNodeWithText("素材").assertIsNotEnabled()
         } finally {
             finishRefresh.countDown(); refreshHolder.join(10_000)
@@ -336,6 +342,141 @@ class ClickEntryNavigationHostTest {
             compose.onNodeWithContentDescription("返回").performClick()
             waitFor("其他创建方式")
         }
+    }
+
+    @Config(qualifiers = "w320dp-h568dp-xhdpi")
+    @Test fun dirtyPlanCreatedProjectExitCancelAndDiscardKeepTheOriginalSavedPlan() {
+        val fixture = dirtyPlanCreatedProjectFixture(throughRecording = false, waitInput = "900")
+        repeat(2) {
+            compose.onNodeWithText("打开新项目").assertIsEnabled().performClick()
+            waitFor("保留当前修改？")
+            compose.onNodeWithText("保存并打开").assertIsDisplayed()
+            compose.onNodeWithText("放弃修改并打开").assertIsDisplayed()
+            compose.onNodeWithText("暂不打开").assertIsDisplayed()
+            compose.onNodeWithText("暂不打开").performClick()
+            waitFor("打开新项目")
+            assertOriginalProjectSelected(fixture)
+            assertCommittedNavigationFixture(fixture)
+        }
+        compose.onNodeWithContentDescription("返回").performClick()
+        waitFor("保存计划")
+        scrollPlanTo("点击后等待 / ms").assertTextContains("900")
+        compose.onNodeWithText("尚未保存").assertIsDisplayed()
+        assertEquals(fixture.saved, ClickPlanStore(RuntimeEnvironment.getApplication()).getPlan(fixture.saved.projectId))
+        openCommittedReview(fixture)
+        compose.onNodeWithText("打开新项目").performClick()
+        waitFor("保留当前修改？")
+        compose.onNodeWithText("放弃修改并打开").performClick()
+        assertCreatedProjectOpened(fixture)
+        assertEquals(fixture.saved, ClickPlanStore(RuntimeEnvironment.getApplication()).getPlan(fixture.saved.projectId))
+        assertCommittedNavigationFixture(fixture)
+    }
+
+    @Test fun recordPlanCreatedProjectExitSavesBeforeOpeningAndIgnoresRepeatedDecisions() {
+        val fixture = dirtyPlanCreatedProjectFixture(throughRecording = true, waitInput = "1200")
+        compose.onNodeWithText("打开新项目").performClick()
+        waitFor("保留当前修改？")
+        val app = RuntimeEnvironment.getApplication()
+        val planFile = File(app.noBackupFilesDir, "click-plans/plans/${fixture.saved.projectId}.json")
+        val originalBytes = planFile.readBytes()
+        val storeLock = checkNotNull(ClickPlanStore::class.java.getDeclaredField("lock").apply { isAccessible = true }.get(null))
+        val held = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val holder = Thread {
+            synchronized(storeLock) { held.countDown(); check(release.await(90, TimeUnit.SECONDS)) }
+        }.apply { start() }
+        try {
+            check(held.await(10, TimeUnit.SECONDS))
+            compose.onNodeWithText("保存并打开").assertIsEnabled().performClick()
+            compose.waitUntil(30_000) {
+                compose.onAllNodes(hasText("保存并打开") and !isEnabled()).fetchSemanticsNodes().size == 1
+            }
+            // The real AtomicFile save is blocked, so opening now would lose the original input.
+            // Repeated decisions must neither launch another save nor switch the captured target.
+            repeat(2) { compose.onNodeWithText("保存并打开").assertIsNotEnabled().performClick() }
+            compose.onNodeWithText("放弃修改并打开").assertIsNotEnabled().performClick()
+            compose.onNodeWithText("暂不打开").assertIsNotEnabled().performClick()
+            compose.onNodeWithText("保留当前修改？").assertIsDisplayed()
+            assertOriginalProjectSelected(fixture)
+            assertArrayEquals(originalBytes, planFile.readBytes())
+        } finally {
+            release.countDown(); holder.join(10_000)
+            check(!holder.isAlive)
+        }
+        assertCreatedProjectOpened(fixture)
+        val persisted = checkNotNull(ClickPlanStore(app).getPlan(fixture.saved.projectId))
+        assertEquals(fixture.saved.planId, persisted.planId)
+        assertEquals(fixture.saved.revision + 1, persisted.revision)
+        assertEquals(fixture.saved.actions.single().actionId, persisted.actions.single().actionId)
+        assertEquals(1200L, persisted.actions.single().waitAfterMs)
+        assertCommittedNavigationFixture(fixture)
+    }
+
+    @Config(qualifiers = "w740dp-h360dp-xhdpi")
+    @Test fun createdProjectExitSaveConflictRetainsInputResultAndDoesNotRetargetOrdinaryBack() {
+        val fixture = dirtyPlanCreatedProjectFixture(throughRecording = false, waitInput = "1400")
+        compose.onNodeWithText("打开新项目").performClick()
+        waitFor("保留当前修改？")
+        val saved = fixture.saved
+        // A second writer wins after this editor loads. The production optimistic save must fail.
+        val newer = ClickPlan.create(saved.projectId, saved.targetPackage, saved.width, saved.height, saved.rotation,
+            saved.actions.map { it.copy(waitAfterMs = 700) }, planId = saved.planId,
+            revision = saved.revision + 1, displayId = saved.displayId)
+        val store = ClickPlanStore(RuntimeEnvironment.getApplication())
+        store.savePlan(newer, saved.revision)
+        compose.onNodeWithText("保存并打开").performClick()
+        waitFor("保存或打开定位未完成。输入已保留，请重试；若计划已有更新，请重新载入。")
+        compose.onNodeWithText("保留当前修改？").assertIsDisplayed()
+        compose.onNodeWithText("保存或打开定位未完成。输入已保留，请重试；若计划已有更新，请重新载入。")
+            .assertIsDisplayed()
+        compose.onNodeWithText("保存并打开").assertIsDisplayed()
+        compose.onNodeWithText("放弃修改并打开").assertIsDisplayed()
+        compose.onNodeWithText("暂不打开").assertIsDisplayed()
+        assertOriginalProjectSelected(fixture)
+        assertEquals(newer, store.getPlan(saved.projectId))
+        assertCommittedNavigationFixture(fixture)
+        compose.onNodeWithText("暂不打开").performClick()
+        waitFor("打开新项目")
+        compose.onNodeWithContentDescription("返回").performClick()
+        waitFor("保存计划")
+        scrollPlanTo("点击后等待 / ms").assertTextContains("1400")
+        compose.onNodeWithText("尚未保存").assertIsDisplayed()
+        openCommittedReview(fixture)
+        assertCommittedNavigationFixture(fixture)
+        compose.onNodeWithContentDescription("返回").performClick()
+        waitFor("保存计划")
+        compose.onNodeWithContentDescription("返回").performClick()
+        waitFor("保留当前修改？")
+        compose.onNodeWithText("放弃修改并打开").assertDoesNotExist()
+        compose.onNodeWithText("放弃修改并返回").performClick()
+        waitFor("素材")
+        compose.onNodeWithText("素材").assertIsSelected()
+        assertOriginalProjectSelected(fixture)
+        assertEquals(newer, store.getPlan(saved.projectId))
+        assertCommittedNavigationFixture(fixture)
+    }
+
+    @Test fun recordPlanCreatedProjectExitRejectsInvalidInputAndCancelKeepsTheRecordingReturn() {
+        val fixture = dirtyPlanCreatedProjectFixture(throughRecording = true, waitInput = "10001")
+        compose.onNodeWithText("打开新项目").performClick()
+        waitFor("保留当前修改？")
+        compose.onNodeWithText("点 1 的等待时长须为 0–10000 ms。").assertIsDisplayed()
+        compose.onNodeWithText("保存并打开").assertIsNotEnabled().performClick()
+        compose.onNodeWithText("保留当前修改？").assertIsDisplayed()
+        assertOriginalProjectSelected(fixture)
+        compose.onNodeWithText("暂不打开").performClick()
+        waitFor("打开新项目")
+        compose.onNodeWithContentDescription("返回").performClick()
+        waitFor("保存计划")
+        scrollPlanTo("点击后等待 / ms").assertTextContains("10001")
+        compose.onNodeWithContentDescription("返回").performClick()
+        waitFor("保留当前修改？")
+        compose.onNodeWithText("放弃修改并打开").assertDoesNotExist()
+        compose.onNodeWithText("放弃修改并返回").performClick()
+        waitFor("录制操作")
+        assertOriginalProjectSelected(fixture)
+        assertEquals(fixture.saved, ClickPlanStore(RuntimeEnvironment.getApplication()).getPlan(fixture.saved.projectId))
+        assertCommittedNavigationFixture(fixture)
     }
 
     @Test @Config(sdk = [32]) fun unsupportedSystemShowsTheReasonAndDoesNotAskForService() {
@@ -560,7 +701,11 @@ class ClickEntryNavigationHostTest {
         waitFor("另一个项目 B")
         compose.onNodeWithText("另一个项目 B").performClick()
         waitFor("检查与交付")
-        compose.onNodeWithText("检查与交付").performClick()
+        // The tab is mounted before the project/media refresh finishes; wait for its real readiness.
+        compose.waitUntil(30_000) {
+            compose.onAllNodes(hasText("检查与交付") and isEnabled()).fetchSemanticsNodes().size == 1
+        }
+        compose.onNodeWithText("检查与交付").assertIsEnabled().performClick().assertIsSelected()
         compose.onNodeWithText("查看交付方式").performScrollTo().performClick()
         waitFor("当前未选择封存版本")
         assertNull(releases.state.value.deliveryRelease)
@@ -592,6 +737,125 @@ class ClickEntryNavigationHostTest {
         check(writing.isActive)
         compose.runOnIdle { writing.cancel(); releaseState.value = releaseState.value.copy(busy = false, stage = null) }
         println("HOST_DELIVERY_NAVIGATION library/explicit-version/project-isolation/player-return PASS; system chooser/device NOT_RUN")
+    }
+
+    private data class DirtyPlanCreatedProjectFixture(val saved: ClickPlan, val run: ClickRun,
+        val createdProjectId: String, val projectIds: Set<String>, val reviewDraft: ClickChainReviewDraft)
+
+    private fun dirtyPlanCreatedProjectFixture(throughRecording: Boolean, waitInput: String): DirtyPlanCreatedProjectFixture {
+        waitFor("悬浮编排")
+        awaitProjectAndMediaIdle()
+        val app = RuntimeEnvironment.getApplication()
+        val projects = ViewModelProvider(compose.activity)[ProjectWorkspace::class.java]
+        val (sourceId, createdId, decoyId) = ProjectStore.withTemporary(app) { store ->
+            Triple(store.createProject("保留修改的原点击链").project.id,
+                store.createProject("已生成的新项目").project.id,
+                store.createProject("已生成的新项目").project.id)
+        }
+        val geometry = ClickDevice.geometry(app)
+        val saved = ClickPlan.create(sourceId, "com.example.demo", geometry.width, geometry.height,
+            geometry.rotation, listOf(ClickAction(x = geometry.width / 2, y = geometry.height / 2)))
+        val plans = ClickPlanStore(app)
+        plans.savePlan(saved, null)
+        plans.beginRun(ClickRun.create(saved, UUID.randomUUID().toString(), UUID.randomUUID().toString(), 1, 100))
+        val run = plans.recoverInterruptedRuns().single()
+        // Only the already-committed generation result is synthetic. This fixture exercises the
+        // production receipt reload and MainActivity navigation, not capture or generation execution.
+        val helper = ProjectStore.Database(app, File(app.noBackupFilesDir, "projects.sqlite").path)
+        try {
+            val db = helper.writableDatabase
+            HostSqlite.verify(db)
+            db.execSQL("""INSERT INTO click_chain_imports(operation_id,project_id,input_sha,status,created_at)
+                VALUES(?,?,?,'committed',?)""", arrayOf(createdId, createdId, "1".repeat(64), 100L))
+        } finally { helper.close() }
+        val reviews = ClickChainReviewStore(app)
+        val initial = reviews.open(run.runId, "2".repeat(64), saved.actions.size)
+        val reviewDraft = reviews.save(initial.copy(serial = initial.serial + 1,
+            title = "已生成的新项目", operationId = createdId))
+        val fixture = DirtyPlanCreatedProjectFixture(saved, run, createdId, setOf(sourceId, createdId, decoyId), reviewDraft)
+        compose.runOnIdle { projects.reload() }
+        compose.waitUntil(30_000) {
+            compose.waitForIdle()
+            !projects.state.value.busy && !projects.state.value.loadFailed &&
+                projects.state.value.projects.map { it.id }.toSet() == fixture.projectIds
+        }
+        awaitProjectAndMediaIdle()
+        // Compact home viewports do not compose every project row until the real list scrolls.
+        compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("保留修改的原点击链"))
+        waitFor("保留修改的原点击链")
+        compose.onNodeWithText("保留修改的原点击链").performScrollTo().assertIsDisplayed().assertIsEnabled().performClick()
+        waitFor("素材")
+        awaitProjectAndMediaIdle()
+        compose.onNodeWithText("素材").assertIsEnabled().performClick().assertIsSelected()
+        if (throughRecording) {
+            compose.onNodeWithText("其他方式").performClick()
+            compose.onNodeWithText("手动录屏").performClick()
+            waitFor("录制操作")
+            compose.onNodeWithText("悬浮编排").performScrollTo().performClick()
+        } else compose.onNodeWithText("悬浮编排").performScrollTo().assertIsDisplayed().assertIsEnabled().performClick()
+        waitFor("保存计划")
+        compose.waitUntil(30_000) {
+            compose.onAllNodes(hasText("保存计划") and isEnabled()).fetchSemanticsNodes().size == 1
+        }
+        scrollPlanTo("编辑").performClick()
+        scrollPlanTo("点击后等待 / ms").performTextReplacement(waitInput)
+        openCommittedReview(fixture)
+        return fixture
+    }
+
+    private fun openCommittedReview(fixture: DirtyPlanCreatedProjectFixture) {
+        scrollPlanTo("整理已录制点击链").assertIsEnabled().performClick()
+        waitFor("打开新项目")
+        val review = ViewModelProvider(compose.activity)["click-chain-review", ClickChainWorkspace::class.java]
+        compose.waitUntil(30_000) {
+            compose.waitForIdle()
+            !review.state.value.loading && !review.state.value.busy &&
+                review.state.value.createdProjectId == fixture.createdProjectId
+        }
+        assertEquals(fixture.run.runId, review.state.value.runId)
+        assertTrue(review.state.value.editingLocked)
+        compose.onNodeWithText("打开新项目").assertIsEnabled()
+    }
+
+    private fun scrollPlanTo(text: String): SemanticsNodeInteraction {
+        compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText(text))
+        return compose.onNodeWithText(text).performScrollTo()
+    }
+
+    private fun awaitProjectAndMediaIdle() {
+        val projects = ViewModelProvider(compose.activity)[ProjectWorkspace::class.java]
+        val media = ViewModelProvider(compose.activity)[MediaWorkspace::class.java]
+        compose.waitUntil(30_000) { compose.waitForIdle(); !projects.state.value.busy && !media.state.value.busy }
+    }
+
+    private fun assertOriginalProjectSelected(fixture: DirtyPlanCreatedProjectFixture) {
+        assertEquals(fixture.saved.projectId,
+            ViewModelProvider(compose.activity)[ProjectWorkspace::class.java].state.value.project?.project?.id)
+    }
+
+    private fun assertCreatedProjectOpened(fixture: DirtyPlanCreatedProjectFixture) {
+        val projects = ViewModelProvider(compose.activity)[ProjectWorkspace::class.java]
+        compose.waitUntil(30_000) { compose.waitForIdle(); projects.state.value.project?.project?.id == fixture.createdProjectId }
+        awaitProjectAndMediaIdle()
+        compose.onNodeWithText("步骤").assertIsSelected()
+        compose.onNodeWithText("素材").assertIsNotSelected()
+        compose.onNodeWithText("检查与交付").assertIsNotSelected()
+        compose.onNodeWithText("整理点击链").assertDoesNotExist()
+        compose.onNodeWithText("保留当前修改？").assertDoesNotExist()
+    }
+
+    private fun assertCommittedNavigationFixture(fixture: DirtyPlanCreatedProjectFixture) {
+        val app = RuntimeEnvironment.getApplication()
+        ProjectStore.withTemporary(app) { store ->
+            assertEquals(fixture.projectIds, store.listProjects().map { it.id }.toSet())
+            val receipt = checkNotNull(store.readClickChainImport(fixture.createdProjectId))
+            assertEquals("committed", receipt.status)
+            assertEquals(fixture.createdProjectId, receipt.projectId)
+            assertTrue(receipt.projectStillExists)
+        }
+        assertEquals(fixture.reviewDraft, ClickChainReviewStore(app).readExisting(fixture.run.runId))
+        assertEquals(listOf(fixture.run), ClickPlanStore(app).readRuns(fixture.saved.projectId))
+        assertNull(ClickPlanStore(app).getPlan(fixture.createdProjectId))
     }
 
     private fun assertFixedCandidate(expected: ReleaseCandidate, actual: ReleaseCandidate?) {

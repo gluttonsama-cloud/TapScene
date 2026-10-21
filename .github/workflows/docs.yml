@@ -238,7 +238,7 @@ jobs:
           import xml.etree.ElementTree as ET
           cases = [case for path in Path("android/app/build/test-results/testPreviewUnitTest").glob("TEST-*.xml")
                    for case in ET.parse(path).getroot().iter("testcase")]
-          assert len(cases) == 8, f"Expected eight entry/review/delivery checks: {len(cases)}"
+          assert len(cases) == 12, f"Expected twelve entry/review/delivery checks: {len(cases)}"
           assert all(not any(case.find(kind) is not None for kind in ("failure", "error", "skipped")) for case in cases)
           print("OVERLAY_ENTRY_HOST_CHECKS_OK: production navigation only; Android overlay/playback/recording NOT_RUN")
           PY_ENTRY
@@ -265,23 +265,35 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 117, f"Expected one hundred seventeen Compose review images, found {len(images)}"
+          assert len(images) == 147, f"Expected 147 Compose review images, found {len(images)}"
+          project_deletion_images = [image for image in images if "ProjectDeletionScreenshotPreviewsKt" in str(image)]
+          assert len(project_deletion_images) == 3, f"Expected three project deletion confirmation images, found {len(project_deletion_images)}"
+          screenshot_import_images = [image for image in images if "ScreenshotImportPreviewsKt" in str(image)]
+          assert len(screenshot_import_images) == 5, f"Expected five screenshot import/exit images, found {len(screenshot_import_images)}"
+          imported_ai_images = [image for image in images if "ImportedAiConfigurationScreenshotPreviewsKt" in str(image)]
+          assert len(imported_ai_images) == 3, f"Expected three imported AI configuration images, found {len(imported_ai_images)}"
+          resume_images = [image for image in images if "PlaybackResumeScreenshotPreviewsKt" in str(image)]
+          assert len(resume_images) == 3, f"Expected three playback resume images, found {len(resume_images)}"
           busy_tab_images = [image for image in images if "ProjectSourcesBusyPreview" in str(image)]
           assert len(busy_tab_images) == 1, f"Expected one busy project tab image, found {len(busy_tab_images)}"
           project_source_images = [image for image in images if "ProjectSourceStorageScreenshotPreviewsKt" in str(image)]
           assert len(project_source_images) == 2, f"Expected two project source storage images, found {len(project_source_images)}"
           offline_import_images = [image for image in images if "OfflineImportPlaybackScreenshotPreviewsKt" in str(image)]
-          assert len(offline_import_images) == 1, f"Expected one offline import playback image, found {len(offline_import_images)}"
+          assert len(offline_import_images) == 2, f"Expected two offline import result/playback images, found {len(offline_import_images)}"
           ai_configuration_images = [image for image in images if "AiConfigurationExitScreenshotPreviewsKt" in str(image)]
           assert len(ai_configuration_images) == 2, f"Expected two AI configuration exit images, found {len(ai_configuration_images)}"
           delivery_images = [image for image in images if "DeliveryAvailabilityScreenshotPreviewsKt" in str(image)]
-          assert len(delivery_images) == 3, f"Expected three delivery availability images, found {len(delivery_images)}"
+          assert len(delivery_images) == 4, f"Expected four delivery availability images, found {len(delivery_images)}"
           click_review_images = [image for image in images if "ClickChainReviewScreenshotPreviewsKt" in str(image)]
-          assert len(click_review_images) == 9, f"Expected nine click-chain author review images, found {len(click_review_images)}"
+          assert len(click_review_images) == 10, f"Expected ten click-chain author review images, found {len(click_review_images)}"
+          click_precision_images = [image for image in images if "ClickChainActionPrecisionScreenshotPreviewsKt" in str(image)]
+          assert len(click_precision_images) == 3, f"Expected three click-region precision images, found {len(click_precision_images)}"
+          click_exit_images = [image for image in images if "ClickPlanCreatedProjectExitScreenshotPreviewsKt" in str(image)]
+          assert len(click_exit_images) == 2, f"Expected two unsaved click-plan generated-project exit images, found {len(click_exit_images)}"
           click_plan_images = [image for image in images if "ClickPlanScreenshotPreviewsKt" in str(image)]
           assert len(click_plan_images) == 5, f"Expected five click-plan review images, found {len(click_plan_images)}"
           text_region_images = [image for image in images if "TextRegionScreenshotPreviewsKt" in str(image)]
-          assert len(text_region_images) == 3, f"Expected three text-region review images, found {len(text_region_images)}"
+          assert len(text_region_images) == 5, f"Expected five text-region/hotspot review images, found {len(text_region_images)}"
           hosted_images = [image for image in images if "HostingScreenshotPreviewsKt" in str(image)]
           assert len(hosted_images) == 3, f"Expected three local-hosting review images, found {len(hosted_images)}"
           project_copy_images = [image for image in images if "SavedProjectCopyScreenshotPreviewsKt" in str(image)]
@@ -304,6 +316,8 @@ jobs:
           assert len(connection_images) == 2, f"Expected two connection repair images, found {len(connection_images)}"
           annotation_images = [image for image in images if "AiAnnotationScreenshotPreviewsKt" in str(image)]
           assert len(annotation_images) == 2, f"Expected two annotation editor images, found {len(annotation_images)}"
+          ai_comparison_images = [image for image in images if "AiComparisonScreenshotPreviewsKt" in str(image)]
+          assert len(ai_comparison_images) == 2, f"Expected two AI comparison identity images, found {len(ai_comparison_images)}"
           ai_draft_images = [image for image in images if "AiDraftScreenshotPreviewsKt" in str(image)]
           assert len(ai_draft_images) == 9, f"Expected nine AI draft review images, found {len(ai_draft_images)}"
           lines = [
@@ -318,7 +332,7 @@ jobs:
               assert data[:8] == b"\x89PNG\r\n\x1a\n", image
               width, height = struct.unpack(">II", data[16:24])
               assert width > 0 and height > 0, image
-              if any(name in str(image) for name in ("EditorDraftRecovery", "SafeImage", "ScreenshotImport", "EditorNavigation", "ReviewAiNavigation", "AiDraftScreenshot", "OfflineShareScreenshot", "SavedStepCopyScreenshot", "SavedProjectCopyScreenshot", "HostingScreenshot", "ClickPlanScreenshot", "ClickChainReviewScreenshot")):
+              if any(name in str(image) for name in ("EditorDraftRecovery", "SafeImage", "ScreenshotImport", "EditorNavigation", "ReviewAiNavigation", "AiDraftScreenshot", "OfflineShareScreenshot", "SavedStepCopyScreenshot", "SavedProjectCopyScreenshot", "HostingScreenshot", "ClickPlanScreenshot", "ClickPlanCreatedProjectExitScreenshot", "ClickChainReviewScreenshot")):
                   # A modal window can yield a valid but blank PNG in Layoutlib. Reject that
                   # before treating form and AI import images as usable review evidence.
                   import zlib
@@ -436,22 +450,36 @@ jobs:
             --tests com.tapscene.ui.shell.ManualMaskRecoveryHostTest \
             --tests com.tapscene.ui.shell.RecordingOwnerNavigationHostTest \
             --tests com.tapscene.ui.shell.ProjectTextEditingHostTest \
+            --tests com.tapscene.ui.shell.ReviewDeliveryJourneyHostTest \
+            --tests com.tapscene.ui.shell.ReviewRegionCorrectionHostTest \
+            --tests com.tapscene.ui.shell.ScreenshotCreationJourneyHostTest \
             --tests com.tapscene.ui.shell.DeliveryIssueNavigationHostTest \
             --tests com.tapscene.ui.shell.StepDeletionConfirmationHostTest \
+            --tests com.tapscene.ui.shell.ProjectDeletionConfirmationHostTest \
             --tests com.tapscene.ui.shell.CopiedAnimationReadinessHostTest \
             --tests com.tapscene.ui.AnimationReadinessFailureHostTest \
             --tests com.tapscene.ui.shell.AuthoredPathImpactHostTest \
             --tests com.tapscene.ui.ReleasePlayerCancellationHostTest \
+            --tests com.tapscene.data.ReleaseDeletionStoreHostTest \
+            --tests com.tapscene.ui.shell.ReleaseDeletionFlowHostTest \
+            --tests com.tapscene.data.PlaybackCheckpointHostTest \
+            --tests com.tapscene.ui.shell.OfflinePlaybackResumeHostTest \
             --tests com.tapscene.ui.shell.OfflineImportPlaybackHostTest \
             --tests com.tapscene.ui.shell.ProjectStorageNavigationHostTest \
             --tests com.tapscene.ui.shell.ReleasePlayerFeedbackHostTest \
             --tests com.tapscene.ui.shell.AiImportNavigationHostTest \
             --tests com.tapscene.ui.shell.AiImportDifferenceIdentityHostTest \
+            --tests com.tapscene.ui.shell.AiImportJourneyHostTest \
             --tests com.tapscene.ui.AiImportCancellationHostTest \
             --tests com.tapscene.ui.AiConfigurationRetentionHostTest \
+            --tests com.tapscene.data.ImportedAiConfigurationHostTest \
+            --tests com.tapscene.ui.ImportedAiConfigurationFlowHostTest \
+            --tests com.tapscene.ui.LocalAiConfigurationFlowHostTest \
             --tests com.tapscene.ui.AiAnnotationEditsTest \
             --tests com.tapscene.ui.shell.AiAnnotationInputHostTest \
             --tests com.tapscene.ui.shell.HomeMaterialPagesHostTest \
+            --tests com.tapscene.ui.shell.ProjectHomeReturnContextHostTest \
+            --tests com.tapscene.ui.shell.CompactHomeActionsHostTest \
             --tests com.tapscene.ui.HostingWorkspaceHostTest \
             --tests com.tapscene.ocr.TextRegionPolicyTest \
             --tests com.tapscene.data.TextRegionDraftHostTest \
@@ -465,6 +493,13 @@ jobs:
             --tests com.tapscene.clickplan.ClickViewportTest \
             --tests com.tapscene.clickplan.ClickChainReviewPolicyTest \
             --tests com.tapscene.clickplan.ClickChainReviewStoreHostTest \
+            --tests com.tapscene.ui.shell.ClickChainReviewNavigationHostTest \
+            --tests com.tapscene.recording.FrameEvidenceThumbnailHostTest \
+            --tests com.tapscene.ui.ClickChainThumbnailBatchHostTest \
+            --tests com.tapscene.ui.shell.ClickChainThumbnailHostTest \
+            --tests com.tapscene.ui.shell.ClickChainNameReadinessHostTest \
+            --tests com.tapscene.ui.shell.ClickChainRectPercentagesTest \
+            --tests com.tapscene.ui.shell.ClickChainActionPrecisionHostTest \
             --tests com.tapscene.data.ClickChainImportHostTest \
             --tests com.tapscene.recording.RecordingClickGateTest \
             --tests com.tapscene.recording.RecordingFrameLedgerTest \
@@ -488,9 +523,30 @@ jobs:
           root = Path("android/app/build/test-results/testDebugUnitTest")
           files = sorted(root.glob("TEST-*.xml"))
           expected = {
+              ("com.tapscene.data.ReleaseDeletionStoreHostTest", "staleBindingAndCleanupRetryNeverStartAnotherDeletion"): 1,
+              ("com.tapscene.data.ReleaseDeletionStoreHostTest", "cancellationAfterStageSyncBeforeRenamePreservesVersionAndPrivatePlan"): 1,
+              ("com.tapscene.data.ReleaseDeletionStoreHostTest", "committedSyncFailureKeepsReceiptAndRetriesBeforeReimportWithoutPlanInheritance"): 1,
+              ("com.tapscene.data.ReleaseDeletionStoreHostTest", "configDirectorySyncFailureRemainsPendingUntilExplicitBoundCleanup"): 1,
+              ("com.tapscene.data.ReleaseDeletionStoreHostTest", "sameIdReplacementEvenWithIdenticalSummaryBlocksOldReceiptCleanup"): 1,
+              ("com.tapscene.data.ReleaseDeletionStoreHostTest", "cleanedStageRecoveryOnlyRemovesItsOwnTreeAndRetainsOwnerOnPartialFailure"): 1,
+              ("com.tapscene.ui.shell.ReleaseDeletionFlowHostTest", "actualConfirmationDistinguishesSameTitlesAndStoreRejectsChangedDigest"): 1,
+              ("com.tapscene.ui.shell.ReleaseDeletionFlowHostTest", "cancellationBeforeRenamePreservesEveryVersionCheckpointPlanAndExternalCopy"): 1,
+              ("com.tapscene.ui.shell.ReleaseDeletionFlowHostTest", "cancellationAfterRenameClearsExactReferencesEvenWhenAnotherVersionBreaksLibraryRefresh"): 1,
+              ("com.tapscene.ui.shell.ReleaseDeletionFlowHostTest", "unknownResultRequiresExplicitReadOnlyRecheckAndNeverDeletesOnRecovery"): 1,
+              ("com.tapscene.data.PlaybackCheckpointHostTest", "freshOpenAndNewStoreRestoreExactHistoryBackRestartAndEnding"): 1,
+              ("com.tapscene.data.PlaybackCheckpointHostTest", "invalidBoundedCheckpointsNeverResumeAnotherFrameOrChangePackage"): 1,
+              ("com.tapscene.data.PlaybackCheckpointHostTest", "newerOpenRejectsDelayedAndForgedOwnersAcrossStoreInstances"): 1,
+              ("com.tapscene.data.PlaybackCheckpointHostTest", "deletionAndReimportRemoveProgressAndInvalidateOldOwners"): 1,
+              ("com.tapscene.data.PlaybackCheckpointHostTest", "sameOwnerLateSaveCannotReplaceNewerPublishedSequence"): 1,
+              ("com.tapscene.data.PlaybackCheckpointHostTest", "corruptPackageFailsBeforeProgressAndExactInterruptedMetadataIsRecovered"): 1,
+              ("com.tapscene.data.PlaybackCheckpointHostTest", "invalidTraversalSavePreservesCommittedCheckpoint"): 1,
+              ("com.tapscene.ui.shell.OfflinePlaybackResumeHostTest", "newViewModelContinuesExactBranchHistoryAndEndingWhileStartAndCandidateStayIndependent"): 1,
+              ("com.tapscene.ui.shell.OfflinePlaybackResumeHostTest", "switchingSameTitleVersionsRejectsOldChoiceAndCorruptRecordOnlyOffersFreshStart"): 1,
+              ("com.tapscene.ui.shell.OfflinePlaybackResumeHostTest", "closeAfterVisibleEndStillSavesAndInterruptedTransitionRestoresOnlyItsSource"): 1,
               ("com.tapscene.ui.AnimationReadinessFailureHostTest", "unreadableAnimationCannotTurnCommittedAddOrReplacementIntoFailure"): 1,
               ("com.tapscene.ui.shell.AuthoredPathImpactHostTest", "sameTitleStepsShowOnlyChangedTransitionImpactAndRequireExplicitBuild"): 1,
               ("com.tapscene.ui.shell.AuthoredPathImpactHostTest", "changedRevisionAndBusyStateBlockBuildCallbacks"): 1,
+              ("com.tapscene.ui.shell.AuthoredPathImpactHostTest", "reorderedSameTitlePathKeepsProjectStartAndRequiresExplicitBuild"): 1,
               ("com.tapscene.ui.ReleasePlayerCancellationHostTest", "cancelBlockedNextRetainsDisplayedVisitAndCannotClearNewPlayerWork"): 1,
               ("com.tapscene.ui.ReleasePlayerCancellationHostTest", "cancelTransitionPreparationClearsPendingAndRejectsOldRunCallbacks"): 1,
               ("com.tapscene.ui.shell.ReleasePlayerFeedbackHostTest", "newCancellationFeedbackResetsScrolledLandscapeActionsAndKeepsRestartReachable"): 1,
@@ -597,12 +653,56 @@ jobs:
               ("com.tapscene.clickplan.ClickChainReviewPolicyTest", "nextReviewUsesChosenRepresentativeAndNeverFabricatesMissingOrStaleKeys"): 1,
               ("com.tapscene.clickplan.ClickChainReviewPolicyTest", "nextReviewAfterRangeNarrowingUsesOnlyCurrentRouteFramesAndActions"): 1,
               ("com.tapscene.clickplan.ClickChainReviewPolicyTest", "framesOnlyReviewSkipsDeselectedFramesAndNeverNavigatesToActions"): 1,
+              ("com.tapscene.clickplan.ClickChainReviewPolicyTest", "reviewedBlankNamesNeedSelectedMetadataRepairWithoutChangingReviewOrLockSemantics"): 1,
               ("com.tapscene.clickplan.ClickChainReviewPolicyTest", "nextActionReviewSkipsConfirmedAndDisabledUnknownActionsInListOrder"): 1,
               ("com.tapscene.clickplan.ClickChainReviewPolicyTest", "nextReviewIsSuppressedByEveryLockAndEitherOpenEditor"): 1,
               ("com.tapscene.clickplan.ClickChainReviewPolicyTest", "nextReviewIsPureAndDoesNotUseOrInferCreationPermission"): 1,
               ("com.tapscene.clickplan.ClickChainReviewPolicyTest", "validationRejectsMalformedReversedAndOutOfBoundsActionRanges"): 1,
               ("com.tapscene.clickplan.ClickChainReviewPolicyTest", "validationRequiresTitleWithoutInventingRangeErrorsDuringLoadingOrEmptyCapture"): 1,
               ("com.tapscene.clickplan.ClickChainReviewStoreHostTest", "reviewedThumbnailRequiresExactOutputAndBoundsDecodeWithoutChangingReview"): 1,
+              ("com.tapscene.ui.shell.ClickChainReviewNavigationHostTest", "frameEditorReturnsPreserveMiddlePositionAndDifferentRunStartsAtTop"): 1,
+              ("com.tapscene.ui.shell.ClickChainReviewNavigationHostTest", "actionEditorReturnsPreserveMiddlePositionAndDifferentRunStartsAtTop"): 1,
+              ("com.tapscene.recording.FrameEvidenceThumbnailHostTest", "opaqueRgbAndRgbaAllFiltersCrossPixelRowAndInflateBufferBoundaries"): 1,
+              ("com.tapscene.recording.FrameEvidenceThumbnailHostTest", "transparentOriginalPixelOmittedByNativeSamplingStillFailsTheWholePngGate"): 1,
+              ("com.tapscene.recording.FrameEvidenceThumbnailHostTest", "malformedCrcLengthsDeflateFiltersColorInterlaceAndSuffixAreRejected"): 1,
+              ("com.tapscene.recording.FrameEvidenceThumbnailHostTest", "thumbnailUsesBoundedArgbPixelsAndLeavesOriginalEvidenceAndFullDecodeUnchanged"): 1,
+              ("com.tapscene.recording.FrameEvidenceThumbnailHostTest", "thumbnailRequiresExactCandidateFreshOwnershipShaGeometryAndContainerSample"): 1,
+              ("com.tapscene.recording.FrameEvidenceThumbnailHostTest", "sourceObservationIsOutsideEvidenceLockAndChangedOrRevokedSessionsFailClosed"): 1,
+              ("com.tapscene.recording.FrameEvidenceThumbnailHostTest", "cancellationPropagatesThroughSourceHashAndEveryPngDecodeCheckpoint"): 1,
+              ("com.tapscene.recording.FrameEvidenceThumbnailHostTest", "containerTraversalCancellationStopsReadingAndReleasesExtractor"): 1,
+              ("com.tapscene.ui.ClickChainThumbnailBatchHostTest", "visibleOriginalBatchSharesFreshObservationAndLeavesReviewAndProjectUntouched"): 1,
+              ("com.tapscene.ui.ClickChainThumbnailBatchHostTest", "sameDigestDifferentKindAndChangedOwnerOrGenerationCannotReuseOriginalImages"): 1,
+              ("com.tapscene.ui.ClickChainThumbnailBatchHostTest", "unavailableOriginalDoesNotHideReviewedOutputAndReviewedFailureNeverFallsBack"): 1,
+              ("com.tapscene.ui.ClickChainThumbnailBatchHostTest", "revocationAndCommittedProjectDeletionDuringSourceObservationRejectOriginalBatch"): 1,
+              ("com.tapscene.ui.ClickChainThumbnailBatchHostTest", "queuedCancellationAndPromptIoCancellationRecycleOnlyUndeliveredBatchImages"): 1,
+              ("com.tapscene.ui.shell.ClickChainThumbnailHostTest", "visibleRequestsExcludeOffscreenDeduplicateRevisitsAndCapEight"): 1,
+              ("com.tapscene.ui.shell.ClickChainThumbnailHostTest", "thumbnailLabelsAndAccessibilityDistinguishOriginalFromReviewedWithSameDigest"): 1,
+              ("com.tapscene.ui.shell.ClickChainThumbnailHostTest", "thumbnailFailuresKeepReviewControlsAndNeverMasqueradeAsMissingEvidence"): 1,
+              ("com.tapscene.ui.shell.ClickChainThumbnailHostTest", "lateRunSourceKindAndOutputResultsCannotPaintCurrentState"): 1,
+              ("com.tapscene.ui.shell.ClickChainThumbnailHostTest", "leavingVisibleRowsCancelsTheOldBatchAndRequestsOnlyTheNewViewport"): 1,
+              ("com.tapscene.ui.shell.ClickChainThumbnailHostTest", "replacingWorkbenchWithEitherEditorCancelsItsThumbnailRequest"): 1,
+              ("com.tapscene.ui.shell.ClickChainThumbnailHostTest", "revisitsShareOneBitmapAndReplacingOutputDropsButDoesNotRecycleDisplayedPixels"): 1,
+              ("com.tapscene.ui.shell.ClickChainNameReadinessHostTest", "chainNameRepairSurvivesReturnAndReopenWithoutLosingSafeOutputOrActions"): 1,
+              ("com.tapscene.ui.shell.ClickChainNameReadinessHostTest", "framesOnlyWhitespaceRepairIgnoresDeselectedNamesAndKeepsReviewedPixels"): 1,
+              ("com.tapscene.ui.shell.ClickChainNameReadinessHostTest", "sharedFrameNameRepairUpdatesEveryVisitWithoutDuplicatingReviewOrResettingActions"): 1,
+              ("com.tapscene.ui.shell.ClickChainNameReadinessHostTest", "directFrameConfirmationRejectsBlankNameWithoutMarkingOutputReviewed"): 1,
+              ("com.tapscene.ui.shell.ClickChainRectPercentagesTest", "acceptsFullBoundsAndDecimalPercentages"): 1,
+              ("com.tapscene.ui.shell.ClickChainRectPercentagesTest", "preservesOriginalInstanceOnUnchangedInput"): 1,
+              ("com.tapscene.ui.shell.ClickChainRectPercentagesTest", "equivalentFormattingIsNoOp"): 1,
+              ("com.tapscene.ui.shell.ClickChainRectPercentagesTest", "singleEdgeEditPreservesOtherFloatBits"): 1,
+              ("com.tapscene.ui.shell.ClickChainRectPercentagesTest", "tinyExistingRectanglesKeepValidInitialDefaults"): 1,
+              ("com.tapscene.ui.shell.ClickChainRectPercentagesTest", "acceptsTinyRegionsWithoutDragMinimum"): 1,
+              ("com.tapscene.ui.shell.ClickChainRectPercentagesTest", "rejectsBlankIncompleteAndMalformedDecimals"): 1,
+              ("com.tapscene.ui.shell.ClickChainRectPercentagesTest", "rejectsNonfiniteInputs"): 1,
+              ("com.tapscene.ui.shell.ClickChainRectPercentagesTest", "rejectsPercentagesOutsideBoundsBeforeFloatRounding"): 1,
+              ("com.tapscene.ui.shell.ClickChainRectPercentagesTest", "rejectsInvertedAndZeroAreaRectangles"): 1,
+              ("com.tapscene.ui.shell.ClickChainRectPercentagesTest", "rejectsGeometryThatCollapsesToFloat"): 1,
+              ("com.tapscene.ui.shell.ClickChainRectPercentagesTest", "formattingIsPlainDecimalAndLocaleIndependent"): 1,
+              ("com.tapscene.ui.shell.ClickChainRectPercentagesTest", "initialInputRoundTripsAcrossFloatMagnitudes"): 1,
+              ("com.tapscene.ui.shell.ClickChainActionPrecisionHostTest", "changedPrecisionApplyPersistsOnlyEditedActionUntilExplicitConfirmation"): 1,
+              ("com.tapscene.ui.shell.ClickChainActionPrecisionHostTest", "cancelModalBackAndEquivalentApplyKeepConfirmedDraftAndAllBytesUnchanged"): 1,
+              ("com.tapscene.ui.shell.ClickChainActionPrecisionHostTest", "invalidPrecisionInputCannotApplyOrMutateConfirmedRectangle"): 1,
+              ("com.tapscene.ui.shell.ClickChainActionPrecisionHostTest", "stagedPrecisionResetsOnIdentityReplacementAndBusyCannotDispatchChanges"): 1,
               ("com.tapscene.data.ClickChainImportHostTest", "reviewedRouteCreatesIndependentProjectAndReceiptOutlivesBothOwners"): 1,
               ("com.tapscene.data.ClickChainImportHostTest", "failedCommitCancellationAndRetryAreAtomic"): 1,
               ("com.tapscene.data.ClickChainImportHostTest", "tamperedMediaWrongPixelsAndUnknownActionsCannotBecomeEvidence"): 1,
@@ -678,6 +778,9 @@ jobs:
               ("com.tapscene.ui.DeliverySelectionHostTest", "explicitOldVersionSurvivesWorkspaceReopenAndRejectsCrossProjectAndLateExport"): 1,
               ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "noSelectionKeepsReviewAndOtherVersionAiReachableWithoutDeadExportButtons"): 1,
               ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "selectedVersionDetailsAndBusyStatePreserveExportAndShareCallbacks"): 1,
+              ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "matchingAndUnknownRevisionsDoNotSuggestUnverifiedDraftChanges"): 1,
+              ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "lowerDraftRevisionUsesNeutralCopyAndMissingRouteDoesNotInventChecksAction"): 1,
+              ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "shortLandscapeKeepsVersionContextDetailsAndExportReachable"): 1,
               ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "importedVersionCannotShareAndDeveloperHostingRetainsAllDestinations"): 1,
               ("com.tapscene.ui.shell.DeliveryProductPagesHostTest", "settingsOnlyShowsRealStorageAndExpandableAccurateHelp"): 1,
               ("com.tapscene.ui.shell.DraftAiHoldInputHostTest", "pendingHoldSurvivesCollapseAndTabsAndCannotSilentlySaveOldValue"): 1,
@@ -687,11 +790,20 @@ jobs:
               ("com.tapscene.ui.shell.ManualMaskRecoveryHostTest", "failedSaveAndRereadKeepMasksUntilConfirmedRecoveryThenBackWorks"): 1,
               ("com.tapscene.ui.shell.ManualMaskRecoveryHostTest", "cancellationAfterRealDirectorySyncRereadsCommittedMasksWithoutRollback"): 1,
               ("com.tapscene.ui.shell.ManualMediaInputHostTest", "shellRecordingCoverRetainsRawTimesButSourceSwitchAndFullExitClearThem"): 1,
+              ("com.tapscene.ui.shell.ManualMediaInputHostTest", "missingVideoPickerPreservesManualWorkbenchForMenuAndEmptyEntrances"): 1,
               ("com.tapscene.ui.shell.DeliveryIssueNavigationHostTest", "regionPreflightTargetsExactCropAndRequiresExplicitGenerationAndReview"): 1,
               ("com.tapscene.ui.shell.DeliveryIssueNavigationHostTest", "reachableClosedLoopRequiresExplicitEndingAndRepairsExactSameTitleStep"): 1,
               ("com.tapscene.ui.shell.DeliveryIssueNavigationHostTest", "unreachableCopiedTerminalRepairsIncomingHotspotOnlyAfterExplicitSave"): 1,
               ("com.tapscene.ui.shell.ProjectTextEditingHostTest", "fixedReviewEditsCurrentSourceTextByIdAndRebuildsOnlyAfterExplicitConfirmation"): 1,
+              ("com.tapscene.ui.shell.ProjectTextEditingHostTest", "selectedSealedVersionSurvivesProjectTextSaveAndComparesOnlyItsLoadedSource"): 1,
+              ("com.tapscene.ui.shell.ReviewDeliveryJourneyHostTest", "projectChecksReviewTraversalSealAndSaveUseTheSameFixedPackage"): 1,
+              ("com.tapscene.ui.shell.ScreenshotCreationJourneyHostTest", "homeCancellationThenTwoReviewedScreenshotsCreateOneProjectAndKeepBothSteps"): 1,
+              ("com.tapscene.ui.shell.ProjectDeletionConfirmationHostTest", "actualHomeMenuIdentifiesSameTitleProjectsAndDeletesOnlyTheConfirmedOne"): 1,
+              ("com.tapscene.ui.shell.ProjectDeletionConfirmationHostTest", "externallyChangedSummaryInvalidatesTheOpenConfirmationUntilCancelledAndReopened"): 1,
+              ("com.tapscene.ui.shell.ProjectDeletionConfirmationHostTest", "sharedContentKeepsLongDetailsScrollableAndBlocksStaleOrBusyConfirmation"): 1,
               ("com.tapscene.ui.shell.AiImportNavigationHostTest", "busyBackPreservesImportAndOnlyExplicitCancelReachesDestructiveCallback"): 1,
+              ("com.tapscene.ui.shell.AiImportJourneyHostTest", "homeAiImportSelectsExactSameTitleVersionsAndCreatesOnlyTheReceiptProject"): 1,
+              ("com.tapscene.ui.shell.AiImportDifferenceIdentityHostTest", "comparisonSelectionDistinguishesSameTitleVersionsAndKeepsTheFixedSnapshotIdentity"): 1,
               ("com.tapscene.ui.shell.AiImportDifferenceIdentityHostTest", "reviewUsesEachVersionsNamesOrderAndDeletedHotspotWithoutCommitting"): 1,
               ("com.tapscene.ui.shell.AiImportDifferenceIdentityHostTest", "missingMismatchedAndIncompleteSnapshotsNeverBorrowTheOtherSidesIdentity"): 1,
               ("com.tapscene.ui.AiImportCancellationHostTest", "cancellingUnknownReceiptRetryAlwaysReadsActualCommitBeforeCleanup"): 1,
@@ -707,15 +819,34 @@ jobs:
               ("com.tapscene.ui.AiAnnotationEditsTest", "multipleAnnotationsOnOneVisitRejectApplyAndRemovalDespiteDifferentRegions"): 1,
               ("com.tapscene.ui.AiAnnotationEditsTest", "effectLimitBlocksOnlyAdditionNotTextUpdatesOrRemoval"): 1,
               ("com.tapscene.ui.shell.ProjectStorageNavigationHostTest", "sameTitleProjectsOpenTheirOwnSourcesAndLateCallbacksDoNotReopenOrStackNavigation"): 1,
+              ("com.tapscene.ui.shell.ProjectStorageNavigationHostTest", "projectMenuOnlyOffersHostingInTheExplicitDevelopmentVariant"): 1,
+              ("com.tapscene.ui.shell.ProjectStorageNavigationHostTest", "landscapeProjectMenuKeepsEveryLocalActionReachable"): 1,
               ("com.tapscene.ui.shell.ProjectStorageNavigationHostTest", "unreadableUsageStillOpensOwningProjectSourcesAndExplicitReloadRecoversOriginalRecord"): 1,
               ("com.tapscene.ui.shell.OfflineImportPlaybackHostTest", "repeatedOlderSameTitleImportOpensExactVersionAndExitBackAndReadFailureReturnToLibrary"): 1,
               ("com.tapscene.ui.shell.OfflineImportPlaybackHostTest", "repeatedLocalPackageRetainsProvenanceAndBackCancelsBlockedPlayerRead"): 1,
               ("com.tapscene.ui.shell.OfflineImportPlaybackHostTest", "importBranchesOnlyExposeCurrentSuccessfulIdAndReselectionClearsSuccess"): 1,
+              ("com.tapscene.ui.shell.OfflineImportPlaybackHostTest", "cancellationBeforeImportCommitKeepsLibraryAndAfterCommitShowsExactStoredVersion"): 1,
+              ("com.tapscene.ui.shell.OfflineImportPlaybackHostTest", "committedImportWithUnreadableOtherSummaryShowsReceiptAndRefreshKeepsBothVersions"): 1,
+              ("com.tapscene.data.ImportedAiConfigurationHostTest", "openRetainsRawFingerprintsWithoutAdoptingOrRewritingImportedPlans"): 1,
+              ("com.tapscene.data.ImportedAiConfigurationHostTest", "unreadableOversizedAndMalformedPathsStayUnknownAndCannotBeOverwritten"): 1,
+              ("com.tapscene.data.ImportedAiConfigurationHostTest", "staleSummaryAndRawLayoutChangesRejectEvenEquivalentPlans"): 1,
+              ("com.tapscene.data.ImportedAiConfigurationHostTest", "finalCasRechecksAfterPackageSyncAndPackageFailureLeavesPreviousBytes"): 1,
+              ("com.tapscene.data.ImportedAiConfigurationHostTest", "cancellationBeforeAndAfterConfigurationCommitIsResolvedFromActualDisk"): 1,
+              ("com.tapscene.data.ImportedAiConfigurationHostTest", "explicitSaveRoundTripsAndDoesNotChangeImportedReviewSharingOrHostingRights"): 1,
+              ("com.tapscene.ui.ImportedAiConfigurationFlowHostTest", "explicitSourceChoicesPreserveRawBytesUntilConfirmedReplacement"): 1,
+              ("com.tapscene.ui.ImportedAiConfigurationFlowHostTest", "failedOpenPreservesEditorBaselineAndStaleChoicesCannotReplaceAnotherOwner"): 1,
+              ("com.tapscene.ui.ImportedAiConfigurationFlowHostTest", "cancellationAtRealCommitBoundariesReportsDiskTruthRatherThanCacheSuccess"): 1,
+              ("com.tapscene.ui.ImportedAiConfigurationFlowHostTest", "unknownAndChangedReadbackBlockWritesUntilReadOnlyRecheckFindsTarget"): 1,
+              ("com.tapscene.ui.LocalAiConfigurationFlowHostTest", "cancellationAtRealCommitBoundariesUpdatesBaselineFromDisk"): 1,
+              ("com.tapscene.ui.LocalAiConfigurationFlowHostTest", "failedAndChangedReadbackBlockOverwriteUntilTargetRecheckRestoresBaseline"): 1,
+              ("com.tapscene.ui.shell.AiAnnotationInputHostTest", "retainedChoiceUsesExactOwnerAndUnknownSaveRequiresRecheckOrExplicitExit"): 1,
               ("com.tapscene.ui.AiConfigurationRetentionHostTest", "unfinishedConfigurationTracksFieldChangesAndRestoringValuesClearsChanges"): 1,
               ("com.tapscene.ui.AiConfigurationRetentionHostTest", "successfulExportBecomesCleanAndPickerCancellationPreservesExactPlanOnReopen"): 1,
               ("com.tapscene.ui.shell.AiAnnotationInputHostTest", "appliedBackAndVersionSelectionPreservePendingText"): 1,
+              ("com.tapscene.ui.shell.AiAnnotationInputHostTest", "sameNamedVersionsChooseByFullIdAndReviewOnlySelectedIdentity"): 1,
               ("com.tapscene.ui.shell.AiAnnotationInputHostTest", "busyBackNeverLeavesWhileCleanAndDraftBoundConfigurationsCanReturn"): 1,
               ("com.tapscene.ui.shell.AiAnnotationInputHostTest", "pendingTextSurvivesCollapseAndBothBacksButNeverLeaksToAnotherVersion"): 1,
+              ("com.tapscene.ui.shell.AiAnnotationInputHostTest", "importedContentReviewHintsStayTruthfulThroughExplicitExportConfirmation"): 1,
               ("com.tapscene.ui.shell.AiAnnotationInputHostTest", "editingExistingTextRequiresApplyAndEmptyInputNeverMeansDelete"): 1,
               ("com.tapscene.ui.shell.AiAnnotationInputHostTest", "shellRecordingCoverRetainsInputButVersionReplacementAndFullExitClearIt"): 1,
               ("com.tapscene.ui.shell.HomeMaterialPagesHostTest", "healthyHomeEmptyStateDoesNotReplaceLoadingOrFailure"): 1,
@@ -723,6 +854,11 @@ jobs:
               ("com.tapscene.ui.shell.HomeMaterialPagesHostTest", "quotaLoadFailureAndBusyKeepExistingActionGates"): 1,
               ("com.tapscene.ui.shell.HomeMaterialPagesHostTest", "sourceSelectionAndGlobalCandidatesStayDistinctAcrossFailure"): 1,
               ("com.tapscene.ui.shell.HomeMaterialPagesHostTest", "projectTabsShareHeightAndKeepLabelsSelectionAndCallbacksAtLargeFontScales"): 1,
+              ("com.tapscene.ui.shell.ProjectHomeReturnContextHostTest", "openingFilteredProjectAndReturningKeepsSearchAndActualRowPosition"): 1,
+              ("com.tapscene.ui.shell.ProjectHomeReturnContextHostTest", "copyingFromFilteredHomeAndReturningKeepsContextAndAddsOnlyIndependentCopy"): 1,
+              ("com.tapscene.ui.shell.CompactHomeActionsHostTest", "landscapeLargeTextKeepsSearchProjectsAndCreationTouchableWhenContentHeightShrinks"): 1,
+              ("com.tapscene.ui.shell.ReviewRegionCorrectionHostTest", "fixedRegionReviewRepairsExactSourceAndReturnsToUnchangedCandidate"): 1,
+              ("com.tapscene.ui.shell.ReviewRegionCorrectionHostTest", "missingSourceAndPendingStepEditsCannotRetargetRegionCorrection"): 1,
           }
           actual = Counter()
           failures = errors = skipped = 0
@@ -791,6 +927,7 @@ jobs:
             android/app/build/test-results/testDebugUnitTest/
             android/app/build/reports/tests/testDebugUnitTest/
             android/app/build/reports/step-delete-layouts/
+            android/app/build/reports/manual-media-picker/
             ${{ runner.temp }}/host-data-checks.txt
             ${{ runner.temp }}/host-data-execution.txt
             ${{ runner.temp }}/ai-round-trip/

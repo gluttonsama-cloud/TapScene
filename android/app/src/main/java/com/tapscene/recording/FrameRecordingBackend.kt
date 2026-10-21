@@ -618,29 +618,39 @@ internal class FrameRecordingBackend private constructor(
             throw RecordingStartException("本机暂时无法配置共帧 H.264 录制，请改用手动录屏。")
         }
 
-        internal fun readContainerSamples(file: File, width: Int, height: Int): List<Long> =
-            readContainer(file, width, height).samples
+        internal fun readContainerSamples(file: File, width: Int, height: Int, checkActive: () -> Unit = {}): List<Long> =
+            readContainer(file, width, height, checkActive).samples
 
         private data class ContainerVideo(val samples: List<Long>, val durationUs: Long)
-        private fun readContainer(file: File, width: Int, height: Int): ContainerVideo {
+        private fun readContainer(file: File, width: Int, height: Int, checkActive: () -> Unit = {}): ContainerVideo {
+            checkActive()
             val extractor = MediaExtractor()
             try {
+                checkActive()
                 extractor.setDataSource(file.absolutePath)
+                checkActive()
                 check(extractor.trackCount == 1)
                 val format = extractor.getTrackFormat(0)
                 requireNormalizedFormat(format, width, height)
                 extractor.selectTrack(0)
+                checkActive()
                 val values = mutableListOf<Long>()
                 val sample = java.nio.ByteBuffer.allocateDirect(16 * 1024 * 1024)
                 while (extractor.sampleTime >= 0) {
+                    checkActive()
                     check(extractor.sampleTrackIndex == 0 && values.size < 12_000)
                     sample.clear()
                     check(extractor.readSampleData(sample, 0) in 1..sample.capacity()) { "Invalid MP4 sample" }
+                    checkActive()
                     values += extractor.sampleTime
-                    if (!extractor.advance()) break
+                    val advanced = extractor.advance()
+                    checkActive()
+                    if (!advanced) break
                 }
-                check(values.isNotEmpty() && values.zipWithNext().all { (a, b) -> b > a })
+                checkActive()
+                check(values.isNotEmpty() && values.zipWithNext().all { (a, b) -> checkActive(); b > a })
                 val duration = if (format.containsKey(MediaFormat.KEY_DURATION)) format.getLong(MediaFormat.KEY_DURATION) else 0L
+                checkActive()
                 return ContainerVideo(values, duration)
             } finally { extractor.release() }
         }
@@ -659,11 +669,20 @@ internal class FrameRecordingBackend private constructor(
             }
         }
 
-        internal fun sha256(file: File): String = MessageDigest.getInstance("SHA-256").let { hash ->
+        internal fun sha256(file: File, checkActive: () -> Unit = {}): String = MessageDigest.getInstance("SHA-256").let { hash ->
+            checkActive()
             file.inputStream().use { input ->
                 val bytes = ByteArray(64 * 1024)
-                while (true) { val count = input.read(bytes); if (count < 0) break; check(count > 0); hash.update(bytes, 0, count) }
+                while (true) {
+                    checkActive()
+                    val count = input.read(bytes)
+                    checkActive()
+                    if (count < 0) break
+                    check(count > 0)
+                    hash.update(bytes, 0, count)
+                }
             }
+            checkActive()
             hash.digest().joinToString("") { "%02x".format(it) }
         }
     }

@@ -105,7 +105,7 @@ internal object ClickChainRoutePolicy {
 }
 
 internal data class ClickChainFrameRow(val key: String, val title: String, val reviewed: Boolean,
-    val selected: Boolean = true, val thumbnail: Bitmap? = null, val thumbnailDigest: String? = null,
+    val selected: Boolean = true, val thumbnail: Bitmap? = null, val thumbnailSource: ClickChainThumbnailSource? = null,
     val selectionNotice: String? = null)
 internal data class ClickChainStageRow(val index: Int, val title: String, val choices: List<ClickChainStageChoice>,
     val selectedKey: String?, val reviewed: Boolean)
@@ -118,7 +118,9 @@ internal data class ClickChainFrameEditor(val key: String, val title: String, va
 internal data class ClickChainActionEditor(val actionId: String, val label: String, val rect: OpaqueMask,
     val bitmap: Bitmap?, val targetThumbnail: Bitmap?, val targetTitle: String,
     val point: Pair<Float, Float>, val selfLoop: Boolean, val samePageActionCount: Int,
-    val selectionNotice: String? = null)
+    val selectionNotice: String? = null,
+    // Presentation identity only; stable through refresh, replaced on every editor opening.
+    val instanceKey: Any = Any())
 internal data class ClickChainReviewUiState(val runId: String? = null, val title: String = "点击链演示",
     val runLabel: String = "", val firstAction: String = "1", val lastAction: String = "1",
     val totalActions: Int = 0, val framesOnly: Boolean = false,
@@ -140,8 +142,10 @@ internal sealed interface ClickChainReviewTarget {
 internal fun ClickChainReviewUiState.nextRequiredReview(): ClickChainReviewTarget? {
     if (busy || loading || editingLocked || createdProjectId != null || outcomeUnknown ||
         frameEditor != null || actionEditor != null) return null
-    if (framesOnly) return frames.firstOrNull { it.selected && !it.reviewed }?.let { ClickChainReviewTarget.Frame(it.key) }
-    stages.firstOrNull { stage -> !stage.reviewed && stage.selectedKey != null &&
+    // A name repair is metadata work, not a revocation of the already-reviewed safe pixels.
+    if (framesOnly) return frames.firstOrNull { it.selected && (!it.reviewed || it.title.isBlank()) }
+        ?.let { ClickChainReviewTarget.Frame(it.key) }
+    stages.firstOrNull { stage -> (!stage.reviewed || stage.title.isBlank()) && stage.selectedKey != null &&
         stage.choices.any { it.frameKey == stage.selectedKey } }?.selectedKey?.let { return ClickChainReviewTarget.Frame(it) }
     return actions.firstOrNull { it.enabled && !it.confirmed }?.let { ClickChainReviewTarget.Action(it.actionId) }
 }

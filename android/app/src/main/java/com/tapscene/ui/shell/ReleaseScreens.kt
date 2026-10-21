@@ -128,6 +128,9 @@ fun ReleaseReviewContent(
     onBackToChecks: (() -> Unit)? = null,
     sourceHasPendingEdits: Boolean = false,
     onEditSourceProjectText: (() -> Unit)? = null,
+    editableSourceRegions: Map<String, String> = emptyMap(),
+    onEditSourceRegion: ((String, String) -> Unit)? = null,
+    sourceRegionEditEnabled: Boolean = true,
 ) {
     val candidate = state.candidate
     var section by rememberSaveable(candidate?.id) { mutableStateOf(initialSection.coerceIn(0, 5)) }
@@ -329,6 +332,22 @@ fun ReleaseReviewContent(
                             Text(region.name, style = MaterialTheme.typography.titleMedium)
                             Image(bitmap!!.asImageBitmap(), "实际固定区域裁片", modifier = Modifier.fillMaxWidth().heightIn(min = 96.dp, max = 300.dp), contentScale = ContentScale.Fit)
                             Text("组：${region.group ?: "未分组"} · 层次 ${region.zIndex} · 锚点 ${region.anchor.x}, ${region.anchor.y}", style = MaterialTheme.typography.bodySmall)
+                            if (onEditSourceRegion != null) {
+                                if (editableSourceRegions[region.id] == region.stateId) {
+                                    TextButton(onClick = { onEditSourceRegion(region.stateId, region.id) },
+                                        enabled = !state.busy && sourceRegionEditEnabled && !sourceHasPendingEdits,
+                                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("修改来源区域") }
+                                    Text(if (sourceHasPendingEdits) "来源步骤有暂存修改；请先保存或放弃，再修改区域。"
+                                        else "修改只保存到来源草稿；这份固定候选仍保留原裁片与文字。",
+                                        style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                                } else Text("来源项目、步骤或区域暂不可用，无法定位；固定候选仍保留原裁片。",
+                                    style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                            }
+                            if (currentDraftRevision != null && currentDraftRevision != candidate.projectRevision) {
+                                StatusNote("草稿已有修改；当前仍是原区域裁片，重新生成并复核后才会进入新成品。")
+                                TextButton(onClick = onRebuild, enabled = !state.busy,
+                                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("从当前草稿重新生成") }
+                            }
                             Button(onClick = onConfirmRegion, enabled = !state.busy && region.id !in candidate.reviewedRegionIds, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (region.id in candidate.reviewedRegionIds) "裁片已确认" else "确认实际裁片与区域文字") }
                         }
                     }
@@ -441,6 +460,31 @@ private fun CandidateFileList(candidate: ReleaseCandidate, busy: Boolean, onConf
         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (candidate.fileListReviewed) "包清单已确认" else "确认包清单") }
 }
 
+/** Immutable selection remains visible while the final storage binding is checked again. */
+@Composable
+internal fun ReleaseDeleteDialog(release: ReleaseSummary, current: Boolean, enabled: Boolean,
+    onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("删除本机副本？") },
+        text = { ReleaseDeleteDetails(release, current) },
+        confirmButton = { TextButton(onClick = onConfirm, enabled = enabled && current) { Text("删除本机副本") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("保留") } })
+}
+
+/** The production scrollable dialog body is also rendered independently on small host layouts. */
+@Composable
+internal fun ReleaseDeleteDetails(release: ReleaseSummary, current: Boolean) {
+    Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(release.title, style = MaterialTheme.typography.titleMedium)
+        Text(if (release.origin == "local") "本机封存版本" else "导入的观看副本", style = MaterialTheme.typography.bodyMedium)
+        Text("版本 ${release.id}\n摘要 ${release.contentDigest}", style = MaterialTheme.typography.labelSmall, color = ShellColors.Muted)
+        Text("将删除本机观看资产、观看记录、已保存的 AI 配置及应用内生成的导出缓存，无法撤销。")
+        if (release.origin == "local") Text("此版本的本机复核封存记录也会删除。重新导入观看包不会恢复本机封存资格。")
+        Text("创作项目、原素材和已保存到应用外的文件保留；已发送的文件不会被收回。")
+        Text("开始删除后可请求取消；已经完成的删除不能撤回。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+        if (!current) Text("此版本已变化或不在当前列表，请保留并重新打开后核对。", color = MaterialTheme.colorScheme.error)
+    }
+}
+
 /** The library is populated only by successfully registered releases and imported packages. */
 @Composable
 fun ReleaseLibraryContent(
@@ -455,9 +499,12 @@ fun ReleaseLibraryContent(
     onAi: ((String) -> Unit)? = null,
     onHosting: (() -> Unit)? = null,
     onDelivery: ((String) -> Unit)? = null,
+    onRetryDeletion: () -> Unit = {},
+    onReload: () -> Unit = {},
 ) {
     Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
         ShellTopBar("演示库", actions = {
+            TextButton(onClick = onReload, enabled = !state.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("刷新") }
             TextButton(onClick = onSettings, modifier = Modifier.heightIn(min = 48.dp)) { Text("设置") }
         })
         LazyColumn(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp)) {
@@ -465,11 +512,20 @@ fun ReleaseLibraryContent(
                 Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text("离线观看", style = MaterialTheme.typography.titleMedium)
-                        Text("${state.releases.size} 个固定版本 · 保存在本机", style = MaterialTheme.typography.labelSmall, color = ShellColors.Muted)
+                        Text(if (state.libraryReadFailed) "尚未完整读取本机版本" else "${state.releases.size} 个固定版本 · 保存在本机",
+                            style = MaterialTheme.typography.labelSmall, color = ShellColors.Muted)
                     }
-                    Button(onClick = onImport, enabled = !state.busy, shape = RoundedCornerShape(8.dp), modifier = Modifier.heightIn(min = 48.dp)) { Text("导入包") }
+                    Button(onClick = onImport, enabled = !state.busy && !state.libraryReadFailed && state.deletionCheck == null, shape = RoundedCornerShape(8.dp), modifier = Modifier.heightIn(min = 48.dp)) { Text("导入包") }
                 }
                 ReleaseStatus(state)
+                if (state.libraryReadFailed) StatusNote("演示库尚未完整读取；已有列表暂不可操作，请点刷新重试。")
+                state.deletionCheck?.let { pending ->
+                    Text("待核对版本 ${pending.release.id}", style = MaterialTheme.typography.labelSmall, color = ShellColors.Muted)
+                    OutlinedButton(onClick = onRetryDeletion, enabled = !state.busy,
+                        shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                        Text(if (pending.cleanupPending) "继续清理" else "重新核对")
+                    }
+                }
                 if (onHosting != null) ShellActionRow("开发托管", "明确选择本机封存版本，包括旧版。", onClick = onHosting, enabled = !state.busy)
             }
             if (state.pendingCandidates.isNotEmpty()) {
@@ -490,30 +546,31 @@ fun ReleaseLibraryContent(
                     Text("已保存版本", Modifier.padding(vertical = 16.dp), style = MaterialTheme.typography.titleMedium)
                 }
             }
-            if (state.releases.isEmpty()) item {
+            if (state.releases.isEmpty() && !state.libraryReadFailed) item {
                 ScreenEmpty("还没有离线演示", "导入 TapScene 观看包，或在项目中完成复核与封存。图片、讲解和点击路径一起保存在本机。")
             }
             items(state.releases, key = { it.id }) { release ->
+                val available = !state.busy && !state.libraryReadFailed && state.deletionCheck?.release?.id != release.id
                 ShellDivider()
                 Column(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     ShellActionRow(release.title, "${release.stepCount} 个步骤 · 包内 ${formatShellBytes(release.byteLength)}", "打开",
-                        onClick = { onOpen(release.id) }, enabled = !state.busy)
+                        onClick = { onOpen(release.id) }, enabled = available)
                     Text(if (release.origin == "local") "本机封存 · ${formatReleaseDate(release.sealedAt)}"
                         else "导入包 · 完整性通过 · ${formatReleaseDate(release.sealedAt)}",
                         style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                     Text("版本 ${release.id.take(12)}", style = MaterialTheme.typography.labelSmall, color = ShellColors.Muted)
                     if (release.origin != "local") Text("完整性校验不代表作者身份或隐私内容已获认证。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                     if (release.origin == "local" && onDelivery != null) OutlinedButton(
-                        onClick = { onDelivery(release.id) }, enabled = !state.busy,
+                        onClick = { onDelivery(release.id) }, enabled = available,
                         shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                         Text("交付此版本")
                     }
-                    if (onAi != null) TextButton(onClick = { onAi(release.id) }, enabled = !state.busy,
+                    if (onAi != null) TextButton(onClick = { onAi(release.id) }, enabled = available,
                         modifier = Modifier.heightIn(min = 48.dp)) { Text("配置 AI 数据包") }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        OutlinedButton(onClick = { onExport(release.id) }, enabled = !state.busy, shape = RoundedCornerShape(8.dp),
+                        OutlinedButton(onClick = { onExport(release.id) }, enabled = available, shape = RoundedCornerShape(8.dp),
                             modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("保存到文件") }
-                        TextButton(onClick = { onDelete(release) }, enabled = !state.busy,
+                        TextButton(onClick = { onDelete(release) }, enabled = available && state.deletionCheck == null,
                             modifier = Modifier.heightIn(min = 48.dp)) { Text("删除本机副本", color = ShellColors.Muted) }
                     }
                 }
@@ -533,7 +590,8 @@ fun OfflineImportContent(
     onOpen: ((String) -> Unit)? = null,
 ) {
     BackHandler(enabled = !state.busy) { onBack() }
-    val imported = state.releases.firstOrNull { it.id == state.lastImportedId }
+    val imported = state.releases.firstOrNull { it.id == state.lastImportedId }.takeUnless { state.libraryReadFailed }
+    val pending = state.importLibraryCheck
     Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
         ShellTopBar("导入离线演示", { if (!state.busy) onBack() })
         Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -543,6 +601,13 @@ fun OfflineImportContent(
                     SectionHeader("正在导入", state.stage ?: "正在读取与校验所选文件")
                     LinearProgressIndicator(Modifier.fillMaxWidth())
                     Text("完整校验并写入后，才会加入演示库。", style = MaterialTheme.typography.bodyMedium, color = ShellColors.Muted)
+                }
+                pending != null -> {
+                    SectionHeader("观看包已登记，演示库待刷新", pending.title)
+                    Text("版本 ID：${pending.id}\n内容 SHA-256：${pending.contentDigest}",
+                        style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    Text("这个观看包已完成本机登记，目前还不能核对完整库列表。请返回刷新，不用重复导入。",
+                        style = MaterialTheme.typography.bodyMedium)
                 }
                 imported != null -> {
                     SectionHeader("已加入演示库", imported.title)
@@ -565,7 +630,11 @@ fun OfflineImportContent(
                 }
                 else -> ScreenEmpty("选择 TapScene 观看包", "导入图片、无声视频过渡和点击路径。完整导入后可离线观看。")
             }
-            if (!state.busy) OutlinedButton(onClick = onChoose, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+            if (!state.busy && (pending != null || state.libraryReadFailed)) OutlinedButton(onClick = onBack,
+                shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                Text("返回演示库核对")
+            }
+            if (!state.busy && pending == null && !state.libraryReadFailed) OutlinedButton(onClick = onChoose, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                 Text(if (imported != null) "再导入一个包" else if (state.message != null) "重新选择观看包" else "选择观看包")
             }
             ShellDivider()
@@ -592,6 +661,7 @@ fun ReleasePlayerContent(
     onVideoFailed: (Long) -> Unit = {},
     onVideoRetry: (Long) -> Unit = {},
     onVideoSkip: () -> Unit = {},
+    onResume: (String, Boolean) -> Unit = { _, _ -> },
 ) {
     val player = state.player
     var showExplanation by rememberSaveable(player?.scene?.releaseId, player?.currentStateId) { mutableStateOf(false) }
@@ -600,6 +670,39 @@ fun ReleasePlayerContent(
         if (!state.busy || player?.video != null) {
             if (player?.matchingHotspotIds?.isNotEmpty() == true) onDismissMatches() else onBack()
         }
+    }
+    val resume = state.playbackResume
+    if (resume != null) {
+        var showIdentity by rememberSaveable(resume.session.ownerToken) { mutableStateOf(false) }
+        Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
+            ShellTopBar("离线播放", onBack)
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                ReleaseStatus(state)
+                Text(resume.scene.title, style = MaterialTheme.typography.headlineSmall)
+                Text("固定版本 ${resume.session.releaseId.take(8)} · 摘要 ${resume.session.contentDigest.take(12)}",
+                    style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                val checkpoint = resume.checkpoint
+                if (checkpoint != null) {
+                    val index = resume.scene.states.indexOfFirst { it.id == checkpoint.currentStateId }
+                    Text(if (checkpoint.ended) "上次已观看至结束" else "继续上次观看", style = MaterialTheme.typography.titleMedium)
+                    Text("步骤 ${index + 1} · ${resume.scene.states[index].title}", style = MaterialTheme.typography.bodyLarge)
+                    if (checkpoint.ended) checkpoint.endLabel?.takeIf { it.isNotBlank() }?.let { Text(it) }
+                    Text("保留已访问的返回顺序。未完成的过渡会回到过渡前的画面。",
+                        style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                } else {
+                    Text("观看记录不可用，演示包未受影响。可从头开始。", style = MaterialTheme.typography.bodyLarge)
+                }
+                PlaybackResumeActions(resume.session.ownerToken, checkpoint != null, !state.busy, onResume)
+                Text("从头开始会替换这个版本的本机观看记录。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                TextButton(onClick = { showIdentity = !showIdentity }, modifier = Modifier.heightIn(min = 48.dp)) {
+                    Text(if (showIdentity) "收起版本标识" else "查看完整版本标识")
+                }
+                if (showIdentity) Text("版本 ${resume.session.releaseId}\n摘要 ${resume.session.contentDigest}",
+                    style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+            }
+        }
+        return
     }
     if (player == null) {
         Column(Modifier.fillMaxSize().background(ShellColors.Background)) {
@@ -706,7 +809,7 @@ fun ReleasePlayerContent(
         onDismissRequest = { showIntroduction = false }, title = { Text(scene.title) },
         text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(scene.goal.ifBlank { "此演示未填写开场说明。" })
-            Text("点击只切换演示画面，不操作原 App。上一步沿本次实际访问历史返回。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+            Text("点击只切换演示画面，不操作原 App。上一步沿已访问的实际顺序返回。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
         } },
         confirmButton = { TextButton(onClick = { showIntroduction = false }, modifier = Modifier.heightIn(min = 48.dp)) { Text("继续观看") } },
         shape = RoundedCornerShape(8.dp),
@@ -723,6 +826,29 @@ fun ReleasePlayerContent(
         confirmButton = { TextButton(onClick = onDismissMatches, modifier = Modifier.heightIn(min = 48.dp)) { Text("留在当前画面") } },
         shape = RoundedCornerShape(8.dp),
     )
+}
+
+@Composable
+private fun PlaybackResumeActions(owner: String, canContinue: Boolean, enabled: Boolean,
+    onResume: (String, Boolean) -> Unit) {
+    val continueButton: @Composable (Modifier) -> Unit = { modifier ->
+        Button(onClick = { onResume(owner, false) }, enabled = enabled,
+            modifier = modifier.heightIn(min = 48.dp), shape = RoundedCornerShape(8.dp)) { Text("继续观看") }
+    }
+    val startButton: @Composable (Modifier) -> Unit = { modifier ->
+        if (canContinue) OutlinedButton(onClick = { onResume(owner, true) }, enabled = enabled,
+            modifier = modifier.heightIn(min = 48.dp), shape = RoundedCornerShape(8.dp)) { Text("从头开始") }
+        else Button(onClick = { onResume(owner, true) }, enabled = enabled,
+            modifier = modifier.heightIn(min = 48.dp), shape = RoundedCornerShape(8.dp)) { Text("从头开始") }
+    }
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        if (canContinue && maxWidth >= 480.dp) Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            continueButton(Modifier.weight(1f)); startButton(Modifier.weight(1f))
+        } else Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            if (canContinue) continueButton(Modifier.fillMaxWidth())
+            startButton(Modifier.fillMaxWidth())
+        }
+    }
 }
 
 /** Fitted image and overlay share bounds; gestures never include the letterboxed margins. */

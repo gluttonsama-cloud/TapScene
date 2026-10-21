@@ -48,15 +48,16 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     val recording by RecordingCoordinator.state.collectAsStateWithLifecycle()
     val context = LocalContext.current.applicationContext
     var library by rememberSaveable { mutableStateOf(false) }
+    val projectHomeState = rememberProjectHomeState()
     var tab by rememberSaveable { mutableStateOf(ProjectTab.STEPS) }
     val pages = rememberSaveable(saver = listSaver(
         save = { it.toList() }, restore = { it.toMutableStateList() },
     )) { mutableStateListOf<String>() }
     val page = pages.lastOrNull()
     // A task banner may temporarily cover AI configuration. Retain its unapplied input only
-    // while that route remains on the stack, and never restore it into another fixed version.
+    // while that route remains on the stack, and never restore it into another editor owner.
     val aiRouteState = rememberSaveableStateHolder()
-    val aiStateKey = "ai:${releaseState.aiConfiguration?.scene?.releaseId.orEmpty()}"
+    val aiStateKey = "ai:${(releaseState.aiConfigurationOwner ?: releaseState.aiConfiguration?.scene?.releaseId).orEmpty()}"
     val aiInStack = "ai" in pages
     var retainedAiStateKey by rememberSaveable { mutableStateOf<String?>(null) }
     var aiPendingInput by rememberSaveable(aiStateKey) { mutableStateOf(false) }
@@ -65,22 +66,27 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
         retainedAiStateKey = if (aiInStack) aiStateKey else null
         if (!aiInStack) aiPendingInput = false
     }
+    LaunchedEffect(aiInStack) { if (!aiInStack) releases.leaveAiPage() }
     val push: (String) -> Unit = { if (pages.lastOrNull() != it) pages.add(it) }
     val pop: () -> Unit = { if (pages.isNotEmpty()) pages.removeAt(pages.lastIndex) }
     // Temporary task/recording pages may cover AI. Refuse only navigation that would destroy
     // its edited route, never stop/cancel another owner or replay the navigation afterwards.
     val retainAiChanges: (String) -> Boolean = { note ->
         val current = releases.state.value
-        val retain = "ai" in pages && current.aiConfiguration?.fromDraft == false &&
-            (current.aiConfigurationChanged || aiPendingInput)
+        val retain = "ai" in pages && (current.aiSaveNeedsCheck ||
+            (current.aiConfiguration?.fromDraft == false && (current.aiConfigurationChanged || aiPendingInput)))
         if (retain) {
             while (pages.lastOrNull() != "ai") pages.removeAt(pages.lastIndex)
             releases.message(note)
         }
         retain
     }
-    val aiNavigationNote = "请先处理 AI 配置修改，再回到项目；可检查并保存，或返回时明确放弃未保存修改。"
-    val aiRecordingNote = "录屏已保存在本机。请先处理 AI 配置修改，再从所属项目的素材页整理录屏。"
+    val aiNavigationNote = if (releaseState.aiSaveNeedsCheck)
+        "请先核对 AI 配置保存结果，再回到项目；也可从 AI 页返回并明确确认离开。"
+        else "请先处理 AI 配置修改，再回到项目；可检查并保存，或返回时明确放弃未保存修改。"
+    val aiRecordingNote = if (releaseState.aiSaveNeedsCheck)
+        "录屏已保存在本机。请先核对 AI 配置保存结果，再从所属项目的素材页整理录屏。"
+        else "录屏已保存在本机。请先处理 AI 配置修改，再从所属项目的素材页整理录屏。"
     val openCreatedProject: (String) -> Unit = { id ->
         if (!retainAiChanges("已有结果保存在本机。$aiNavigationNote")) {
             pages.clear(); library = false; tab = ProjectTab.STEPS; projects.openProject(id)
@@ -157,6 +163,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     var preparedCandidate by remember { mutableStateOf<String?>(null) }
     var reviewCandidateId by rememberSaveable { mutableStateOf<String?>(null) }
     var reviewSourceStepId by rememberSaveable { mutableStateOf<String?>(null) }
+    var reviewSourceRegionId by rememberSaveable { mutableStateOf<String?>(null) }
+    var reviewReturnSection by rememberSaveable(releaseState.candidate?.id) { mutableIntStateOf(0) }
     var reviewSourceCandidateId by rememberSaveable { mutableStateOf<String?>(null) }
     var reviewSourceOpened by rememberSaveable { mutableStateOf(false) }
     var reviewSourceFromLibrary by rememberSaveable { mutableStateOf(false) }
@@ -232,26 +240,49 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
         }
     }
     val reviewSource = reviewSourceInfo?.first
-    LaunchedEffect(page, releaseState.candidate?.id, reviewSourceStepId, reviewSourceCandidateId, state.busy,
-        state.route, state.selectedStepId, projectId, mediaState.busy) {
+    LaunchedEffect(page, releaseState.candidate?.id, reviewSourceStepId, reviewSourceRegionId, reviewSourceCandidateId, state.busy,
+        state.route, state.selectedStepId, state.dirtyStepIds, projectId, mediaState.busy) {
         val stepId = reviewSourceStepId ?: return@LaunchedEffect
         val candidate = releaseState.candidate
         if (candidate == null || candidate.id != reviewSourceCandidateId) {
-            reviewSourceStepId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+            reviewSourceStepId = null; reviewSourceRegionId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
         } else if (page == "review" && !state.busy) {
             if (state.loadFailed || projectId != candidate.projectId || state.project?.steps?.none { it.id == stepId } != false) {
-                reviewSourceStepId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+                reviewSourceStepId = null; reviewSourceRegionId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
                 releases.message("来源项目或步骤已不可用，固定候选仍保留。")
+            } else if (reviewSourceRegionId != null) {
+                val regionId = requireNotNull(reviewSourceRegionId)
+                val sourceStep = state.project?.steps?.firstOrNull { it.id == stepId }
+                when {
+                    reviewSourceOpened -> {
+                        // check-region has refreshed the source. Keep the fixed candidate/crop selected.
+                        reviewSourceStepId = null; reviewSourceRegionId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+                    }
+                    sourceStep?.regions?.none { it.id == regionId } != false -> {
+                        reviewSourceStepId = null; reviewSourceRegionId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+                        releases.message("来源区域已移除，无法定位；固定候选仍保留原裁片。")
+                    }
+                    state.dirtyStepIds.isNotEmpty() -> {
+                        reviewSourceStepId = null; reviewSourceRegionId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+                        releases.message("来源步骤有暂存修改；请先保存或放弃，再修改区域。")
+                    }
+                    !mediaState.busy -> {
+                        // These fields are keyed by the loaded project: set them only after owner verification.
+                        regionCorrectionStepId = stepId; regionCorrectionId = regionId; regionCorrectionPending = true
+                        reviewSourceOpened = true
+                        push("check-region")
+                    }
+                }
             } else if (state.route == ProjectRoute.EDIT && state.selectedStepId == stepId) {
                 reviewSourceOpened = true
             } else if (reviewSourceOpened) {
                 // leaveEditor has already applied its conflict/staging barrier. Keep this exact review selection.
-                reviewSourceStepId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+                reviewSourceStepId = null; reviewSourceRegionId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
                 if (stepId in state.dirtyStepIds) releases.message("本步修改已暂存。保存本步并重新生成后，才会进入新成品。")
             } else if (!mediaState.busy) {
                 if (media.projectId == candidate.projectId) projects.openStep(stepId)
                 else if (!media.activateProject(candidate.projectId)) {
-                    reviewSourceStepId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+                    reviewSourceStepId = null; reviewSourceRegionId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
                     releases.message("请先处理尚未保存的画面修改，再打开来源步骤。")
                 }
             }
@@ -532,7 +563,13 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
             }
         }
     }
-    val closeScreenshot: () -> Unit = { if (screenshots.close()) pop() }
+    val closeScreenshot: () -> Unit = {
+        val needsCheck = screenshots.state.value.saveOutcomeUnknown
+        if (screenshots.close()) {
+            pop()
+            if (needsCheck) projects.reload()
+        }
+    }
     LaunchedEffect(screenshotState.completed, screenshotState.media.busy) {
         val saved = screenshotState.completed
         if (saved != null && !screenshotState.media.busy && !state.busy) {
@@ -584,7 +621,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
     BackHandler(enabled = page != null && !retainedMedia) { if (page == "delivery") releases.leaveDeliveryPage(); pop() }
     BackHandler(enabled = page in setOf("review", "import") && releaseState.busy) { releases.cancel() }
     BackHandler(enabled = page == "review" && reviewSourceStepId != null && state.route != ProjectRoute.EDIT) {
-        projects.cancel(); reviewSourceStepId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
+        projects.cancel(); reviewSourceStepId = null; reviewSourceRegionId = null; reviewSourceCandidateId = null; reviewSourceOpened = false
     }
     BackHandler(enabled = hostingVisit) { closeHosting() }
     BackHandler(enabled = page == "player") { closeReleasePlayer() }
@@ -636,7 +673,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                             TextButton(onClick = {
                                 if (state.busy) projects.cancel() else media.cancel()
                                 if (page == "review" && reviewSourceStepId != null && !reviewSourceOpened) {
-                                    reviewSourceStepId = null; reviewSourceCandidateId = null
+                                    reviewSourceStepId = null; reviewSourceRegionId = null; reviewSourceCandidateId = null
                                 }
                             }) { Text("取消") }
                         }
@@ -855,7 +892,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                             correctionEnabled = scopeReady && !mediaState.busy,
                                             dirtyStepCount = state.dirtyStepIds.size, formMessage = state.message, canUndoEdit = state.canUndoEdit, textRegions = state.textRegions)
                                     } else Column(Modifier.fillMaxSize()) {
-                                        ShellTopBar("打开来源步骤", { projects.cancel(); reviewSourceStepId = null; reviewSourceCandidateId = null; reviewSourceOpened = false })
+                                        ShellTopBar("打开来源步骤", { projects.cancel(); reviewSourceStepId = null; reviewSourceRegionId = null; reviewSourceCandidateId = null; reviewSourceOpened = false })
                                         LinearProgressIndicator(Modifier.fillMaxWidth())
                                     }
                                 } else ReleaseReviewContent(releaseState,
@@ -871,7 +908,23 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 onReviewVideo = releases::selectReviewTransition, onVideoCompleted = releases::completeReviewTransition,
                                 onVideoInterrupted = releases::interruptReviewTransition, onVideoReplay = releases::replayReviewTransition,
                                 onConfirmVideo = releases::confirmReviewTransition, onCloseVideo = releases::closeReviewVideo,
+                                initialSection = reviewReturnSection,
                                 onReviewRegion = releases::selectReviewRegion, onConfirmRegion = releases::confirmReviewRegion,
+                                sourceRegionEditEnabled = !unavailable && !mediaState.busy && reviewSourceInfo != null,
+                                editableSourceRegions = reviewSource?.steps?.flatMap { step -> step.regions.map { it.id to step.id } }?.toMap().orEmpty(),
+                                onEditSourceRegion = { stepId, regionId ->
+                                    val candidate = releases.state.value.candidate
+                                    if (candidate != null && !unavailable && !mediaState.busy && reviewSourceInfo?.second == false &&
+                                        reviewSource?.project?.id == candidate.projectId &&
+                                        candidate.scene.regions.any { it.id == regionId && it.stateId == stepId } &&
+                                        reviewSource?.steps?.any { it.id == stepId && it.regions.any { region -> region.id == regionId } } == true) {
+                                        reviewCandidateId = candidate.id; reviewReturnSection = 5
+                                        reviewSourceFromLibrary = library && state.route == ProjectRoute.PROJECTS
+                                        reviewSourceCandidateId = candidate.id; reviewSourceStepId = stepId
+                                        reviewSourceRegionId = regionId; reviewSourceOpened = false
+                                        releases.closeReviewVideo(); projects.openProject(candidate.projectId)
+                                    }
+                                },
                                 editableSourceStepIds = reviewSource?.steps?.map { it.id }?.toSet().orEmpty(),
                                 sourceHasPendingEdits = reviewSourceInfo?.second == true,
                                 onEditSourceProjectText = reviewSource?.project?.takeIf { it.id == releaseState.candidate?.projectId }?.let { source -> ({
@@ -883,7 +936,7 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                     val candidate = releases.state.value.candidate
                                     if (candidate != null && !unavailable && !mediaState.busy &&
                                         reviewSource?.project?.id == candidate.projectId && reviewSource?.steps?.any { it.id == stepId } == true) {
-                                        reviewCandidateId = candidate.id
+                                        reviewCandidateId = candidate.id; reviewReturnSection = 0; reviewSourceRegionId = null
                                         reviewSourceFromLibrary = library && state.route == ProjectRoute.PROJECTS
                                         reviewSourceCandidateId = candidate.id; reviewSourceStepId = stepId; reviewSourceOpened = false
                                         releases.closeReviewVideo(); projects.openProject(candidate.projectId)
@@ -893,6 +946,15 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                             }
                             "delivery" -> {
                                 val sealed = releaseState.deliveryRelease
+                                val selection = releaseState.deliverySelection?.takeIf {
+                                    sealed != null && it.releaseId == sealed.id && it.contentDigest == sealed.contentDigest
+                                }
+                                // Only compare an actually loaded source project; another project or
+                                // a library-only visit must not manufacture a draft comparison.
+                                val sourceProject = state.project?.takeIf {
+                                    !state.busy && !state.loadFailed && state.route == ProjectRoute.STEPS &&
+                                        it.project.id == selection?.projectId
+                                }
                                 DeliveryOptionsScreen({ releases.leaveDeliveryPage(); pop() }, openReleaseReview, { if (sealed != null) releases.openAiPackage(sealed.id) else releases.clearAiConfiguration(); push("ai") }, { push("account") }, { push("versions") },
                                     sealedSummary = sealed, onExport = sealed?.let { { releases.prepareDeliveryExport() } },
                                     onShare = sealed?.takeIf { it.origin == "local" }?.let { item -> { releases.prepareOfflineShare(item.id) } },
@@ -903,7 +965,20 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                         releases.leaveDeliveryPage(); pages.clear(); library = true
                                         if (state.route == ProjectRoute.STEPS) projects.back()
                                         releases.reloadLibrary()
-                                    })
+                                    }, sealedRevision = selection?.projectRevision,
+                                    currentDraftRevision = sourceProject?.project?.revision,
+                                    onBackToChecks = sourceProject?.let { source -> ({
+                                        val current = projects.state.value
+                                        val delivery = releases.state.value
+                                        if (!current.busy && !current.loadFailed && !delivery.busy &&
+                                            !delivery.shareChooserOpen && delivery.pendingShare == null &&
+                                            delivery.exportFile == null && !exportPickerPending &&
+                                            !media.state.value.busy && current.route == ProjectRoute.STEPS &&
+                                            current.project?.project?.id == source.project.id &&
+                                            delivery.deliverySelection == selection) {
+                                            releases.leaveDeliveryPage(); pages.clear(); library = false; tab = ProjectTab.CHECKS
+                                        }
+                                    }) })
                             }
                             "ai-import" -> AiDraftImportContent(aiImportState,
                                 onBack = { if (!aiImportState.busy) { aiPickerRequested = false; pop(); projects.reload() } },
@@ -927,11 +1002,13 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 onReload = { projectId?.let(aiDrafts::openPlan) }),
                                 onPendingHoldChange = { draftAiPendingHold = it })
                             "ai" -> aiRouteState.SaveableStateProvider(aiStateKey) {
-                                AiPackageScreen(pop, releaseState, releases::openAiPackage, releases::chooseAiEdge,
+                                AiPackageScreen({ releases.clearAiConfiguration(); pop() }, releaseState, releases::openAiPackage, releases::chooseAiEdge,
                                     releases::previousAiVisit, releases::resetAiPath, releases::setAiCanvas, releases::setAiHold,
                                     releases::toggleAiEffect, releases::prepareAiExport,
                                     onApplyAnnotation = releases::applyAiAnnotation, onRemoveAnnotation = releases::removeAiAnnotation,
-                                    onPendingInputChange = { aiPendingInput = it })
+                                    onPendingInputChange = { aiPendingInput = it },
+                                    onChooseConfiguration = releases::chooseAiConfiguration,
+                                    onRecheckSave = releases::recheckAiSave)
                             }
                             "hosted" -> if (BuildConfig.HOSTED_ENABLED) LocalHostingContent(hostingState, hostingActions) else HostingAccountScreen(pop, { push("versions") })
                             "account" -> if (BuildConfig.HOSTED_ENABLED) LocalHostingContent(hostingState, hostingActions) else HostingAccountScreen(pop, { push("versions") })
@@ -955,7 +1032,8 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                             "player" -> ReleasePlayerContent(releaseState, closeReleasePlayer,
                                 releases::tapPlayer, releases::chooseEdge, releases::previous, releases::restart, releases::dismissMatches,
                                 onVideoCompleted = releases::completePlayerTransition, onVideoFailed = releases::failPlayerTransition,
-                                onVideoRetry = releases::retryPlayerTransition, onVideoSkip = releases::skipPlayerTransition)
+                                onVideoRetry = releases::retryPlayerTransition, onVideoSkip = releases::skipPlayerTransition,
+                                onResume = releases::resumePlayback)
                             "task" -> TaskDetailsScreen(
                                 if (state.busy || mediaState.busy) ShellTaskInfo("本机处理", if (state.busy) state.stage.orEmpty() else mediaState.stage.orEmpty(), state.project?.project?.title) else null,
                                 pop, { if (!retainAiChanges(aiNavigationNote)) pages.clear() }, { push("settings") })
@@ -973,13 +1051,22 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                             if (opened && fromChecks) regionCorrectionPending = false
                                         }
                                     }
-                                    if (regionReady && !(fromChecks && regionCorrectionPending)) RegionEditorScreen(regions) {
+                                    val closeRegion: () -> Unit = {
                                         if (fromChecks) {
                                             regionCorrectionStepId = null; regionCorrectionId = null; regionCorrectionPending = false
                                             projects.reload()
                                         } else projects.refreshAfterTransition(snapshot.project.id, stepId)
                                         pop()
-                                    } else Column(Modifier.fillMaxSize()) {
+                                    }
+                                    val missingTarget = regionReady && !regionState.busy && !regionState.failedToLoad &&
+                                        !regionCorrectionPending && requestedRegion != null && regionState.regions.none { it.id == requestedRegion }
+                                    if (missingTarget) {
+                                        val closeMissing: () -> Unit = { regions.leave(); closeRegion() }
+                                        BackHandler(onBack = closeMissing)
+                                        ScreenEmpty("来源区域已不可用", "这个区域已移除；返回后重新核对，不会自动定位到同名区域。",
+                                            if (reviewSourceRegionId != null) "返回复核" else "返回检查", closeMissing)
+                                    } else if (regionReady && !(fromChecks && regionCorrectionPending)) RegionEditorScreen(regions, closeRegion)
+                                    else Column(Modifier.fillMaxSize()) {
                                         ShellTopBar("读取区域", {
                                             if (fromChecks) { regionCorrectionStepId = null; regionCorrectionId = null; regionCorrectionPending = false }
                                             pop()
@@ -1087,12 +1174,14 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                                 onDiscardCandidate = { discardingCandidate = it },
                                 onAi = { id -> releases.openAiPackage(id); push("ai") },
                                 onDelivery = { id -> if (releases.selectDeliveryRelease(id)) push("delivery") },
+                                onRetryDeletion = releases::retryReleaseDeletion, onReload = releases::reloadLibrary,
                                 onHosting = if (BuildConfig.HOSTED_ENABLED) ({ push("hosted") }) else null) }
                             GlobalNavigation(true, { library = false }, {})
                         }
-                        else -> ProjectHomeFrame({ push("record") }, requestImport, { push("settings") }, { library = true; releases.reloadLibrary() }, onImportScreenshot = requestScreenshot, onImportAi = openAiImport, onClickPlan = { push("click-plan") }) {
+                        else -> ProjectHomeFrame({ push("record") }, requestImport, { push("settings") }, { library = true; releases.reloadLibrary() }, onImportScreenshot = requestScreenshot, onImportAi = openAiImport, onClickPlan = { push("click-plan") }) { creationActions ->
                             ProjectHomeContent(state, { tab = ProjectTab.STEPS; projects.openProject(it) }, { projects.clearMessage(); renaming = it },
-                                { deletingProject = it }, onCopyProject = copyProject)
+                                { if (!unavailable && !mediaState.busy) deletingProject = it }, onCopyProject = copyProject,
+                                homeState = projectHomeState, creationActions = creationActions)
                         }
                     }
                 }
@@ -1112,9 +1201,11 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                     }
                 }
             } }
-            deletingProject?.let { item -> ConfirmDelete("删除“${item.title}”？",
-                "项目、${item.stepCount} 个步骤、热点、项目图片、原截图和本机文字建议将删除，无法撤销。原录屏与导出的文件保留；原录屏可在设置的本机保留素材中管理。", !state.busy,
-                { deletingProject = null }, { if (recording.projectId == item.id && (recording.isBusy || recording.canRetry)) {
+            deletingProject?.let { item -> ProjectDeleteDialog(item, state.matchesProjectDeletion(item),
+                !unavailable && !mediaState.busy,
+                { deletingProject = null }, { if (!projects.state.value.matchesProjectDeletion(item)) {
+                    projects.message("项目内容已变化，请取消后重新打开并核对。")
+                } else if (recording.projectId == item.id && (recording.isBusy || recording.canRetry)) {
                     deletingProject = null; projects.message("请先停止或处理这个项目的未完成录制。")
                 } else if (candidateState.projectId == item.id && candidateState.busy) {
                     deletingProject = null; projects.message("请先取消当前分析。")
@@ -1127,9 +1218,12 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                         projects.deleteStep(stepId, snapshot.project.id, snapshot.project.revision)
                     })
             }
-            deletingRelease?.let { item -> ConfirmDelete("删除本机观看副本？",
-                "“${item.title}”及本机观看资产将删除，无法撤销。创作项目和已导出的文件保留。", !releaseState.busy,
-                { deletingRelease = null }, { deletingRelease = null; releases.deleteRelease(item.id) }) }
+            deletingRelease?.let { item ->
+                val current = releaseState.releases.any { it.id == item.id && it.contentDigest == item.contentDigest &&
+                    it.origin == item.origin && it.sealedAt == item.sealedAt }
+                ReleaseDeleteDialog(item, current, !releaseState.busy && releaseState.deletionCheck == null,
+                    { deletingRelease = null }, { deletingRelease = null; releases.deleteRelease(item) })
+            }
             discardingCandidate?.let { item -> ConfirmDelete("删除未封存副本？",
                 "“${item.scene.title}”修订 ${item.projectRevision} 的固定图片和复核记录将删除。创作项目与封存版本保留。", !releaseState.busy,
                 { discardingCandidate = null }, { discardingCandidate = null; releases.discardCandidate(item.id) }) }
@@ -1182,15 +1276,16 @@ fun TapSceneApp(projects: ProjectWorkspace, media: MediaWorkspace, candidates: C
                     }
                 }, confirmButton = { TextButton(onClick = { showUnsavedSteps = false }) { Text("关闭") } })
             if (projectMore) AlertDialog(onDismissRequest = { projectMore = false }, title = { Text("项目") }, text = {
-                Column {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
                     ShellActionRow("项目文字", "名称与随包交付的开场说明", enabled = !unavailable && !mediaState.busy,
                         onClick = { projectMore = false; projects.clearMessage(); renaming = state.project?.project })
                     ShellActionRow("复制项目", "复制已保存内容，独立编辑", enabled = !unavailable && !mediaState.busy,
                         onClick = { projectMore = false; state.project?.project?.id?.let(copyProject) })
                     ShellActionRow("动画计划", "保留并编辑完整访问与效果", onClick = { projectMore = false; openDraftAi() })
                     ShellActionRow("任务详情", onClick = { projectMore = false; push("task") })
-                    ShellActionRow("托管版本", onClick = { projectMore = false; push("versions") })
-                    ShellActionRow("删除项目", onClick = { projectMore = false; deletingProject = state.project?.project })
+                    if (BuildConfig.HOSTED_ENABLED) ShellActionRow("托管版本", onClick = { projectMore = false; push("versions") })
+                    ShellActionRow("删除项目", enabled = !unavailable && !mediaState.busy,
+                        onClick = { projectMore = false; deletingProject = state.project?.project })
                 }
             }, confirmButton = { TextButton(onClick = { projectMore = false }) { Text("关闭") } })
         }

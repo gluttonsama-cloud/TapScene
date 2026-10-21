@@ -168,7 +168,7 @@ object ReleaseStoreChecks {
         store.discardCandidate(survivor.id)
         check(store.listCandidates().isEmpty() && store.listReleases() == listOf(sealed))
         check(File(context.noBackupFilesDir, checkNotNull(input.source).privateRelativePath).isFile && input.file.isFile)
-        store.deleteRelease(sealed.id)
+        store.deleteRelease(sealed)
         check(store.listReleases().isEmpty())
         val imported = store.importPackage(ByteArrayInputStream(packageBytes))
         check(imported.id == sealed.id && imported.origin == "imported" && imported.contentDigest == sealed.contentDigest)

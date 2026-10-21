@@ -9,10 +9,15 @@ import com.tapscene.packageformat.ViewerPackageCodec
 import com.tapscene.sharing.OfflineShare
 import com.tapscene.sharing.OfflineShareStore
 import com.tapscene.packageformat.ViewerScene
+import com.tapscene.packageformat.ViewerTraversal
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.NoSuchFileException
+import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.UUID
@@ -239,6 +244,49 @@ class ReleaseStore(context: Context) {
         readScene(File(location, "package")).also { check(ViewerPackageCodec.contentDigest(it) == summary.contentDigest) }
     }
 
+    /** Revalidate the fixed package before reading optional, separately bound local progress. */
+    suspend fun openPlayback(releaseId: String): PlaybackOpen = locked {
+        val location = child(releases, releaseId)
+        val summary = readReleaseDirectory(location)
+        val scene = readScene(File(location, "package"))
+        check(ViewerPackageCodec.contentDigest(scene) == summary.contentDigest)
+        val file = File(location, "playback.json")
+        var unavailable = false
+        val checkpoint = if (!Files.exists(file.toPath(), LinkOption.NOFOLLOW_LINKS)) null else try {
+            PlaybackCheckpoint.read(file, scene, summary.contentDigest)
+        } catch (_: Exception) {
+            // A bad progress file must not damage or hide an otherwise valid package.
+            unavailable = true
+            null
+        }
+        currentCoroutineContext().ensureActive()
+        val session = PlaybackSession(releaseId, summary.contentDigest, newId())
+        playbackOwners[location.path] = PlaybackOwner(session)
+        PlaybackOpen(scene, session, checkpoint, unavailable)
+    }
+
+    /** Recheck after decoding, before publishing pixels that came from a reusable release path. */
+    suspend fun isPlaybackCurrent(session: PlaybackSession): Boolean = locked {
+        val location = child(releases, session.releaseId)
+        if (playbackOwners[location.path]?.session != session || !location.isDirectory) return@locked false
+        readReleaseDirectory(location, verifyAssets = false).contentDigest == session.contentDigest
+    }
+
+    /** Latest open owns progress; its strictly increasing publication sequence rejects delayed saves. */
+    suspend fun savePlayback(session: PlaybackSession, traversal: ViewerTraversal, sequence: Long): Boolean = locked {
+        val location = child(releases, session.releaseId)
+        val owner = playbackOwners[location.path]
+        if (owner == null || owner.session != session || sequence <= 0 || sequence <= owner.sequence || !location.isDirectory) return@locked false
+        val summary = readReleaseDirectory(location, verifyAssets = false)
+        if (summary.contentDigest != session.contentDigest) return@locked false
+        val scene = readScene(File(location, "package"))
+        val json = PlaybackCheckpoint.json(scene, session.contentDigest, traversal)
+        currentCoroutineContext().ensureActive()
+        atomicJson(File(location, "playback.json"), json)
+        owner.sequence = sequence
+        true
+    }
+
     /** Only locally sealed, fully bound reviews may enter hosted publication. No current project lookup. */
     suspend fun readHostedRelease(releaseId: String, contentDigest: String): HostedReleaseBinding = locked {
         hostedBinding(releaseId, contentDigest)
@@ -391,8 +439,163 @@ class ReleaseStore(context: Context) {
         RenderPlan.parse(scene, file.readBytes())
     }
 
+    /** Actual origin, scene and optional plan are read together; imported drafts are never used. */
+    suspend fun openAiConfiguration(releaseId: String): AiConfigurationOpen = locked {
+        val location = child(releases, releaseId)
+        val summary = readReleaseDirectory(location)
+        val scene = readScene(File(location, "package"))
+        if (summary.origin == "imported") {
+            val (snapshot, bytes) = readRetainedAiConfiguration(releaseId)
+            val plan = bytes?.let {
+                try { RenderPlan.parse(scene, it) } catch (_: IllegalArgumentException) { null }
+            }
+            AiConfigurationOpen(summary, scene, plan, false, snapshot)
+        } else {
+            val (snapshot, savedBytes) = readRetainedAiConfiguration(releaseId)
+            val draft = File(location, "draft-plan.json")
+            val plan = if (savedBytes != null) {
+                check(savedBytes.isNotEmpty()) { "动画配置无效，请重新配置。" }
+                RenderPlan.parse(scene, savedBytes)
+            } else if (!draft.exists()) null else {
+                check(draft.canonicalFile == draft.absoluteFile && draft.isFile &&
+                    draft.length() in 1..RenderPlan.MAX_BYTES.toLong()) { "动画配置无效，请重新配置。" }
+                RenderPlan.parse(scene, draft.readBytes())
+            }
+            AiConfigurationOpen(summary, scene, plan, draft.exists(), null, snapshot)
+        }
+    }
+
     /** The caller has reviewed the resolved plan and complete AI file list. */
-    suspend fun exportAiRelease(releaseId: String, plan: RenderPlan): File = locked {
+    suspend fun exportAiRelease(releaseId: String, plan: RenderPlan,
+        expectedLocal: ReleaseSummary? = null): File = locked {
+        expectedLocal?.let { requireLocalAiSummary(releaseId, it) }
+        withAiPackage(releaseId, plan) { operation, output, checked ->
+            val final = installAiExport(releaseId, output)
+            // A valid plan can be recovered independently of the immutable release.
+            val config = File(aiConfigs, "$releaseId.json")
+            val temporary = File(operation, "plan.json")
+            writeSynced(temporary, checked.toBytes())
+            expectedLocal?.let { requireLocalAiSummary(releaseId, it) }
+            currentCoroutineContext().ensureActive()
+            Files.move(temporary.toPath(), config.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            runCatching { syncDirectory(aiConfigs) }
+            final
+        }
+    }
+
+    /** Explicit confirmation authorizes replacing only the previously read imported configuration. */
+    suspend fun exportImportedAiRelease(expected: ReleaseSummary,
+        snapshot: ImportedAiConfigurationSnapshot, plan: RenderPlan): File = locked {
+        requireImportedAiSnapshot(expected, snapshot)
+        withAiPackage(expected.id, plan) { operation, output, checked ->
+            val temporary = File(operation, "plan.json")
+            writeSynced(temporary, checked.toBytes())
+            val final = installAiExport(expected.id, output)
+            // A verified cache is not a configuration commit. Recheck after every blocking write
+            // and fsync, then honor cancellation immediately before the atomic configuration move.
+            requireImportedAiSnapshot(expected, snapshot)
+            currentCoroutineContext().ensureActive()
+            Files.move(temporary.toPath(), File(aiConfigs, "${expected.id}.json").toPath(),
+                StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            // The configuration is committed. A later cancellation/sync failure cannot undo it.
+            runCatching { syncDirectory(aiConfigs) }
+            final
+        }
+    }
+
+    suspend fun inspectImportedAiConfiguration(expected: ReleaseSummary,
+        previousSnapshot: ImportedAiConfigurationSnapshot, targetPlan: RenderPlan): ImportedAiConfigurationState {
+        check(expected.origin == "imported") { "请选择当前导入版本。" }
+        return inspectAiConfiguration(expected, previousSnapshot, targetPlan)
+    }
+
+    suspend fun inspectLocalAiConfiguration(expected: ReleaseSummary,
+        previousSnapshot: ImportedAiConfigurationSnapshot, targetPlan: RenderPlan): ImportedAiConfigurationState {
+        check(expected.origin == "local") { "请选择当前本机封存版本。" }
+        return inspectAiConfiguration(expected, previousSnapshot, targetPlan)
+    }
+
+    /** No recovery, directory creation or writes. Read failures remain unknown to the caller. */
+    private suspend fun inspectAiConfiguration(expected: ReleaseSummary,
+        previousSnapshot: ImportedAiConfigurationSnapshot, targetPlan: RenderPlan): ImportedAiConfigurationState = mutex.withLock {
+        listOf(root, releases, aiConfigs).forEach { location ->
+            check(location.canonicalFile == location.absoluteFile &&
+                Files.readAttributes(location.toPath(), BasicFileAttributes::class.java,
+                    LinkOption.NOFOLLOW_LINKS).isDirectory) { "本机成品目录无法核对。" }
+        }
+        val location = child(releases, expected.id)
+        if (!pathExists(location)) return@withLock ImportedAiConfigurationState.CHANGED_OR_REPLACED
+        if (!sameDeletionTarget(readReleaseDirectory(location, verifyAssets = false), expected)) {
+            return@withLock ImportedAiConfigurationState.CHANGED_OR_REPLACED
+        }
+        val scene = readScene(File(location, "package"))
+        val target = RenderPlan.parse(scene, targetPlan.toBytes()).toBytes()
+        val (current, bytes) = readRetainedAiConfiguration(expected.id)
+        when {
+            bytes != null && bytes.contentEquals(target) -> ImportedAiConfigurationState.MATCHES_TARGET
+            current == previousSnapshot -> ImportedAiConfigurationState.PREVIOUS_UNCHANGED
+            else -> ImportedAiConfigurationState.CHANGED_OR_REPLACED
+        }
+    }
+
+    private suspend fun requireLocalAiSummary(releaseId: String, expected: ReleaseSummary) {
+        check(expected.origin == "local" && expected.id == releaseId &&
+            sameDeletionTarget(readReleaseDirectory(child(releases, releaseId), verifyAssets = false), expected)) {
+            "这个本机封存版本已改变，请重新打开并核对动画配置。"
+        }
+    }
+
+    private suspend fun requireImportedAiSnapshot(expected: ReleaseSummary, snapshot: ImportedAiConfigurationSnapshot) {
+        check(expected.origin == "imported" &&
+            sameDeletionTarget(readReleaseDirectory(child(releases, expected.id), verifyAssets = false), expected)) {
+            "这个版本已改变，请重新打开并核对动画配置。"
+        }
+        check(readRetainedAiConfiguration(expected.id).first == snapshot) {
+            "本机保留的动画配置已改变，请重新打开并核对，原配置未覆盖。"
+        }
+    }
+
+    /** Absence is only ENOENT; unreadable, oversized and non-regular paths are not defaults. */
+    private fun readRetainedAiConfiguration(releaseId: String): Pair<ImportedAiConfigurationSnapshot, ByteArray?> {
+        validId(releaseId)
+        check(aiConfigs.canonicalFile == aiConfigs.absoluteFile &&
+            Files.readAttributes(aiConfigs.toPath(), BasicFileAttributes::class.java,
+                LinkOption.NOFOLLOW_LINKS).isDirectory) { "动画配置目录无法核对。" }
+        val file = File(aiConfigs, "$releaseId.json")
+        val attributes = try {
+            Files.readAttributes(file.toPath(), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        } catch (_: NoSuchFileException) { return ImportedAiConfigurationSnapshot(null, null) to null }
+        check(file.canonicalFile == file.absoluteFile && attributes.isRegularFile &&
+            attributes.size() in 0..RenderPlan.MAX_BYTES.toLong()) { "动画配置文件无法核对，请保留原文件。" }
+        val bytes = Files.newInputStream(file.toPath(), LinkOption.NOFOLLOW_LINKS).use { input ->
+            val output = ByteArrayOutputStream(attributes.size().toInt())
+            val buffer = ByteArray(8192)
+            while (true) {
+                val count = input.read(buffer, 0, minOf(buffer.size, RenderPlan.MAX_BYTES - output.size() + 1))
+                if (count < 0) break
+                check(count > 0 && output.size() + count <= RenderPlan.MAX_BYTES) { "动画配置文件过大或无法读取。" }
+                output.write(buffer, 0, count)
+            }
+            output.toByteArray()
+        }
+        check(bytes.size.toLong() == attributes.size()) { "动画配置读取时发生变化，请重新打开。" }
+        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        return ImportedAiConfigurationSnapshot(bytes.size.toLong(), digest) to bytes
+    }
+
+    private suspend fun installAiExport(releaseId: String, output: File): File {
+        currentCoroutineContext().ensureActive()
+        val final = File(exports, "$releaseId.tapscene-ai")
+        check(final.canonicalFile == final.absoluteFile) { "动画导出路径无效。" }
+        Files.move(output.toPath(), final.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        runCatching { syncDirectory(exports) }
+        return final
+    }
+
+    /** Shared package generation and real codec round trip; callers own the final commit boundary. */
+    private suspend fun <T> withAiPackage(releaseId: String, plan: RenderPlan,
+        finish: suspend (File, File, RenderPlan) -> T): T {
         val location = child(releases, releaseId)
         val stored = readReleaseDirectory(location)
         val payload = File(location, "package")
@@ -400,7 +603,7 @@ class ReleaseStore(context: Context) {
         val checked = RenderPlan.parse(scene, plan.toBytes())
         check(checked.releaseId == releaseId && checked.contentDigest == stored.contentDigest) { "动画配置不属于这个固定版本。" }
         verifyPackage(scene, payload, decode = true)
-        stage { operation ->
+        return stage { operation ->
             val output = File(operation, "animation.tapscene-ai")
             AiPackageCodec.writePackage(scene, checked, payload, output, cancelCheck(), videoValidator())
             val verify = directory(File(operation, "verified"), operation)
@@ -408,17 +611,7 @@ class ReleaseStore(context: Context) {
             check(loaded.contentDigest == stored.contentDigest && loaded.renderPlan.toBytes().contentEquals(checked.toBytes())) { "动画包回读校验失败。" }
             syncFile(output)
             currentCoroutineContext().ensureActive()
-            val final = File(exports, "$releaseId.tapscene-ai")
-            check(final.canonicalFile == final.absoluteFile) { "动画导出路径无效。" }
-            Files.move(output.toPath(), final.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-            runCatching { syncDirectory(exports) }
-            // A valid plan can be recovered independently of the immutable release.
-            val config = File(aiConfigs, "$releaseId.json")
-            val temporary = File(operation, "plan.json")
-            writeSynced(temporary, checked.toBytes())
-            Files.move(temporary.toPath(), config.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-            runCatching { syncDirectory(aiConfigs) }
-            final
+            finish(operation, output, checked)
         }
     }
 
@@ -470,14 +663,122 @@ class ReleaseStore(context: Context) {
         }
     }
 
-    /** Only call after explicit local-library deletion confirmation. Drafts/sources are untouched. */
-    suspend fun deleteRelease(releaseId: String) = locked {
-        val source = child(releases, releaseId)
-        check(source.isDirectory) { "这个本机版本已不存在。" }
-        stage { operation ->
-            Files.move(source.toPath(), File(operation, "deleted-release").toPath(), StandardCopyOption.ATOMIC_MOVE)
-            runCatching { syncDirectory(releases); File(exports, "$releaseId.tapscene").delete(); File(exports, "$releaseId.tapscene-ai").delete(); File(aiConfigs, "$releaseId.json").delete(); syncDirectory(exports); syncDirectory(aiConfigs) }
+    /** Only call after confirming this exact fixed version. The rename is irreversible. */
+    suspend fun deleteRelease(expected: ReleaseSummary) = locked {
+        deleteReleaseLocked(expected)
+    }
+
+    private suspend fun deleteReleaseLocked(expected: ReleaseSummary) {
+        val source = child(releases, expected.id)
+        check(sameDeletionTarget(readReleaseDirectory(source, verifyAssets = false), expected)) {
+            "这个版本已改变，请重新核对后删除。"
         }
+        stage { operation ->
+            // Stage creation includes directory fsync, which may block while cancellation arrives.
+            currentCoroutineContext().ensureActive()
+            Files.move(source.toPath(), File(operation, "deleted-release").toPath(), StandardCopyOption.ATOMIC_MOVE)
+            playbackOwners.remove(source.path)
+            // A failed cleanup leaves the actual snapshot and .owner as its only authority.
+            cleanupDeletedRelease(operation)
+        }
+    }
+
+    /** Read only this deletion outcome; unrelated recovery must not hide a committed deletion. */
+    suspend fun inspectDeletion(expected: ReleaseSummary): ReleaseDeletionState = locked(recover = false) {
+        inspectDeletionLocked(expected)
+    }
+
+    /** Never starts a deletion, and never removes anything belonging to a current same-ID release. */
+    suspend fun retryDeletionCleanup(expected: ReleaseSummary): ReleaseDeletionState = locked(recover = false) {
+        val operations = pendingDeletionStages(expected)
+        check(!pathExists(child(releases, expected.id)) || operations.isEmpty()) {
+            "相同标识已有本机版本，保留当前版本与配置，请重新核对。"
+        }
+        operations.forEach { cleanupDeletedRelease(it) }
+        inspectDeletionLocked(expected)
+    }
+
+    private suspend fun inspectDeletionLocked(expected: ReleaseSummary): ReleaseDeletionState {
+        val source = child(releases, expected.id)
+        val pending = pendingDeletionStages(expected).isNotEmpty()
+        if (pathExists(source)) {
+            val current = readReleaseDirectory(source, verifyAssets = false)
+            return if (!pending && sameDeletionTarget(current, expected)) ReleaseDeletionState.PRESENT
+                else ReleaseDeletionState.REPLACED
+        }
+        if (pending) return ReleaseDeletionState.CLEANUP_PENDING
+        // No receipt grants authority to remove historical leftovers or claim they were removed.
+        listOf(File(exports, "${expected.id}.tapscene"), File(exports, "${expected.id}.tapscene-ai"),
+            File(aiConfigs, "${expected.id}.json")).forEach { file ->
+            check(file.canonicalFile == file.absoluteFile && !pathExists(file)) {
+                "仍有私有配置或导出缓存且缺少匹配的删除凭据，无法确认删除完成。"
+            }
+        }
+        return ReleaseDeletionState.DELETED
+    }
+
+    private fun sameDeletionTarget(actual: ReleaseSummary, expected: ReleaseSummary) =
+        actual.id == expected.id && actual.contentDigest == expected.contentDigest &&
+            actual.origin == expected.origin && actual.sealedAt == expected.sealedAt
+
+    private suspend fun pendingDeletionStages(expected: ReleaseSummary): List<File> {
+        validId(expected.id)
+        val result = mutableListOf<File>()
+        stageDirectories().forEach { operation ->
+            checkOwnedStage(operation)
+            val deleted = File(operation, "deleted-release")
+            if (pathExists(deleted)) {
+                checkOwnedStage(operation, requireComplete = true)
+                val snapshot = readDeletedRelease(operation)
+                if (sameDeletionTarget(snapshot, expected)) result += operation
+            }
+        }
+        return result
+    }
+
+    private suspend fun readDeletedRelease(operation: File): ReleaseSummary {
+        checkOwnedStage(operation, requireComplete = true)
+        val deleted = File(operation, "deleted-release")
+        check(deleted.canonicalFile == deleted.absoluteFile && deleted.isDirectory &&
+            !pathExists(File(operation, "cleaned-release"))) { "本机删除凭据无效。" }
+        val scene = readScene(File(deleted, "package"))
+        validId(scene.releaseId)
+        return readReleaseContents(deleted, scene.releaseId, verifyAssets = false)
+    }
+
+    private suspend fun cleanupDeletedRelease(operation: File) {
+        val snapshot = readDeletedRelease(operation)
+        check(!pathExists(child(releases, snapshot.id))) {
+            "相同标识已有本机版本，保留当前版本与配置，请重新核对。"
+        }
+        var failure: Exception? = null
+        fun attempt(action: () -> Unit) {
+            try { action() } catch (problem: Exception) {
+                if (failure == null) failure = problem else failure!!.addSuppressed(problem)
+            }
+        }
+        // Each action is attempted independently: an earlier fsync failure cannot skip private
+        // configuration/cache cleanup. Keep the complete receipt until every directory is durable.
+        attempt { syncDirectory(releases) }
+        attempt { syncDirectory(operation) }
+        listOf(File(exports, "${snapshot.id}.tapscene"), File(exports, "${snapshot.id}.tapscene-ai"),
+            File(aiConfigs, "${snapshot.id}.json")).forEach { file ->
+            attempt {
+                check(file.canonicalFile == file.absoluteFile) { "本机删除缓存路径无效。" }
+                if (pathExists(file)) {
+                    check(Files.readAttributes(file.toPath(), BasicFileAttributes::class.java,
+                        LinkOption.NOFOLLOW_LINKS).isRegularFile) { "本机删除缓存类型无效。" }
+                    Files.delete(file.toPath())
+                }
+                syncDirectory(file.parentFile!!)
+            }
+        }
+        failure?.let { throw it }
+        Files.move(File(operation, "deleted-release").toPath(), File(operation, "cleaned-release").toPath(),
+            StandardCopyOption.ATOMIC_MOVE)
+        // Past this point recovery may only remove the stage, even if a new same-ID release exists.
+        syncDirectory(operation)
+        removeOwnedStage(operation)
     }
 
     private suspend fun checkedAsset(scene: ViewerScene, payload: File, stateId: String): File {
@@ -575,10 +876,14 @@ class ReleaseStore(context: Context) {
             "本机成品不存在或路径无效。"
         }
         validId(location.name)
+        return readReleaseContents(location, location.name, verifyAssets)
+    }
+
+    private suspend fun readReleaseContents(location: File, releaseId: String, verifyAssets: Boolean): ReleaseSummary {
         val scene = readScene(File(location, "package"))
         verifyPackage(scene, File(location, "package"), decode = false, verifyAssets = verifyAssets)
         val json = readJson(File(location, "summary.json"))
-        check(json.getInt("version") == 1 && scene.releaseId == location.name) { "本机成品记录无效。" }
+        check(json.getInt("version") == 1 && scene.releaseId == releaseId) { "本机成品记录无效。" }
         val origin = json.getString("origin")
         check(origin == "local" || origin == "imported") { "本机成品来源无效。" }
         val expected = summary(scene, origin, json.getLong("sealedAt"))
@@ -629,11 +934,13 @@ class ReleaseStore(context: Context) {
         return ViewerPackageCodec.CancelCheck { owner.ensureActive() }
     }
 
-    private suspend fun <T> locked(action: suspend () -> T): T = mutex.withLock {
+    private suspend fun <T> locked(recover: Boolean = true, action: suspend () -> T): T = mutex.withLock {
         directory(root, privateRoot)
         listOf(candidates, releases, staging, exports, aiConfigs).forEach { directory(it, root) }
-        recoverStages()
-        recoverMetadataParts()
+        if (recover) {
+            recoverStages()
+            recoverMetadataParts()
+        }
         action()
     }
 
@@ -652,26 +959,52 @@ class ReleaseStore(context: Context) {
         }
     }
 
-    private fun recoverStages() {
-        staging.listFiles().orEmpty().forEach { operation -> runCatching { removeOwnedStage(operation) } }
+    private suspend fun recoverStages() {
+        stageDirectories().forEach { operation ->
+            checkOwnedStage(operation)
+            if (pathExists(File(operation, "deleted-release"))) {
+                // Fail closed before another import can inherit a deleted version's private plan.
+                cleanupDeletedRelease(operation)
+            } else runCatching { removeOwnedStage(operation) }
+        }
     }
 
-    private fun removeOwnedStage(operation: File) {
+    private fun stageDirectories(): List<File> = Files.newDirectoryStream(staging.toPath()).use { entries ->
+        entries.map { it.toFile() }
+    }
+
+    private fun checkOwnedStage(operation: File, requireComplete: Boolean = false) {
         validId(operation.name)
-        if (!operation.exists()) return
         check(operation.parentFile == staging && operation.canonicalFile == operation.absoluteFile && operation.isDirectory)
         val marker = File(operation, ".owner")
         check(marker.canonicalFile == marker.absoluteFile)
         val completeMarker = marker.isFile && marker.length() <= 100 &&
             marker.readText(Charsets.US_ASCII) == "$OWNER:${operation.name}"
-        // mkdir and the first marker write are not atomic together. Before that write completes,
-        // only an empty UUID directory or its partially written regular marker can exist here.
-        val interruptedCreation = operation.listFiles()?.all { it.name == ".owner" &&
+        // mkdir and the first marker write are not atomic together. No payload exists yet.
+        val interruptedCreation = !requireComplete && operation.listFiles()?.all { it.name == ".owner" &&
             it.isFile && it.canonicalFile == it.absoluteFile && it.length() <= 100 } == true
         check(completeMarker || interruptedCreation) { "暂存目录不属于本次成品存储。" }
-        deleteExactTree(operation)
+    }
+
+    private fun removeOwnedStage(operation: File) {
+        if (!pathExists(operation)) return
+        checkOwnedStage(operation)
+        check(!pathExists(File(operation, "deleted-release"))) { "本机删除尚待清理，保留完整凭据。" }
+        // Delete ownership last so a failed recursive cleanup is still recoverable.
+        Files.newDirectoryStream(operation.toPath()).use { entries ->
+            entries.filter { it.fileName.toString() != ".owner" }.forEach { deleteExactTree(it.toFile()) }
+        }
+        syncDirectory(operation)
+        Files.deleteIfExists(File(operation, ".owner").toPath())
+        Files.delete(operation.toPath())
         syncDirectory(staging)
     }
+
+    /** Only ENOENT establishes absence; inaccessible or malformed paths remain unknown. */
+    private fun pathExists(file: File): Boolean = try {
+        Files.readAttributes(file.toPath(), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        true
+    } catch (_: NoSuchFileException) { false }
 
     /** Exact private metadata temp names only; never inspect/delete package or export files. */
     private fun recoverMetadataParts() {
@@ -699,8 +1032,14 @@ class ReleaseStore(context: Context) {
 
     private fun deleteExactTree(file: File) {
         check(file.canonicalFile == file.absoluteFile) { "拒绝清理非本机成品路径。" }
-        if (file.isDirectory) file.listFiles().orEmpty().forEach(::deleteExactTree)
-        check(file.delete() || !file.exists()) { "本次成品暂存清理未完成。" }
+        val attributes = try {
+            Files.readAttributes(file.toPath(), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        } catch (_: NoSuchFileException) { return }
+        check(!attributes.isSymbolicLink) { "拒绝清理非本机成品路径。" }
+        if (attributes.isDirectory) Files.newDirectoryStream(file.toPath()).use { entries ->
+            entries.forEach { deleteExactTree(it.toFile()) }
+        }
+        Files.delete(file.toPath())
     }
 
     private fun directory(file: File, parent: File): File {
@@ -747,11 +1086,13 @@ class ReleaseStore(context: Context) {
 
     companion object {
         private val mutex = Mutex()
+        private data class PlaybackOwner(val session: PlaybackSession, var sequence: Long = 0)
+        private val playbackOwners = mutableMapOf<String, PlaybackOwner>()
         private const val OWNER = "tapscene-release-v1"
         private const val MAX_BYTES = 50L * 1024 * 1024
         private const val MAX_JSON_BYTES = 2L * 1024 * 1024
         private const val MAX_HISTORY = 10_000
-        private val METADATA_PART = Regex("\\.(review|summary)\\.json-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.part")
+        private val METADATA_PART = Regex("\\.(review|summary|playback)\\.json-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.part")
         private fun newId() = UUID.randomUUID().toString()
         private fun validId(id: String) {
             require(runCatching { UUID.fromString(id).toString() == id }.getOrDefault(false)) { "版本标识无效。" }

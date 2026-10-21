@@ -29,20 +29,24 @@ fun ProjectHomeFrame(
     onImportScreenshot: () -> Unit = {},
     onImportAi: () -> Unit = {},
     onClickPlan: () -> Unit,
-    content: @Composable () -> Unit,
+    content: @Composable (@Composable () -> Unit) -> Unit,
 ) {
     var showCreateOptions by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
         ShellTopBar("TapScene") {
             TextButton(onClick = onSettings) { Text("设置") }
         }
-        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onClickPlan, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("悬浮编排") }
-            Text("在目标 App 上放置点位，再按顺序播放并录屏。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-            OutlinedButton(onClick = { showCreateOptions = true }, shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("其他创建方式") }
+        // A single scrolling body keeps projects reachable on short screens and with IME insets.
+        Box(Modifier.weight(1f)) {
+            content {
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onClickPlan, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("悬浮编排") }
+                    Text("在目标 App 上放置点位，再按顺序播放并录屏。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    OutlinedButton(onClick = { showCreateOptions = true }, shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("其他创建方式") }
+                }
+            }
         }
-        Box(Modifier.weight(1f)) { content() }
         GlobalNavigation(false, {}, onLibrary)
     }
     if (showCreateOptions) ModalBottomSheet(onDismissRequest = { showCreateOptions = false }) {

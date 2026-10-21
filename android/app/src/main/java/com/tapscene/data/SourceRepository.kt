@@ -191,11 +191,14 @@ class SourceRepository(context: Context) {
     }
 
     /** Private bridge for frame evidence. Each read checks current ownership and actual MP4 bytes. */
-    internal fun frameEvidenceSourceAccessor(): FrameSourceAccessor = FrameSourceAccessor { projectId, sessionId, sourceId ->
+    internal fun frameEvidenceSourceAccessor(checkActive: () -> Unit = {}): FrameSourceAccessor = FrameSourceAccessor { projectId, sessionId, sourceId ->
         try {
+            checkActive()
             require(projectId.matches(UUID_PATTERN) && sourceId.matches(UUID_PATTERN) && sessionId.matches(UUID_PATTERN))
             requireProject(projectId)
+            checkActive()
             val source = WorkspaceStore(app, projectId).read().singleOrNull { it.source.sourceId == sourceId }?.source
+            checkActive()
             if (source == null) null else {
                 val path = "${MediaLimits.SOURCE_DIRECTORY}/$sourceId.mp4"
                 check(source.privateRelativePath == path)
@@ -204,12 +207,18 @@ class SourceRepository(context: Context) {
                 val ownership = readOwnership(File(file.parentFile, ".recording-$sourceId.json"))
                 check(ownership == RecordingOwnership(projectId, sourceId, sessionId,
                     source.metadata.byteLength, source.metadata.sha256))
-                check(file.length() == source.metadata.byteLength && FrameRecordingBackend.sha256(file) == source.metadata.sha256)
-                val samples = FrameRecordingBackend.readContainerSamples(file, source.metadata.width, source.metadata.height)
+                check(file.length() == source.metadata.byteLength && FrameRecordingBackend.sha256(file, checkActive) == source.metadata.sha256)
+                val samples = FrameRecordingBackend.readContainerSamples(file, source.metadata.width, source.metadata.height, checkActive)
+                checkActive()
                 FrameRegisteredSource(projectId, sessionId, sourceId, source.metadata.sha256,
                     source.metadata.width, source.metadata.height, samples)
             }
-        } catch (_: Exception) { null }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            checkActive()
+            null
+        }
     }
 
     private fun requireProject(projectId: String) {

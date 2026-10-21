@@ -151,6 +151,12 @@ fun MediaScreen(
     val import = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) workspace.importVideo(uri)
     }
+    val launchImport: () -> Unit = {
+        try { import.launch(arrayOf("video/mp4")) }
+        catch (_: android.content.ActivityNotFoundException) {
+            workspace.message("系统没有可用的文件选择工具。")
+        }
+    }
     val savePng = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/png")) { uri ->
         savePending = false
         if (uri != null) workspace.saveCandidate(uri, pendingDigest) else workspace.cancelSavePicker()
@@ -192,7 +198,7 @@ fun MediaScreen(
                     if (state.drafts.isNotEmpty()) HorizontalDivider()
                     DropdownMenuItem(text = { Text("导入录屏…") }, onClick = {
                         sourceMenu = false
-                        import.launch(arrayOf("video/mp4"))
+                        launchImport()
                     }, enabled = canEdit && !state.loadFailed)
                     if (state.selected != null) DropdownMenuItem(text = { Text("删除 App 中的素材副本") }, onClick = {
                         sourceMenu = false
@@ -245,7 +251,7 @@ fun MediaScreen(
             val selected = state.selected
             if (selected == null && !state.loadFailed) {
                 ScreenEmpty("选择要校正的素材", "手动选取录屏中的画面，按需遮挡，再确认实际输出。原片仅保留在本机私有空间。")
-                OutlinedButton(onClick = { import.launch(arrayOf("video/mp4")) }, enabled = canEdit,
+                OutlinedButton(onClick = launchImport, enabled = canEdit,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("导入已有录屏") }
                 Text("支持 H.264 / H.265；单段不超过 3 分钟、200 MiB，按本机能力解码。",
                     style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)

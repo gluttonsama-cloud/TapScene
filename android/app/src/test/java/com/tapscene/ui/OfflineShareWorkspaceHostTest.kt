@@ -34,7 +34,7 @@ class OfflineShareWorkspaceHostTest {
                 .apply { isAccessible = true }.get(workspace) as MutableStateFlow<ReleaseUiState>
             val release = ReleaseSummary("selected", "Synthetic sealed release", "0".repeat(64), 1, 1, 100, "local")
             val share = OfflineShare("one-shot", release.id, Uri.parse("content://synthetic/offline"), System.currentTimeMillis() + 60_000)
-            val ready = ReleaseUiState(releases = listOf(release), lastSealedId = "unrelated-newer-seal", deliverySelection = DeliverySelection(release.id, release.contentDigest, "source-project"), pendingShare = share)
+            val ready = ReleaseUiState(releases = listOf(release), lastSealedId = "unrelated-newer-seal", deliverySelection = DeliverySelection(release.id, release.contentDigest, "source-project", 7L), pendingShare = share)
             withContext(Dispatchers.Main) {
                 state.value = ready
                 check(workspace.beginShareChooser(null) == null && state.value.pendingShare == null)

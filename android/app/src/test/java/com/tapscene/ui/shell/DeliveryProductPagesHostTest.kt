@@ -40,8 +40,12 @@ class DeliveryProductPagesHostTest {
         var review = 0
         var ai = 0
         var back = 0
-        content { DeliveryOptionsScreen({ back++ }, { review++ }, { ai++ }, {}, {}) }
+        content { DeliveryOptionsScreen({ back++ }, { review++ }, { ai++ }, {}, {},
+            sealedRevision = 7L, currentDraftRevision = 8L, onBackToChecks = {}) }
         compose.onNodeWithText("当前未选择封存版本").assertIsDisplayed()
+        compose.onNodeWithText("封存修订 7").assertDoesNotExist()
+        compose.onNodeWithText("草稿已更新", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("返回项目检查").assertDoesNotExist()
         compose.onNodeWithText("尚未生成").assertDoesNotExist()
         compose.onNodeWithText("保存到文件").assertDoesNotExist()
         compose.onNodeWithText("系统分享").assertDoesNotExist()
@@ -58,41 +62,121 @@ class DeliveryProductPagesHostTest {
 
     @Test fun selectedVersionDetailsAndBusyStatePreserveExportAndShareCallbacks() {
         val selected = mutableStateOf(release)
+        val draftRevision = mutableStateOf(7L)
         val busy = mutableStateOf(false)
         val exported = mutableListOf<String>()
         val shared = mutableListOf<String>()
         val viewed = mutableListOf<String>()
+        var checks = 0
         content {
             val item = selected.value
             DeliveryOptionsScreen({}, {}, {}, {}, {}, sealedSummary = item,
                 onExport = { exported += item.id; busy.value = true },
                 onShare = { shared += item.id; busy.value = true }, busy = busy.value,
-                onOpenSealed = { viewed += item.id })
+                onOpenSealed = { viewed += item.id }, sealedRevision = 7L,
+                currentDraftRevision = draftRevision.value, onBackToChecks = { checks++ })
         }
         compose.onNodeWithText(release.title).assertIsDisplayed()
+        compose.onNodeWithText("封存修订 7").assertIsDisplayed()
+        compose.runOnIdle { draftRevision.value = 8L }
+        compose.onNodeWithText("草稿已更新至修订 8，可能包含此版本未收录的后续修改。").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("封存修订 8").assertDoesNotExist()
+        compose.onNodeWithText("返回项目检查").performScrollTo().performClick()
+        assertEquals(1, checks)
+        assertEquals(release.id, selected.value.id)
+        assertEquals(emptyList<String>(), exported)
+        assertEquals(emptyList<String>(), shared)
         compose.onNodeWithText("返回成品复核").assertDoesNotExist()
         compose.onNodeWithText("查看封存成品").performScrollTo().performClick()
         assertEquals(listOf(release.id), viewed)
         compose.onNodeWithText(release.id).assertDoesNotExist()
-        compose.onNodeWithText("版本详情").performClick()
-        compose.onNodeWithText(release.id).assertIsDisplayed()
-        compose.onNodeWithText("版本详情").performClick()
+        compose.onNodeWithText(release.contentDigest).assertDoesNotExist()
+        compose.onNodeWithText("版本详情").performScrollTo().performClick()
+        compose.onNodeWithText(release.id).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("内容摘要").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(release.contentDigest).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("版本详情").performScrollTo().performClick()
         compose.onNodeWithText(release.id).assertDoesNotExist()
+        compose.onNodeWithText(release.contentDigest).assertDoesNotExist()
         compose.onNodeWithText("保存到文件").performScrollTo().performClick()
         compose.onNodeWithText("正在准备").assertIsNotEnabled().performClick()
         compose.onNodeWithText("系统分享").assertIsNotEnabled().performClick()
+        compose.onNodeWithText("返回项目检查").performScrollTo().assertIsNotEnabled().performClick()
+        assertEquals(1, checks)
         assertEquals(listOf(release.id), exported)
         assertEquals(emptyList<String>(), shared)
         compose.runOnIdle { busy.value = false }
-        compose.onNodeWithText("系统分享").performClick()
+        compose.onNodeWithText("系统分享").performScrollTo().performClick()
         compose.onNodeWithText("系统分享").assertIsNotEnabled().performClick()
         assertEquals(listOf(release.id), shared)
+        assertEquals(release.id, selected.value.id)
         compose.runOnIdle { busy.value = false }
         compose.onNodeWithText("版本详情").performScrollTo().performClick()
         compose.runOnIdle { selected.value = release.copy(id = "another-fixed-release") }
         compose.onNodeWithText("版本标识").assertDoesNotExist()
-        compose.onNodeWithText("版本详情").performClick()
-        compose.onNodeWithText("another-fixed-release").assertIsDisplayed()
+        compose.onNodeWithText("内容摘要").assertDoesNotExist()
+        compose.onNodeWithText("版本详情").performScrollTo().performClick()
+        compose.onNodeWithText("another-fixed-release").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test fun matchingAndUnknownRevisionsDoNotSuggestUnverifiedDraftChanges() {
+        val sealedRevision = mutableStateOf<Long?>(7L)
+        val draftRevision = mutableStateOf<Long?>(7L)
+        content {
+            DeliveryOptionsScreen({}, {}, {}, {}, {}, sealedSummary = release,
+                onExport = {}, onShare = {}, sealedRevision = sealedRevision.value,
+                currentDraftRevision = draftRevision.value, onBackToChecks = {})
+        }
+        compose.onNodeWithText("封存修订 7").assertIsDisplayed()
+        compose.onNodeWithText("此版本内容已固定，不会随项目草稿更新。").assertIsDisplayed()
+        assertNoDraftComparison()
+        compose.runOnIdle { draftRevision.value = null }
+        compose.onNodeWithText("封存修订 7").assertIsDisplayed()
+        assertNoDraftComparison()
+        compose.runOnIdle { sealedRevision.value = null; draftRevision.value = 8L }
+        compose.onNodeWithText("封存修订", substring = true).assertDoesNotExist()
+        assertNoDraftComparison()
+        compose.onNodeWithText("保存到文件").assertIsEnabled()
+        compose.onNodeWithText("系统分享").assertIsEnabled()
+    }
+
+    @Test fun lowerDraftRevisionUsesNeutralCopyAndMissingRouteDoesNotInventChecksAction() {
+        val draftRevision = mutableStateOf(6L)
+        content {
+            DeliveryOptionsScreen({}, {}, {}, {}, {}, sealedSummary = release,
+                onExport = {}, onShare = {}, sealedRevision = 7L, currentDraftRevision = draftRevision.value)
+        }
+        compose.onNodeWithText("当前草稿为修订 6，与封存修订 7 不同。").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("草稿已更新", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("后续修改", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("返回项目检查").assertDoesNotExist()
+        compose.onNodeWithText("保存到文件").assertIsEnabled()
+        compose.onNodeWithText("系统分享").assertIsEnabled()
+        compose.runOnIdle { draftRevision.value = 8L }
+        compose.onNodeWithText("草稿已更新至修订 8，可能包含此版本未收录的后续修改。").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("当前草稿为修订", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("返回项目检查").assertDoesNotExist()
+    }
+
+    @Test
+    @Config(qualifiers = "w800dp-h360dp-xhdpi")
+    fun shortLandscapeKeepsVersionContextDetailsAndExportReachable() {
+        var exports = 0
+        var checks = 0
+        content {
+            DeliveryOptionsScreen({}, {}, {}, {}, {},
+                sealedSummary = release.copy(title = "活动报名：选择活动、核对报名信息并确认结果与后续安排"),
+                onExport = { exports++ }, onShare = {}, sealedRevision = 7L, currentDraftRevision = 8L,
+                onBackToChecks = { checks++ })
+        }
+        compose.onNodeWithText("封存修订 7").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("草稿已更新至修订 8，可能包含此版本未收录的后续修改。").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("返回项目检查").performScrollTo().performClick()
+        compose.onNodeWithText("版本详情").performScrollTo().performClick()
+        compose.onNodeWithText(release.contentDigest).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("保存到文件").performScrollTo().performClick()
+        assertEquals(1, checks)
+        assertEquals(1, exports)
     }
 
     @Test fun importedVersionCannotShareAndDeveloperHostingRetainsAllDestinations() {
@@ -163,5 +247,11 @@ class DeliveryProductPagesHostTest {
     private fun content(block: @Composable () -> Unit) {
         compose.runOnUiThread { compose.activity.setContent { TapSceneTheme(content = block) } }
         compose.waitForIdle()
+    }
+
+    private fun assertNoDraftComparison() {
+        compose.onNodeWithText("草稿已更新", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("当前草稿为修订", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("返回项目检查").assertDoesNotExist()
     }
 }

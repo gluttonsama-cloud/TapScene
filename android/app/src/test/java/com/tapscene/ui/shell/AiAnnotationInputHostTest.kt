@@ -1,5 +1,6 @@
 package com.tapscene.ui.shell
 
+import android.os.Looper
 import androidx.activity.compose.setContent
 import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.mutableStateOf
@@ -8,9 +9,15 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.text.AnnotatedString
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
 import com.tapscene.MainActivity
+import com.tapscene.data.HostFileSyncShadow
 import com.tapscene.data.HostSqlite
 import com.tapscene.data.ReleaseSummary
+import com.tapscene.data.AiConfigurationOpen
+import com.tapscene.data.ImportedAiConfigurationSnapshot
+import com.tapscene.ui.AiConfigurationChoice
+import com.tapscene.packageformat.ViewerPackageCodec
 import com.tapscene.packageformat.RenderPlan
 import com.tapscene.packageformat.ViewerScene
 import com.tapscene.recording.RecordingCoordinator
@@ -22,17 +29,21 @@ import com.tapscene.ui.ProjectUiState
 import com.tapscene.ui.ReleaseUiState
 import com.tapscene.ui.ReleaseWorkspace
 import java.util.UUID
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.ExternalResource
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
@@ -41,18 +52,73 @@ import org.robolectric.annotation.SQLiteMode
 
 /** Actual Compose with production plan edits and synthetic content; not device/picker evidence. */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35], qualifiers = "w320dp-h800dp-xhdpi")
+@Config(sdk = [35], qualifiers = "w320dp-h800dp-xhdpi", shadows = [HostFileSyncShadow::class])
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class AiAnnotationInputHostTest {
     @get:Rule(order = 0) val database = object : ExternalResource() {
-        override fun before() { resetFactory(); HostSqlite.configure() }
-        override fun after() { resetFactory() }
+        override fun before() {
+            resetFactory()
+            HostSqlite.configure()
+            // MainActivity reads the real library; its directory fsync needs the host FD bridge.
+            HostFileSyncShadow.begin(RuntimeEnvironment.getApplication().noBackupFilesDir)
+        }
+        override fun after() { try { HostFileSyncShadow.reset() } finally { resetFactory() } }
     }
     @get:Rule(order = 1) val compose = createAndroidComposeRule<MainActivity>()
     private val field = "画面标注（最多 240 字）"
     private val visit = id("visit")
+
+    @After fun finishReleaseWorkBeforeClosingHostDescriptors() {
+        val owner = ViewModelProvider(compose.activity)[ReleaseWorkspace::class.java]
+            .viewModelScope.coroutineContext[Job]!!
+        compose.runOnIdle { compose.activity.viewModelStore.clear() }
+        // Cancelling the owner does not finish its NonCancellable IO reconciliation.
+        compose.waitUntil(30_000) {
+            shadowOf(Looper.getMainLooper()).idle()
+            owner.isCompleted
+        }
+        compose.waitForIdle()
+    }
+
+    @Test fun importedContentReviewHintsStayTruthfulThroughExplicitExportConfirmation() {
+        val config = configuration(true)
+        val summary = ReleaseSummary(config.scene.releaseId, config.scene.title,
+            ViewerPackageCodec.contentDigest(config.scene), 1, 1, 100, "imported")
+        val state = ReleaseUiState(releases = listOf(summary), aiConfiguration = config)
+        val warning = "导入内容不继承本机作者复核；文件完整性校验不代表隐私已获认证。"
+        var exports = 0
+        assertEquals(1, config.resolve().visits.size)
+        assertEquals("imported", config.scene.states.single().sourceKind)
+        compose.activity.setContent { TapSceneTheme { AiPackageScreen(onBack = {}, state = state, onExport = { exports++ }) } }
+
+        compose.onNodeWithText("保存前检查").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("包含这个固定版本的全部画面、裁片和过渡视频，也保留未选分支。原始录屏不会打包。")
+            .performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(warning).performScrollTo().assertIsDisplayed()
+        compose.onAllNodesWithText("已复核", substring = true).assertCountEquals(0)
+        assertEquals(0, exports)
+
+        compose.onNodeWithText("检查并保存").assertIsEnabled().performClick()
+        compose.onNodeWithText("保存 AI 动画包？").assertIsDisplayed()
+        assertEquals(0, exports)
+        compose.onNode(hasText("包含全部固定画面、裁片和过渡视频，保留未选分支。请确认文字标注和区域名称。") and hasAnyAncestor(isDialog()))
+            .performScrollTo().assertIsDisplayed()
+        compose.onNode(hasText(warning) and hasAnyAncestor(isDialog())).performScrollTo().assertIsDisplayed()
+        compose.onAllNodesWithText("已复核", substring = true).assertCountEquals(0)
+        compose.onNodeWithText("返回调整").performClick()
+        compose.onNodeWithText("保存 AI 动画包？").assertDoesNotExist()
+        assertEquals(0, exports)
+
+        compose.onNodeWithText("检查并保存").assertIsEnabled().performClick()
+        compose.onNode(hasText(warning) and hasAnyAncestor(isDialog())).performScrollTo().assertIsDisplayed()
+        assertEquals(0, exports)
+        compose.onNodeWithText("选择保存位置").assertIsDisplayed().assertIsEnabled().performClick()
+        assertEquals(1, exports)
+        compose.onNodeWithText("保存 AI 动画包？").assertDoesNotExist()
+        assertEquals(config, state.aiConfiguration)
+    }
 
     @Test fun pendingTextSurvivesCollapseAndBothBacksButNeverLeaksToAnotherVersion() {
         val state = mutableStateOf(ReleaseUiState(aiConfiguration = configuration(false)))
@@ -215,6 +281,60 @@ class AiAnnotationInputHostTest {
         assertEquals(2, backs)
     }
 
+    @Test fun sameNamedVersionsChooseByFullIdAndReviewOnlySelectedIdentity() {
+        // Production selection/review UI with synthetic configurations; no Store, SAF or ZIP read.
+        val template = configuration(false)
+        fun version(release: String): AiPackageConfiguration {
+            val scene = template.scene
+            return template.copy(scene = ViewerScene(scene.schemaVersion, scene.policyVersion, scene.compilerVersion,
+                id(release), "同名演示", scene.goal, scene.createdAt, scene.startStateId,
+                scene.states, scene.edges, scene.hotspots, scene.regions, scene.assets))
+        }
+        val versionA = version("A")
+        val versionB = version("B")
+        val digestA = ViewerPackageCodec.contentDigest(versionA.scene)
+        val digestB = ViewerPackageCodec.contentDigest(versionB.scene)
+        assertFalse(digestA == digestB)
+        fun summary(config: AiPackageConfiguration) = ReleaseSummary(config.scene.releaseId, config.scene.title,
+            ViewerPackageCodec.contentDigest(config.scene), 1, config.scene.states.size, 100, "local")
+        val state = mutableStateOf(ReleaseUiState(
+            releases = listOf(summary(versionA), summary(versionB)), aiConfiguration = versionA))
+        val selectedVersions = mutableListOf<String>()
+        compose.activity.setContent { TapSceneTheme {
+            AiPackageScreen(onBack = {}, state = state.value, onChooseRelease = { releaseId ->
+                selectedVersions += releaseId
+                state.value = state.value.copy(aiConfiguration = listOf(versionA, versionB)
+                    .single { it.scene.releaseId == releaseId })
+            })
+        } }
+        compose.onNodeWithText("换一个版本").performScrollTo().performClick()
+        compose.onAllNodesWithText("同名演示").assertCountEquals(2)
+        compose.onNodeWithText("版本 ID：${versionA.scene.releaseId}", substring = true)
+            .performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("版本 ID：${versionB.scene.releaseId}", substring = true)
+            .performScrollTo().assertIsDisplayed().assertIsEnabled().performClick()
+        assertEquals(listOf(versionB.scene.releaseId), selectedVersions)
+        assertEquals(versionB, state.value.aiConfiguration)
+
+        // Selecting the current version must only close the chooser, without requesting a reread.
+        compose.onNodeWithText("换一个版本").performScrollTo().performClick()
+        compose.onNodeWithText("版本 ID：${versionB.scene.releaseId}", substring = true)
+            .performScrollTo().performClick()
+        assertEquals(listOf(versionB.scene.releaseId), selectedVersions)
+        assertEquals(versionB, state.value.aiConfiguration)
+        compose.onNodeWithText("检查并保存").assertIsEnabled().performClick()
+        compose.onNodeWithText("保存 AI 动画包？").assertIsDisplayed()
+        compose.onNode(hasText("展开技术详情与文件清单") and hasAnyAncestor(isDialog()))
+            .performScrollTo().performClick()
+        compose.onNode(hasText("版本 ${versionB.scene.releaseId}", substring = true) and hasAnyAncestor(isDialog()))
+            .performScrollTo().assertIsDisplayed()
+            .assertTextContains("内容 SHA-256 $digestB", substring = true)
+        compose.onNode(hasText(versionA.scene.releaseId, substring = true) and hasAnyAncestor(isDialog()))
+            .assertDoesNotExist()
+        compose.onNode(hasText(digestA, substring = true) and hasAnyAncestor(isDialog())).assertDoesNotExist()
+        compose.onNodeWithText("选择保存位置").assertIsEnabled()
+    }
+
     @Test fun busyBackNeverLeavesWhileCleanAndDraftBoundConfigurationsCanReturn() {
         val config = configuration(true)
         val state = mutableStateOf(ReleaseUiState(aiConfiguration = config, aiConfigurationChanged = true,
@@ -294,8 +414,11 @@ class AiAnnotationInputHostTest {
             "0".repeat(64), 1, 1, 100, "local")
         fun openFromLibrary(config: AiPackageConfiguration) {
             settled()
-            compose.runOnIdle { releaseState.value = releaseState.value.copy(releases = listOf(summary(config)), message = null) }
-            compose.onNodeWithText("配置 AI 数据包").performScrollTo().performClick()
+            compose.runOnIdle {
+                assertFalse("The real library read must succeed before injecting its synthetic row", releaseState.value.libraryReadFailed)
+                releaseState.value = releaseState.value.copy(releases = listOf(summary(config)), message = null)
+            }
+            compose.onNodeWithText("配置 AI 数据包").performScrollTo().assertIsEnabled().performClick()
             compose.onNodeWithText("AI 动画配置").assertIsDisplayed()
             // The real button starts openAiPackage. Let its missing-fixture read finish before
             // injecting the synthetic plan; never replace a configuration while loading is busy.
@@ -412,6 +535,28 @@ class AiAnnotationInputHostTest {
             compose.onNodeWithText("检查并保存").assertIsEnabled()
             compose.onNodeWithText("1 处标注输入未应用 · 返回检查").assertDoesNotExist()
             assertRecordingUnchanged()
+
+            // A clean editor may leave through another task's project action. That is an
+            // actual exit, unlike a temporary cover; a failed new open must not resurrect B.
+            val beforeCleanExit = projectState.value
+            compose.runOnIdle { projectState.value = beforeCleanExit.copy(busy = true, stage = "清洁编辑器离页测试") }
+            compose.onNodeWithText("详情").performClick()
+            compose.onNodeWithText("回到项目").performScrollTo().performClick()
+            compose.onNodeWithText("AI 动画配置").assertDoesNotExist()
+            compose.runOnIdle {
+                assertNull(releaseState.value.aiConfiguration)
+                assertNull(releaseState.value.aiConfigurationOwner)
+                projectState.value = beforeCleanExit
+            }
+            compose.onNodeWithText("配置 AI 数据包").performScrollTo().assertIsEnabled().performClick()
+            settled()
+            compose.onNodeWithText("AI 动画配置").assertIsDisplayed()
+            assertNull(releaseState.value.aiConfiguration)
+            assertNull(releaseState.value.aiConfigurationOwner)
+            check(releaseState.value.message != null) { "The synthetic library row has no release files" }
+            compose.onNodeWithText("检查并保存").assertDoesNotExist()
+            assertRecordingUnchanged()
+            HostFileSyncShadow.assertDirectorySyncEvidence()
         } finally {
             try { compose.runOnIdle { releaseState.value = originalReleaseState; projectState.value = originalProjectState } }
             finally { runBlocking { recordingGate.withLock {
@@ -419,6 +564,51 @@ class AiAnnotationInputHostTest {
                 stopRequest.set(null, originalStopRequest)
             } } }
         }
+    }
+
+    @Config(qualifiers = "w320dp-h568dp-xhdpi")
+    @Test fun retainedChoiceUsesExactOwnerAndUnknownSaveRequiresRecheckOrExplicitExit() {
+        val config = configuration(false)
+        val summary = ReleaseSummary(config.scene.releaseId, config.scene.title,
+            ViewerPackageCodec.contentDigest(config.scene), 1, 1, 100, "imported")
+        val source = AiConfigurationOpen(summary, config.scene, config.resolve(), false,
+            ImportedAiConfigurationSnapshot(100, "a".repeat(64)))
+        val state = mutableStateOf(ReleaseUiState(aiConfigurationOwner = "first-session",
+            aiConfigurationChoice = AiConfigurationChoice("first-session", source)))
+        val choices = mutableListOf<Pair<String, Boolean>>()
+        var backs = 0
+        var rechecks = 0
+        var exports = 0
+        compose.activity.setContent { TapSceneTheme { AiPackageScreen(
+            onBack = { backs++ }, state = state.value,
+            onChooseConfiguration = { owner, retained -> choices += owner to retained },
+            onRecheckSave = { rechecks++ }, onExport = { exports++ }) } }
+        compose.onNodeWithText("版本 ID：${summary.id}\n内容 SHA-256：${summary.contentDigest}").assertExists()
+        compose.onNodeWithText("使用保留配置").assertIsDisplayed().assertIsEnabled().performClick()
+        assertEquals(listOf("first-session" to true), choices)
+        compose.runOnIdle { state.value = state.value.copy(aiConfigurationOwner = "next-session",
+            aiConfigurationChoice = AiConfigurationChoice("next-session", source.copy(plan = null))) }
+        compose.onNodeWithText("使用保留配置").assertIsDisplayed().assertIsNotEnabled().performClick()
+        assertEquals(1, choices.size)
+        compose.onNodeWithText("从默认配置开始").assertIsDisplayed().performClick()
+        assertEquals("next-session" to false, choices.last())
+        compose.runOnIdle { state.value = state.value.copy(aiConfiguration = config,
+            aiConfigurationChoice = null, aiSaveNeedsCheck = true, aiConfigurationChanged = true) }
+        compose.onNodeWithText("换一个版本").performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithText("横屏 16:9").performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithText("检查并保存").assertDoesNotExist()
+        compose.onNodeWithText("重新核对保存结果").assertIsEnabled().performClick()
+        assertEquals(1, rechecks)
+        assertEquals(0, exports)
+        compose.runOnIdle { compose.activity.onBackPressedDispatcher.onBackPressed() }
+        compose.onNodeWithText("保存结果尚未确认").assertIsDisplayed()
+        assertEquals(0, backs)
+        compose.onNodeWithText("留在本页").performClick()
+        assertEquals(0, backs)
+        compose.onNodeWithContentDescription("返回").performClick()
+        compose.onNodeWithText("确认返回，不撤销本机配置").performClick()
+        assertEquals(1, backs)
+        assertEquals(0, exports)
     }
 
     private fun configuration(annotation: Boolean, release: String = "A"): AiPackageConfiguration {

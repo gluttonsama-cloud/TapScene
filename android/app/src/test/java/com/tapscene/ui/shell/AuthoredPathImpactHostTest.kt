@@ -68,7 +68,7 @@ class AuthoredPathImpactHostTest {
         showText("通路 3 · 步骤 2 同名")
         compose.onNodeWithText("末步 · 保留下一步与热点").assertIsDisplayed()
         showText("步骤 4 同名")
-        compose.onNodeWithText("将改写 1 个下一步目标；手动热点保留。").assertIsDisplayed()
+        compose.onNodeWithText("将改写 1 个下一步目标；手动热点与项目起点保留。").assertIsDisplayed()
         compose.onNodeWithText("将移除 1 个原视频过渡；生成后需重新设置。").assertIsDisplayed()
         compose.onNodeWithText("按此顺序生成通路").assertIsEnabled()
         assertEquals(selected to false, drafts.last())
@@ -80,7 +80,7 @@ class AuthoredPathImpactHostTest {
         compose.onNodeWithText("原下一步 → 步骤 2 同名").assertDoesNotExist()
         compose.onNodeWithText("原视频过渡将移除，需重新设置。").assertDoesNotExist()
         compose.onNodeWithText("将移除", substring = true).assertDoesNotExist()
-        compose.onNodeWithText("按上方顺序连接；手动热点与分镜排序保留。").assertIsDisplayed()
+        compose.onNodeWithText("按上方顺序连接；手动热点、项目起点与分镜排序保留。").assertIsDisplayed()
         showText("通路 2 · 步骤 2 同名")
         showText("通路 3 · 步骤 3 同名")
         assertEquals(listOf(a, b, c) to false, drafts.last())
@@ -105,6 +105,61 @@ class AuthoredPathImpactHostTest {
         assertEquals(listOf("path-b", "path-c", "path-b", "path-a"),
             project.steps.map { it.nextAction?.targetStepId })
         assertTrue(project.steps.all { it.nextAction?.transition != null })
+    }
+
+    @Config(qualifiers = "w740dp-h480dp-xhdpi")
+    @Test fun reorderedSameTitlePathKeepsProjectStartAndRequiresExplicitBuild() {
+        val original = fixture()
+        val (a, b, c, d) = original.steps
+        val project = original.copy(steps = listOf(b, a, c, d).mapIndexed { index, step -> step.copy(sortOrder = index) })
+        val selected = listOf(b.id, a.id, c.id)
+        val builds = mutableListOf<BuildRequest>()
+        val drafts = mutableListOf<Pair<List<String>, Boolean>>()
+        val differentStart = "本次通路第一步不是项目起点。要从步骤 1 同名开始，请返回分镜，在该步更多菜单选择“设为起点”。"
+        content {
+            AuthoredPathScreen(project, selected, false, {},
+                { ids, terminal, revision -> builds += BuildRequest(ids, terminal, revision) }, {},
+                initialMarkLastTerminal = false,
+                onDraftChanged = { ids, terminal -> drafts += ids to terminal })
+        }
+
+        // Storyboard order is B,A,C,D, while the persisted start is still A. Same titles
+        // must use storyboard numbers, not the original identity order or path position.
+        showText("项目起点：步骤 2 同名")
+        compose.onNodeWithText("项目起点：步骤 1 同名").assertDoesNotExist()
+        showText("生成通路不会更改项目起点。")
+        showText(differentStart)
+        showText("通路 1 · 步骤 1 同名")
+        showText("通路 2 · 步骤 2 同名")
+        showText("通路 3 · 步骤 3 同名")
+        compose.onNodeWithText("将改写 2 个下一步目标；手动热点与项目起点保留。").assertIsDisplayed()
+        assertEquals(selected to false, drafts.last())
+        assertEquals(a.id, project.project.startStepId)
+        assertTrue(builds.isEmpty())
+
+        clickDescription("上移 步骤 2 同名")
+        showText("项目起点：步骤 2 同名")
+        showText("生成通路不会更改项目起点。")
+        compose.onNodeWithText(differentStart).assertDoesNotExist()
+        showText("通路 1 · 步骤 2 同名")
+        compose.onNodeWithText("按上方顺序连接；手动热点、项目起点与分镜排序保留。").assertIsDisplayed()
+        assertEquals(listOf(a.id, b.id, c.id) to false, drafts.last())
+        assertEquals(a.id, project.project.startStepId)
+        assertTrue(builds.isEmpty())
+
+        // Choosing a different first step again is only a draft change. Even the explicit
+        // build callback receives that order unchanged; it cannot silently choose a start.
+        clickDescription("下移 步骤 2 同名")
+        showText(differentStart)
+        assertEquals(selected to false, drafts.last())
+        assertTrue(builds.isEmpty())
+        compose.onNodeWithText("按此顺序生成通路").assertIsDisplayed().assertIsEnabled().performClick()
+        assertEquals(listOf(BuildRequest(selected, false, project.project.revision)), builds)
+        assertEquals(a.id, project.project.startStepId)
+        assertEquals(listOf(b.id, a.id, c.id, d.id), project.steps.map { it.id })
+        assertEquals(listOf(0, 1, 2, 3), project.steps.map { it.sortOrder })
+        showText("项目起点：步骤 2 同名")
+        showText(differentStart)
     }
 
     @Test fun changedRevisionAndBusyStateBlockBuildCallbacks() {

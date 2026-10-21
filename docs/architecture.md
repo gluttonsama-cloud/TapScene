@@ -10,7 +10,7 @@
 
 API 32+ 利用系统等比 fit/居中输出固定编码画布，旋转和窗口变化可产生留边；API 34 记录内容尺寸回调及粗略 fit 区域，但时间不是媒体 PTS，不能用于触点映射。API 26–31 检测显示变化即结束本段。画面候选使用一个 Media3 Surface 会话，最多 361 次时间请求、30 个候选；32×32 特征比较并按实际帧 PTS 去重，毫秒精度。独立私有 SQLite 保存 source SHA、算法版本、检查点和人工选择；确认 PNG 保存为步骤后以稳定 captureId 对账，不把候选选择当复核。
 
-授权只在点击开始时请求；前台通知可停止，通知权限拒绝仍可回 App 停止。基础手动录制使用 mediaProjection 前台服务及通知权限，没有音频、网络或广泛存储权限；预编排点击链另有下文的用户开启手势服务。画面可能含可见密码/键盘输入，不能承诺自动排除；尊重 FLAG_SECURE。预编排点击链增量使用用户主动开启的手势服务，窗口元数据仅作运行期守卫；点击链共帧证据使用独立私有侧车，消费 UI 待后续接入。官方约束参见 [MediaProjection 会话与尺寸变化](https://developer.android.com/media/grow/media-projection)、[前台服务类型](https://developer.android.com/develop/background-work/services/fgs/service-types#media-projection)、[受保护窗口](https://developer.android.com/reference/android/view/WindowManager.LayoutParams#FLAG_SECURE)。
+授权只在点击开始时请求；前台通知可停止，通知权限拒绝仍可回 App 停止。基础手动录制使用 mediaProjection 前台服务及通知权限，没有音频、网络或广泛存储权限；预编排点击链另有下文的用户开启手势服务。画面可能含可见密码/键盘输入，不能承诺自动排除；尊重 FLAG_SECURE。预编排点击链增量使用用户主动开启的手势服务，窗口元数据仅作运行期守卫；点击链共帧证据使用独立私有侧车，整理工作台通过独立会话复核画面与动作后生成新项目，原项目保持不变。官方约束参见 [MediaProjection 会话与尺寸变化](https://developer.android.com/media/grow/media-projection)、[前台服务类型](https://developer.android.com/develop/background-work/services/fgs/service-types#media-projection)、[受保护窗口](https://developer.android.com/reference/android/view/WindowManager.LayoutParams#FLAG_SECURE)。
 
 
 离线 OCR 使用官方 PP-OCRv6_tiny ONNX 模型、官方 Maven ONNX Runtime 1.31.0 及 OpenCV 4.14.0 core/imgproc 源码；模型与字典随包、摘要固定，无运行时下载。受限 Bitmap RGB → 检测/裁切/识别/CTC 管线在单一后台任务运行，关闭 runtime 遥测并丢弃引擎日志。原始行/像素框按项目、源 SHA、实际帧时间/精度和模型版本保存在排除备份的私有 SQLite，不进入离线包。取消或切换保留已完成帧；删除项目/来源撤销在途写入并清除结果。标题只由用户显式采用且不覆盖已有文字，框仅供人工遮挡，遮挡后仍须重生成并复核实际输出。依赖与限额见 [原生实现](../tools/ocr-native/README.md)；主机合成图不代替 Android 性能或隐私覆盖验收。
@@ -99,7 +99,7 @@ Android 初期按包分区，按实际需要拆 Gradle 模块。依赖版本、�
 
 ### 本机表
 
-当前 Android 项目编辑增量以私有 SQLite 实现项目、步骤、来源引用、派生 PNG、热点和边的子集；复核后的图片复制、摘要核对与事务提交完成才进入步骤。文件复制前登记恢复记录，中断后按记录清理未提交文件，保留已提交资产。原素材工作台记录保持独立，项目媒体草稿按项目隔离；删除项目清理自己的派生图，原素材副本可从首页“本机保留素材”继续管理。观看包与封存使用独立私有目录；视频过渡以稳定 edge ID 绑定单独派生 MP4，SQLite v3 只增加过渡与恢复记录。源片引用计入过渡，换目标/删边清理旧绑定，普通重排保留；文件复制、完整解码及摘要核对后原子替换，提交前取消保留原绑定；提交后取消重新读取真实绑定与修订。固定候选另复制实际 MP4，整段观看确认绑定候选摘要及资产 hash；旧版本不随草稿修改。无视频沿用 schema 1，有视频使用 schema 2/video-viewer-2；Java 包边界必须提供全解码验证器，旧重载遇视频拒绝。完整撤销表尚未接入。
+当前 Android 项目编辑增量以私有 SQLite 实现项目、步骤、来源引用、派生 PNG、热点和边的子集；复核后的图片复制、摘要核对与事务提交完成才进入步骤。文件复制前登记恢复记录，中断后按记录清理未提交文件，保留已提交资产。原素材工作台记录保持独立，项目媒体草稿按项目隔离；删除项目清理其派生资产及无引用的内部原截图副本，原录屏独立保留，可从“设置 → 本机保留素材”管理。外部原文件、独立候选与封存版本不受影响。观看包与封存使用独立私有目录；视频过渡以稳定 edge ID 绑定单独派生 MP4，SQLite v3 只增加过渡与恢复记录。源片引用计入过渡，换目标/删边清理旧绑定，普通重排保留；文件复制、完整解码及摘要核对后原子替换，提交前取消保留原绑定；提交后取消重新读取真实绑定与修订。固定候选另复制实际 MP4，整段观看确认绑定候选摘要及资产 hash；旧版本不随草稿修改。无视频沿用 schema 1，有视频使用 schema 2/video-viewer-2；Java 包边界必须提供全解码验证器，旧重载遇视频拒绝。完整撤销表尚未接入。
 
 区域增量以 SQLite v4 增加 regions 和裁片恢复记录；保留 v1–v3 项目，不重建已有表。区域只依赖当前已复核安全底图的 ID、SHA 和尺寸；真实生成与人工复核分开。替换底图原子清除相关裁片/复核并保留失效定义，重新校正生成后复核。schema 3 / scene-regions-3 封存区域及 PNG，Java 与独立消费者都逐像素比对 bbox 裁片和底图；候选对真实裁片另行确认。
 
@@ -394,7 +394,10 @@ v1–v5 升级在 SQLiteOpenHelper `onConfigure`（事务外）关闭该连接�
 | `local_jobs.input_snapshot_json` | 编译/分析：`{project:{projectId,revision,title,goal,startStateId,config},sources:[SourceRow（不复制 analysis_json）],states:[StateRow],edges:[EdgeRow],hotspots:[HotspotRow],redactions:[RedactionRow],regions:[RegionRow]}`，Row 对应各字段表；导出/上传：`{releaseId,contentDigest,exportKind,renderConfig,expiryDays,serverProjectId}`（只保留该任务需要的字段）；导入：`{inputRelativePath,inputSha256,importAs:"library"\|"draft"}`。 |
 | `local_jobs.checkpoint_json` | `{completedAssets:[{assetId,sha256}],tempFiles:[relativePath],candidateReleaseId:null\|id,sceneDigest:null\|hash,uploadId:null\|id,receivedAssetIds:[id],serverReceipt:null\|{publicationId,releaseId,shareUrl,expiresAt},outputFile:null\|{relativePath,sha256,byteLength}}`。账号 token 不进此列；shareUrl 在私有 DB 内保护且不写日志。 |
 | `local_releases.asset_ids_json` | `[assetId]`，必须与 scene 资产清单一一对应；引用只能指向完整 `local_assets`。Room 无法给 JSON 元素加 FK，由封存/导入事务及清理前引用扫描保证。 |
-| `local_releases.playback_checkpoint_json` | `{contentDigest,currentStateId,visits:[{stateId,selectedEdgeId:null\|id}],phase:"ready"\|"ended"}`。不持久化半段视频播放回调；恢复从明确状态开始。在线恢复先重验 share，不能仅凭断点继续取媒体。 |
+| 正式观看断点（当前实现） | 本机 `release-store/releases/{releaseId}/playback.json`，不在 `package` 内，不导出/备份；64 KiB 上限。`{version:1,releaseId,contentDigest,currentStateId,history:[stateId],ended,endLabel:null\|text,endEdgeId:null\|id,visitedEdgeIds:[id],completedFromStart}`；按固定图验证。仅记录已显示的稳定画面，未完成视频保留来源步骤；打开须明确继续/从头。原子替换，进程内 owner 与单调写序号拒绝迟到写；删除版本同时移除断点。候选试走不读取/写入此文件。 |
+| 本机副本删除（当前实现） | 按确认时的 ID、内容摘要、来源与保存时间再次核对；正式目录移到 owned `staging/{operationId}/deleted-release` 是提交点。提交前检查取消，提交后不回滚。真实快照保留为私有导出缓存/AI 配置清理凭据；全部清理及目录同步成功后改名 `cleaned-release`，再清 stage 且最后移除 `.owner`。恢复不得碰已有同 ID 新副本；结果单独核对为保留、已变化、已删除或待清理，读取异常显示未知。无可信凭据的历史残留不自动删除。 |
+| 导入版本 AI 配置（当前实现） | 独立私有 `ai-configs/{releaseId}.json`，≤256 KiB，不属于观看包。打开时同锁读取实际来源、scene 和原始字节指纹；已有文件须明确选择保留/默认。保存核对 ID、内容摘要、来源、保存时间及原始字节 SHA-256，在配置原子替换前再次核对和检查取消。包缓存成功不代表配置已提交；结束后只读核对目标一致、原文件未变或已变化，读取失败保留未知。当前字节一致不证明本操作写入；系统另存结果独立。编辑会话 owner 隔离迟到选择和未应用输入，本机封存版本继续使用绑定的本机来源路径。 |
+| `local_releases.playback_checkpoint_json`（后续数据库映射） | 当前使用上列私有文件，未新增数据库列。在线恢复仍须重验 share，不能凭本机记录取媒体。 |
 
 ### 服务端表
 
@@ -833,12 +836,20 @@ HTTP 映射：400 输入错误；401 会话失效；404 不存在或无权；409
 
 ### 点击链锚点复核与独立项目生成
 
-`ClickChainWorkspace` 仅从终结运行及所属素材的 `FrameEvidenceStore` 读取 before/after/Missing。首次 before 可带明确的准入快照元数据：只表示准备期间选定的真实画面，复核页显示该语义，不声明派发瞬间像素。外发仍只包含已复核的 recorded 画面与 authored 连线，不输出原始派发时序。使用真实登记源访问器核对 MP4、编码样本和 PNG，按 `(sessionId, sourceFrameId)` 识别捕获帧；ticket、呈现 PTS 或重复显示样本不另造步骤。原始像素只在 `withDecodedFrameSuspending` 内交给既有安全输出器，不向页面传原始路径或将原 PNG 登记为正式资产。
+`ClickChainWorkspace` 仅从终结运行及所属素材的 `FrameEvidenceStore` 读取 before/after/Missing。首次 before 可带明确的准入快照元数据：只表示准备期间选定的真实画面，复核页显示该语义，不声明派发瞬间像素。外发仍只包含已复核的 recorded 画面与 authored 连线，不输出原始派发时序。使用真实登记源访问器核对 MP4、编码样本和 PNG，按 `(sessionId, sourceFrameId)` 识别捕获帧；ticket、呈现 PTS 或重复显示样本不另造步骤。完整原始像素由 `withDecodedFrameSuspending` 作用域供既有安全输出器使用；列表另经 `readUnreviewedThumbnail` 读取明确标记未复核的采样图，不向页面传原始路径或将原 PNG 登记为正式资产。
+
+缩略图按可见行组成最多 8 张的单任务批次，回访去重；原帧与已复核输出使用不同类型的摘要身份，即使字节相同也不互借复核语义。每批原帧只作一次新鲜 MP4 归属、摘要和样本观察，在证据锁外调用来源访问器，再在锁内重核会话、精确候选、PNG SHA/CRC/完整解压长度及所有原像素的不透明性。RGBA 的 Alpha 按 PNG 滤波器逐字节校验，使用固定缓冲，不先分配完整原图；最终 Bitmap 最多 220,000 像素，编码输入仍可占用最多 12 MiB，不宣称总峰值低于此值。返回批次前重核原项目、素材、撤销状态及复核 owner，切换运行、输出或可见行取消旧请求；未交付图片立即回收，已显示且可由回访共用的图片移除引用后由运行时回收。校验结论不跨批缓存，也不承诺已显示像素持续反映随后发生的删除。读取不改变草稿、遮挡、输出、确认数或生成权限；已复核图失败不回退显示原图。
 
 连续已完成动作的中间阶段允许作者选择前一 after 或紧邻后一 before；首尾分别为首动作 before 与末动作 after。缺图、非完成、跨 epoch、观测顺序或几何异常阻断整段路线；可另选完整范围或仅加入画面。点击区域由真实配置派发点经所选阶段图的 scale/offset 预填小范围，作者拖改并确认区域与后继；不读取手指、不推断按钮框或业务结果。区域确认绑定实际选中图和前后安全 PNG 摘要，换图/换输出立即失效。
 
+动作编辑器的百分比精调与拖动共用图像归一化区域，但四边文字仅驻留于当前运行、动作、编辑器打开实例和源图身份。应用前校验有限十进制、0–100% 和转换为存储 Float 后仍严格有面积；不套用拖动最小尺寸，不舍入已有小区域，未改的边保留原 Float。有效且实际改变时只调用既有区域修改入口，使本动作待确认；未改动应用、取消及弹窗返回不写草稿。繁忙、锁定、结果未知、已生成或缺图时禁止应用，取消仍可关闭；未应用输入不落盘，也不承诺配置变化恢复。新值沿用原自动暂存、返回落盘屏障及显式动作确认，不增加持久化字段或改变安全图片。
+
 私有复核 JSON 持久原始表单、范围、代表图、遮挡、实际输出复核和动作确认。单调 serial 与 owner 隔离迟到窗口；输出由精确 job 日志持有，PNG 文件及父目录同步后才保存引用。未知写入保留作者意图、重读再协调；旧 owner 可经明确放弃未保存修改后重开，不能覆盖新草稿。
+
+画面名称有效性与像素复核分别判断：仅当前所选代表图／画面的空名称阻断生成，并沿现有画面编辑入口修正。名称编辑与返回沿用自动暂存和落盘屏障；不清除遮挡、输出、画面复核或已确认动作，也不把已复核缩略图改回原帧。确认画面与组装导入输入时再次拒绝空名称，最终步骤字段仍由 ProjectStore 校验。
 
 SQLite v10 加法增加 `click_chain_imports`、`click_chain_files`、`click_chain_origins`。稳定 operationId 冻结输入；Workspace → Project 锁内检查原归属和新鲜证据，独立复制 MP4、安全 PNG 与新 Workspace，再将全部步骤/热点/边/起终点及 committed 回执同事务写入。复制前后核原片摘要和实际安全像素；相同帧复用、同页多热点及自环保留，限额整体检查。清理只读健康数据库的持久回执与精确日志；未知提交不清文件，committed 重试即使原项目已删除也不再次创建。仅 preparing 且写入已停止时可明确取消；后续使用新操作身份。
 
 新项目不依赖原录制 session 的存活。历史帧/动作事实只作为私有沿革，完整项目复制时映射到新本地步骤/边；观看、AI 和托管公开投影均不携带原片、运行身份或这些事实。正式安全 PNG 与独立原片继续使用现有手工画面修正，不要求再次打开原捕获锚点。
+
+从点击计划挂载的整理页打开已生成项目，会先经过原计划的脏输入离开决策。待打开目标绑定原计划及精确新项目 ID，只有明确放弃或按既有修订／摘要路径保存成功后才导航；保存期间禁止重复决策，失败仍在当前整理现场显示原因并保留两侧状态。该出口的弹窗正文有高度边界，优先呈现保存反馈，诊断与说明可滚动，三个决定入口不随正文滚出；普通返回／手动录制仍用原有弹窗。取消只撤销离开意图，普通返回／手动录制出口不会复用该目标。此守卫不参与生成、回执或原片事务，也不新增计划草稿落盘能力。

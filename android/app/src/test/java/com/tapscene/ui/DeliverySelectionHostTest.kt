@@ -56,8 +56,22 @@ class DeliverySelectionHostTest {
                 AiDraftImportFixtures.reviewDraftRegions(projects, projectId)
                 AiDraftImportFixtures.sealFixture(app, projectId, fixture)
             }
-            val latest = withContext(Dispatchers.IO) { AiDraftImportFixtures.sealFixture(app, projectId, fixture) }
+            val oldBinding = withContext(Dispatchers.IO) { store.readHostedRelease(old.id, old.contentDigest) }
+            val oldRoot = File(app.noBackupFilesDir, "release-store/releases/${old.id}")
+            fun oldFiles() = oldRoot.walkTopDown().filter { it.isFile }
+                .associate { it.relativeTo(oldRoot).path to ViewerPackageCodec.sha256(it) }
+            val oldBytes = oldFiles()
+            check(oldBytes.isNotEmpty() && oldBinding.projectId == projectId)
+            val latest = withContext(Dispatchers.IO) {
+                val edited = projects.renameProject(projectId, old.title, "Only the later draft contains this opening.")
+                val plan = checkNotNull(projects.readDraftAiConfig(projectId))
+                check(!projects.saveDraftAiConfig(projectId, edited.project.revision, plan).needsRepair)
+                AiDraftImportFixtures.sealFixture(app, projectId, fixture)
+            }
             check(old.id != latest.id)
+            val latestBinding = withContext(Dispatchers.IO) { store.readHostedRelease(latest.id, latest.contentDigest) }
+            check(latestBinding.projectRevision > oldBinding.projectRevision)
+            check(latestBinding.scene.goal != oldBinding.scene.goal && oldFiles() == oldBytes)
             var owner = ViewModelStore()
             suspend fun openWorkspace(): ReleaseWorkspace {
                 val result = withContext(Dispatchers.Main) {
@@ -70,8 +84,9 @@ class DeliverySelectionHostTest {
             try {
                 check(workspace.state.value.lastSealedId == null && workspace.state.value.deliverySelection == null)
                 withContext(Dispatchers.Main) { workspace.selectDeliveryRelease(old.id) }; settled(workspace)
-                val selection = DeliverySelection(old.id, old.contentDigest, projectId)
+                val selection = DeliverySelection(old.id, old.contentDigest, projectId, oldBinding.projectRevision)
                 check(workspace.state.value.deliverySelection == selection && workspace.state.value.deliveryRelease == old)
+                check(workspace.state.value.deliverySelection?.projectRevision != latestBinding.projectRevision)
                 check(workspace.state.value.lastSealedId == null) // Selecting an old version is never a new seal.
                 withContext(Dispatchers.Main) { workspace.openProjectDelivery(projectId) }
                 check(workspace.state.value.deliverySelection == selection)
@@ -80,6 +95,13 @@ class DeliverySelectionHostTest {
                 withContext(Dispatchers.Main) { workspace.selectDeliveryRelease(old.id) }; settled(workspace)
                 withContext(Dispatchers.Main) { workspace.prepareDeliveryExport() }; settled(workspace)
                 check(workspace.state.value.exportFile?.isFile == true)
+                withContext(Dispatchers.IO) {
+                    val checked = File(app.noBackupFilesDir, "old-delivery-export").apply { check(mkdir()) }
+                    val exported = ViewerPackageCodec.readPackage(checkNotNull(workspace.state.value.exportFile), checked, {}, null)
+                    check(exported.contentDigest == old.contentDigest)
+                    check(ViewerPackageCodec.writeScene(exported.scene).contentEquals(ViewerPackageCodec.writeScene(oldBinding.scene)))
+                    check(oldFiles() == oldBytes)
+                }
                 withContext(Dispatchers.Main) { workspace.cancelExportPicker() }
 
                 withContext(Dispatchers.IO) { projects.deleteProject(projectId) }
@@ -88,6 +110,8 @@ class DeliverySelectionHostTest {
                 check(workspace.state.value.deliverySelection == null && workspace.state.value.lastSealedId == null)
                 withContext(Dispatchers.Main) { workspace.selectDeliveryRelease(old.id) }; settled(workspace)
                 check(workspace.state.value.deliverySelection == selection) // Retained review, no live project lookup.
+                check(withContext(Dispatchers.IO) { store.readHostedRelease(old.id, old.contentDigest).projectRevision } == oldBinding.projectRevision)
+                check(oldFiles() == oldBytes)
 
                 val lock = ReleaseStore::class.java.getDeclaredField("mutex").apply { isAccessible = true }.get(null) as Mutex
                 lock.lock()
@@ -121,9 +145,9 @@ class DeliverySelectionHostTest {
                 withContext(Dispatchers.Main) { workspace.prepareExport(external.id) }; settled(workspace)
                 check(workspace.state.value.exportFile?.isFile == true)
                 withContext(Dispatchers.Main) { workspace.cancelExportPicker(); workspace.selectDeliveryRelease(old.id) }; settled(workspace)
-                withContext(Dispatchers.Main) { workspace.deleteRelease(old.id) }; settled(workspace)
+                withContext(Dispatchers.Main) { workspace.deleteRelease(old) }; settled(workspace)
                 check(workspace.state.value.deliverySelection == null && workspace.state.value.deliveryRelease == null)
-                println("HOST_DELIVERY_SELECTION old-version/digest/project-isolation/reopen/source-delete/late-export/import-boundary PASS; system picker/device NOT_RUN")
+                println("HOST_DELIVERY_SELECTION old-version/revision/digest/fixed-bytes/project-isolation/reopen/source-delete/late-export/import-boundary PASS; system picker/device NOT_RUN")
             } finally { withContext(Dispatchers.Main) { owner.clear() } }
         }
     }

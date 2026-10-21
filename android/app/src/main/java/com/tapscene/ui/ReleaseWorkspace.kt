@@ -8,8 +8,14 @@ import android.provider.DocumentsContract
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.tapscene.data.ReleaseCandidate
+import com.tapscene.data.ReleaseDeletionState
 import com.tapscene.data.ReleaseStore
 import com.tapscene.data.ReleaseSummary
+import com.tapscene.data.AiConfigurationOpen
+import com.tapscene.data.ImportedAiConfigurationSnapshot
+import com.tapscene.data.ImportedAiConfigurationState
+import com.tapscene.data.PlaybackOpen
+import com.tapscene.data.PlaybackSession
 import com.tapscene.sharing.OfflineShare
 import com.tapscene.packageformat.RenderPlan
 import com.tapscene.packageformat.ViewerPackageCodec
@@ -44,6 +50,7 @@ data class ReleasePlayback(
     val completedFromStart: Boolean = false,
     val traversalState: ViewerTraversal? = null,
     val video: LocalVideoRun? = null,
+    val playbackSession: PlaybackSession? = null,
 ) {
     val canGoBack: Boolean get() = traversalState?.pendingEdgeId != null || history.size > 1 || endEdgeId != null
     val currentState: ViewerScene.State? get() = scene.states.firstOrNull { it.id == currentStateId }
@@ -112,11 +119,19 @@ data class AiPackageConfiguration(
 }
 
 /** A deliberate delivery choice, independent from the last seal operation's result. */
-data class DeliverySelection(val releaseId: String, val contentDigest: String, val projectId: String)
+data class DeliverySelection(val releaseId: String, val contentDigest: String, val projectId: String, val projectRevision: Long)
+
+/** A failed result read never authorizes another deletion; retry only checks/finishes its commit. */
+data class ReleaseDeletionCheck(val release: ReleaseSummary, val cleanupPending: Boolean = false)
+
+/** A retained file is local metadata, not configuration supplied by the imported viewer package. */
+data class AiConfigurationChoice(val owner: String, val source: AiConfigurationOpen)
 
 data class ReleaseUiState(
     val releases: List<ReleaseSummary> = emptyList(),
     val pendingCandidates: List<ReleaseCandidate> = emptyList(),
+    val deletionCheck: ReleaseDeletionCheck? = null,
+    val libraryReadFailed: Boolean = false,
     val candidate: ReleaseCandidate? = null,
     val reviewStateId: String? = null,
     val reviewBitmap: Bitmap? = null,
@@ -125,6 +140,7 @@ data class ReleaseUiState(
     val reviewVideo: ReleaseVideoReview? = null,
     val player: ReleasePlayback? = null,
     val playerBitmap: Bitmap? = null,
+    val playbackResume: PlaybackOpen? = null,
     val busy: Boolean = false,
     val stage: String? = null,
     val message: String? = null,
@@ -137,6 +153,13 @@ data class ReleaseUiState(
     val aiConfiguration: AiPackageConfiguration? = null,
     /** Changes since the last confirmed load/save; cancellation may leave disk outcome unknown. */
     val aiConfigurationChanged: Boolean = false,
+    val aiConfigurationChoice: AiConfigurationChoice? = null,
+    val aiConfigurationOwner: String? = null,
+    val aiReplacesRetainedConfiguration: Boolean = false,
+    /** A save was started; until readback settles it, editing/export cannot assume no commit. */
+    val aiSaveNeedsCheck: Boolean = false,
+    /** Store returned this registration, but a complete library read has not confirmed it yet. */
+    val importLibraryCheck: ReleaseSummary? = null,
 ) {
     val deliveryRelease: ReleaseSummary? get() = deliverySelection?.let { selected ->
         releases.singleOrNull { it.id == selected.releaseId && it.contentDigest == selected.contentDigest && it.origin == "local" }
@@ -156,9 +179,14 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     private var task: Job? = null
     private var playerTask: Job? = null
     private var playerGeneration = 0L
+    private var playbackWriteSequence = 0L
+    private var lastPlaybackWrite: Job? = null
     private var reviewVideoTask: Job? = null
     private var reviewRunSequence = 0L
     private var aiConfigurationBaseline: AiPackageConfiguration? = null
+    private var aiConfigurationSource: AiConfigurationOpen? = null
+    private var aiConfigurationGeneration = 0L
+    private var aiSaveCheck: AiSaveCheck? = null
     private var exportDigest: String? = null
     private var exportLength: Long? = null
     private var pendingExportFile: File? = null
@@ -174,7 +202,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     fun reloadLibrary() = execute("读取演示库") {
         val items = withContext(Dispatchers.IO) { store.listReleases() }
         val candidates = withContext(Dispatchers.IO) { store.listCandidates() }
-        mutableState.update { current -> current.copy(releases = items, pendingCandidates = candidates,
+        mutableState.update { current -> current.copy(releases = items, pendingCandidates = candidates, libraryReadFailed = false,
             deliverySelection = current.deliverySelection?.takeIf { selected -> items.any {
                 it.id == selected.releaseId && it.contentDigest == selected.contentDigest && it.origin == "local"
             } }) }
@@ -356,7 +384,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
             val sealed = withContext(Dispatchers.IO) { store.seal(candidate.id, candidate.contentDigest) }
             val items = withContext(Dispatchers.IO) { store.listReleases() }
             mutableState.update { it.copy(releases = items, lastSealedId = sealed.id,
-                deliverySelection = DeliverySelection(sealed.id, sealed.contentDigest, candidate.projectId), candidate = null,
+                deliverySelection = DeliverySelection(sealed.id, sealed.contentDigest, candidate.projectId, candidate.projectRevision), candidate = null,
                 reviewStateId = null, reviewBitmap = null, reviewRegionId = null, reviewRegionBitmap = null, player = null, playerBitmap = null) }
             message("版本已封存，可保存离线观看包")
         }
@@ -366,7 +394,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         closeReviewVideo()
         val candidate = state.value.candidate ?: return
         execute("读取固定成品起点") {
-            mutableState.update { it.copy(player = null, playerBitmap = null) }
+            mutableState.update { it.copy(player = null, playerBitmap = null, playbackResume = null) }
             val start = candidate.scene.states.first { it.id == candidate.scene.startStateId }
             val bitmap = decode(candidate.scene, start.id, candidate.id)
             val updated = withContext(Dispatchers.IO) { store.recordTraversal(candidate.id, candidate.contentDigest, null, false) }
@@ -376,10 +404,51 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     fun openRelease(id: String) = execute("读取离线演示") {
-        mutableState.update { it.copy(player = null, playerBitmap = null) }
-        val scene = withContext(Dispatchers.IO) { store.loadRelease(id) }
-        val bitmap = decode(scene, scene.startStateId, null)
-        mutableState.update { it.copy(playerBitmap = bitmap, player = initialPlayback(scene, null)) }
+        mutableState.update { it.copy(player = null, playerBitmap = null, playbackResume = null) }
+        // An immediate reopen after Close waits for the already displayed frame's bounded
+        // checkpoint write before taking a new store session. Exit itself stays responsive.
+        lastPlaybackWrite?.takeUnless { it === currentCoroutineContext()[Job] }?.join()
+        val opened = withContext(Dispatchers.IO) { store.openPlayback(id) }
+        if (opened.checkpoint != null || opened.checkpointUnavailable) {
+            mutableState.update { it.copy(playbackResume = opened) }
+        } else showPlayback(opened, fromStart = true, save = false)
+    }
+
+    /** A late button from another version/choice cannot select or reset the current one. */
+    fun resumePlayback(ownerToken: String, fromStart: Boolean) {
+        val opened = state.value.playbackResume ?: return
+        if (opened.session.ownerToken != ownerToken || (!fromStart && opened.checkpoint == null)) return
+        execute(if (fromStart) "从头读取演示" else "读取上次画面") {
+            if (state.value.playbackResume?.session != opened.session) return@execute
+            showPlayback(opened, fromStart, save = true)
+        }
+    }
+
+    private suspend fun showPlayback(opened: PlaybackOpen, fromStart: Boolean, save: Boolean) {
+        val traversal = if (fromStart) ViewerTraversal.start(opened.scene) else checkNotNull(opened.checkpoint)
+        val bitmap = decode(opened.scene, traversal.currentStateId, null, opened.session)
+        currentCoroutineContext().ensureActive()
+        val player = initialPlayback(opened.scene, null).applyTraversal(traversal).copy(playbackSession = opened.session)
+        mutableState.update { it.copy(playerBitmap = bitmap, player = player, playbackResume = null) }
+        if (save) persistPlayback(player)
+    }
+
+    /** Save only a frame already published to the player; close cannot abandon that small write.
+     * Store session ownership prevents this completion from overwriting a newer open/reimport. */
+    private suspend fun persistPlayback(player: ReleasePlayback) {
+        if (player.candidateId != null) return
+        val session = player.playbackSession ?: return
+        val sequence = ++playbackWriteSequence
+        lastPlaybackWrite = currentCoroutineContext()[Job]
+        withContext(NonCancellable + Dispatchers.IO) {
+            val saved = runCatching { store.savePlayback(session, player.traversal(), sequence) }.getOrDefault(false)
+            if (!saved) withContext(NonCancellable + Dispatchers.Main.immediate) {
+                if (sequence == playbackWriteSequence && state.value.player?.playbackSession == session) {
+                    message("观看记录未能保存，当前画面保留；退出后可能需要从头开始。")
+                }
+            }
+        }
+        currentCoroutineContext().ensureActive()
     }
 
     fun tapPlayer(x: Float, y: Float) {
@@ -472,14 +541,16 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     private fun commitPlayerAction(player: ReleasePlayback, next: ViewerTraversal, edgeId: String) = launchPlayerWork {
         var displayed = false
         try {
-            val bitmap = if (next.currentStateId != player.currentStateId) decode(player.scene, next.currentStateId, player.candidateId)
+            val bitmap = if (next.currentStateId != player.currentStateId) decode(player.scene, next.currentStateId, player.candidateId, player.playbackSession)
                 else state.value.playerBitmap
             currentCoroutineContext().ensureActive()
             check(bitmap != null) { "目标画面不可用" }
             // Publish the real visit before writing coverage. A close during disk IO must not
             // record an unseen destination or restore this player from an old completion.
-            mutableState.update { it.copy(playerBitmap = bitmap, player = player.applyTraversal(next).copy(video = null)) }
+            val displayedPlayer = player.applyTraversal(next).copy(video = null)
+            mutableState.update { it.copy(playerBitmap = bitmap, player = displayedPlayer) }
             displayed = true
+            persistPlayback(displayedPlayer)
             val candidate = player.candidateId?.let { candidateId -> withContext(Dispatchers.IO) {
                 store.recordTraversal(candidateId, ViewerPackageCodec.contentDigest(player.scene), edgeId, false)
             } }
@@ -488,9 +559,10 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
                 player = it.player?.copy(visitedEdgeIds = candidate?.visitedEdgeIds ?: next.visitedEdgeIds,
                     completedFromStart = candidate?.completedPath ?: next.completedFromStart)) }
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) {
+        catch (error: Exception) {
             if (player.traversal().pendingEdgeId != null) failPlayerTransition(player.traversal().mediaRunId)
-            message(if (displayed) "试走记录未能保存，请点重来" else "目标画面未能读取，可重试或返回")
+            message(if (error is PlaybackSessionExpiredException) error.message.orEmpty()
+                else if (displayed) "试走记录未能保存，请点重来" else "目标画面未能读取，可重试或返回")
         }
     }
 
@@ -504,13 +576,14 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         if (state.value.busy || !player.canGoBack) return
         launchPlayerWork {
             val previous = player.traversal().previous(player.scene)
-            val bitmap = decode(player.scene, previous.currentStateId, player.candidateId)
+            val bitmap = decode(player.scene, previous.currentStateId, player.candidateId, player.playbackSession)
             val candidate = player.candidateId?.let { id -> withContext(Dispatchers.IO) {
                 store.rewindTraversal(id, ViewerPackageCodec.contentDigest(player.scene))
             } }
             currentCoroutineContext().ensureActive()
             mutableState.update { it.copy(candidate = candidate ?: it.candidate, playerBitmap = bitmap,
                 player = player.applyTraversal(previous).copy(video = null)) }
+            persistPlayback(player.applyTraversal(previous).copy(video = null))
         }
     }
 
@@ -523,7 +596,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         if (state.value.busy) return
         launchPlayerWork {
             val restarted = player.traversal().restart(player.scene)
-            val bitmap = decode(player.scene, restarted.currentStateId, player.candidateId)
+            val bitmap = decode(player.scene, restarted.currentStateId, player.candidateId, player.playbackSession)
             val candidate = player.candidateId?.let { id -> withContext(Dispatchers.IO) {
                 store.recordTraversal(id, ViewerPackageCodec.contentDigest(player.scene), null, false)
             } }
@@ -532,13 +605,14 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
                 player = player.applyTraversal(restarted).copy(video = null,
                     visitedEdgeIds = candidate?.visitedEdgeIds ?: restarted.visitedEdgeIds,
                     completedFromStart = candidate?.completedPath ?: restarted.completedFromStart)) }
+            persistPlayback(player.applyTraversal(restarted).copy(video = null))
         }
     }
 
     fun closePlayer() {
         cancelPlayerWork()
         if (state.value.busy) cancel()
-        mutableState.update { it.copy(player = null, playerBitmap = null) }
+        mutableState.update { it.copy(player = null, playerBitmap = null, playbackResume = null) }
     }
 
     private fun launchPlayerWork(block: suspend () -> Unit) {
@@ -548,7 +622,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         playerTask = viewModelScope.launch {
             try { block() }
             catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { message("播放未完成，请重试") }
+            catch (error: Exception) { message(if (error is PlaybackSessionExpiredException) error.message.orEmpty() else "播放未完成，请重试") }
             finally { if (generation == playerGeneration) mutableState.update { it.copy(busy = false, stage = null) } }
         }
     }
@@ -561,29 +635,122 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         if (active) mutableState.update { it.copy(busy = false, stage = null) }
     }
 
-    fun importPackage(uri: Uri) = execute("隔离验证离线观看包") {
-        mutableState.update { it.copy(lastImportedId = null) }
-        val imported = withContext(Dispatchers.IO) {
-            app.contentResolver.openInputStream(uri)?.use { store.importPackage(it) }
-                ?: error("无法读取选定文件")
+    fun importPackage(uri: Uri) {
+        var registered: ReleaseSummary? = null
+        execute("隔离验证离线观看包", settle = { failure ->
+            // execute keeps busy until this reconciliation finishes. The receipt belongs only
+            // to this import; neither list order nor a same-title version identifies its result.
+            val receipt = registered
+            mutableState.update { current ->
+                if (receipt != null) {
+                    val confirmed = !current.libraryReadFailed && current.releases.singleOrNull { it.id == receipt.id } == receipt
+                    current.copy(lastImportedId = receipt.id.takeIf { confirmed },
+                        importLibraryCheck = receipt.takeUnless { confirmed },
+                        message = when {
+                            !confirmed -> "观看包已完成登记，但暂未核对完整演示库。请返回刷新；取消不会撤回已经登记的副本。"
+                            failure != null -> "已核对，本次观看包已在演示库；处理停止没有撤回已完成的登记。"
+                            else -> "完整观看包已加入演示库；文件校验不代表来源或隐私认证"
+                        })
+                } else {
+                    val detail = when (failure) {
+                        is IllegalArgumentException, is IllegalStateException -> failure.message?.takeIf { it.length <= 240 && '/' !in it && '\\' !in it }
+                        else -> null
+                    }
+                    current.copy(lastImportedId = null, importLibraryCheck = null,
+                        message = if (failure is CancellationException) "已取消本次导入；已经完整保存的版本保留，可返回演示库核对。"
+                        else detail ?: "导入未完成，请检查观看包和可用空间后重试。")
+                }
+            }
+        }) {
+            mutableState.update { it.copy(lastImportedId = null, importLibraryCheck = null) }
+            withContext(Dispatchers.IO) {
+                app.contentResolver.openInputStream(uri)?.use { input ->
+                    // Capture before closing the input or returning to Main: either can fail
+                    // after the Store has already installed (or found) the exact fixed version.
+                    store.importPackage(input).also { registered = it }
+                } ?: error("无法读取选定文件")
+            }
         }
-        val items = withContext(Dispatchers.IO) { store.listReleases() }
-        mutableState.update { it.copy(releases = items, lastImportedId = imported.id) }
-        message("完整观看包已加入演示库；文件校验不代表来源或隐私认证")
     }
 
-    fun clearImportResult() { mutableState.update { it.copy(lastImportedId = null) } }
+    fun clearImportResult() { mutableState.update { it.copy(lastImportedId = null, importLibraryCheck = null) } }
 
-    fun deleteRelease(id: String) = execute("删除本机观看副本") {
-        withContext(Dispatchers.IO) { store.deleteRelease(id) }
-        val items = withContext(Dispatchers.IO) { store.listReleases() }
-        mutableState.update { it.copy(releases = items,
-            player = it.player?.takeUnless { player -> player.candidateId == null && player.scene.releaseId == id },
-            playerBitmap = it.playerBitmap.takeUnless { _ -> it.player?.scene?.releaseId == id },
-            lastSealedId = it.lastSealedId?.takeUnless { selected -> selected == id },
-            deliverySelection = it.deliverySelection?.takeUnless { selected -> selected.releaseId == id },
-            aiConfiguration = it.aiConfiguration?.takeUnless { config -> config.scene.releaseId == id }) }
+    fun deleteRelease(expected: ReleaseSummary) {
+        if (state.value.deletionCheck != null) {
+            message("请先核对上次删除结果，再删除其他版本。")
+            return
+        }
+        execute("删除本机观看副本", settle = { failure -> settleReleaseDeletion(expected, failure) }) {
+            withContext(Dispatchers.IO) { store.deleteRelease(expected) }
+        }
     }
+
+    fun retryReleaseDeletion() {
+        val pending = state.value.deletionCheck ?: return
+        execute(if (pending.cleanupPending) "继续清理本机副本" else "核对删除结果",
+            settle = { failure -> settleReleaseDeletion(pending.release, failure) }) {
+            if (pending.cleanupPending) withContext(Dispatchers.IO) { store.retryDeletionCleanup(pending.release) }
+        }
+    }
+
+    /** Run after the normal refresh, even if that refresh failed or the task was cancelled. */
+    private suspend fun settleReleaseDeletion(expected: ReleaseSummary, failure: Throwable?) {
+        val result = withContext(Dispatchers.IO) { runCatching { store.inspectDeletion(expected) }.getOrNull() }
+        withContext(Dispatchers.Main) {
+            if (result in setOf(ReleaseDeletionState.DELETED, ReleaseDeletionState.CLEANUP_PENDING)) {
+                if (aiConfigurationBaseline?.scene?.matches(expected) == true) aiConfigurationBaseline = null
+                val removeAiSource = aiConfigurationSource?.summary?.sameBinding(expected) == true
+                if (removeAiSource) { aiConfigurationSource = null; aiSaveCheck = null; aiConfigurationGeneration++ }
+                mutableState.update { current ->
+                    val removePlayer = current.player?.let { it.candidateId == null && it.scene.matches(expected) } == true
+                    val removeAi = removeAiSource || current.aiConfiguration?.scene?.matches(expected) == true
+                    current.copy(
+                        releases = current.releases.filterNot { it.sameBinding(expected) },
+                        player = current.player.takeUnless { removePlayer },
+                        playerBitmap = current.playerBitmap.takeUnless { removePlayer },
+                        playbackResume = current.playbackResume?.takeUnless { it.scene.matches(expected) },
+                        lastSealedId = current.lastSealedId?.takeUnless { it == expected.id },
+                        lastImportedId = current.lastImportedId?.takeUnless { it == expected.id },
+                        importLibraryCheck = current.importLibraryCheck?.takeUnless { it.sameBinding(expected) },
+                        deliverySelection = current.deliverySelection?.takeUnless {
+                            it.releaseId == expected.id && it.contentDigest == expected.contentDigest
+                        },
+                        aiConfiguration = current.aiConfiguration.takeUnless { removeAi },
+                        aiConfigurationChanged = current.aiConfigurationChanged && !removeAi,
+                        aiConfigurationChoice = current.aiConfigurationChoice.takeUnless { removeAi },
+                        aiConfigurationOwner = current.aiConfigurationOwner.takeUnless { removeAi },
+                        aiReplacesRetainedConfiguration = current.aiReplacesRetainedConfiguration && !removeAi,
+                        aiSaveNeedsCheck = current.aiSaveNeedsCheck && !removeAi,
+                    )
+                }
+            }
+            if (result == ReleaseDeletionState.REPLACED) mutableState.update { current ->
+                // A same-ID replacement may already own new edits; never clear that owner's data.
+                current.copy(releases = current.releases.filterNot { it.sameBinding(expected) })
+            }
+            val pending = when (result) {
+                null -> ReleaseDeletionCheck(expected)
+                ReleaseDeletionState.CLEANUP_PENDING -> ReleaseDeletionCheck(expected, cleanupPending = true)
+                else -> null
+            }
+            val note = when (result) {
+                ReleaseDeletionState.PRESENT -> if (failure is CancellationException)
+                    "已取消删除；本机副本、观看记录和 AI 配置保留。"
+                    else "已核对：本机副本仍保留，没有完成删除。"
+                ReleaseDeletionState.REPLACED -> "确认的版本已变化，未删除当前副本。请重新打开后核对。"
+                ReleaseDeletionState.DELETED -> "本机副本、观看记录和 AI 配置已删除。创作项目及保存到应用外的文件保留。"
+                ReleaseDeletionState.CLEANUP_PENDING -> "本机副本已删除；剩余本机文件尚未清理完成。请继续清理，保存到应用外的文件不受影响。"
+                null -> "暂时无法核对删除结果。请重新核对，确认前不要重复删除或导入同一版本。"
+            }
+            mutableState.update { it.copy(deletionCheck = pending, message = note) }
+        }
+    }
+
+    private fun ViewerScene.matches(expected: ReleaseSummary) = releaseId == expected.id &&
+        ViewerPackageCodec.contentDigest(this) == expected.contentDigest
+
+    private fun ReleaseSummary.sameBinding(other: ReleaseSummary) = id == other.id &&
+        contentDigest == other.contentDigest && origin == other.origin && sealedAt == other.sealedAt
 
     /** Project entry must not inherit another project's previous delivery choice. */
     fun openProjectDelivery(projectId: String) {
@@ -602,7 +769,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
                     ?: error("请选择已复核封存的本机版本。")
                 val binding = withContext(Dispatchers.IO) { store.readHostedRelease(id, summary.contentDigest) }
                 currentCoroutineContext().ensureActive()
-                mutableState.update { it.copy(deliverySelection = DeliverySelection(id, summary.contentDigest, binding.projectId)) }
+                mutableState.update { it.copy(deliverySelection = DeliverySelection(id, summary.contentDigest, binding.projectId, binding.projectRevision)) }
             } finally { deliverySelectionActive = false }
         }
         return true
@@ -688,23 +855,60 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         // Keep the snapshot for receivers that open asynchronously. There is no delivery receipt.
     }
 
-    fun openAiPackage(id: String) = execute("读取固定版本与动画配置") {
-        aiConfigurationBaseline = null
-        mutableState.update { it.copy(aiConfiguration = null, aiConfigurationChanged = false) }
-        val scene = withContext(Dispatchers.IO) { store.loadRelease(id) }
-        val saved = withContext(Dispatchers.IO) { store.readAiPlan(id) }
-        val fromDraft = withContext(Dispatchers.IO) { store.hasDraftAiPlan(id) }
-        val config = if (saved == null) AiPackageConfiguration(scene, listOf(RenderPlan.Visit(java.util.UUID.randomUUID().toString(), scene.startStateId, null, 90)))
-            else AiPackageConfiguration(scene, saved.visits, saved.effects, saved.width, saved.height, fromDraft)
-        aiConfigurationBaseline = config
-        mutableState.update { it.copy(aiConfiguration = config, aiConfigurationChanged = false) }
+    fun openAiPackage(id: String) {
+        if (state.value.aiSaveNeedsCheck) { message("请先核对保存结果，或明确离开当前编辑后再选择版本。"); return }
+        execute("读取固定版本与动画配置") {
+            val generation = ++aiConfigurationGeneration
+            // A failed read must leave the previous editor, its baseline and unapplied input intact.
+            val source = withContext(Dispatchers.IO) { store.openAiConfiguration(id) }
+            if (generation != aiConfigurationGeneration) return@execute
+            val owner = "$id:$generation"
+            aiConfigurationSource = source
+            aiSaveCheck = null
+            if (source.importedSnapshot?.byteLength != null) {
+                aiConfigurationBaseline = source.plan?.let { configuration(source, it) }
+                mutableState.update { it.copy(aiConfiguration = null, aiConfigurationChanged = false,
+                    aiConfigurationChoice = AiConfigurationChoice(owner, source), aiConfigurationOwner = owner,
+                    aiReplacesRetainedConfiguration = true, aiSaveNeedsCheck = false) }
+                return@execute
+            }
+            val config = configuration(source, source.plan)
+            aiConfigurationBaseline = config
+            mutableState.update { it.copy(aiConfiguration = config, aiConfigurationChanged = false,
+                aiConfigurationChoice = null, aiConfigurationOwner = owner,
+                aiReplacesRetainedConfiguration = false, aiSaveNeedsCheck = false) }
+        }
     }
 
+    private fun configuration(source: AiConfigurationOpen, plan: RenderPlan?): AiPackageConfiguration =
+        if (plan == null) AiPackageConfiguration(source.scene,
+            listOf(RenderPlan.Visit(java.util.UUID.randomUUID().toString(), source.scene.startStateId, null, 90)))
+        else AiPackageConfiguration(source.scene, plan.visits, plan.effects, plan.width, plan.height, source.fromDraft)
+
+    fun chooseAiConfiguration(owner: String, useRetained: Boolean) {
+        if (state.value.busy || savePickerPending) return
+        val choice = state.value.aiConfigurationChoice?.takeIf { it.owner == owner } ?: return
+        if (useRetained && choice.source.plan == null) return
+        val config = configuration(choice.source, choice.source.plan.takeIf { useRetained })
+        val changed = aiConfigurationBaseline?.let { !config.sameAnimation(it) } ?: true
+        mutableState.update { it.copy(aiConfiguration = config, aiConfigurationChoice = null,
+            aiConfigurationChanged = changed, message = null) }
+    }
+
+    /** Actual departure ends the editor, but never cancels a task, export or file-picker owner. */
+    fun leaveAiPage() = resetAiEditor()
+
     fun clearAiConfiguration() {
-        if (!state.value.busy && !savePickerPending) {
-            aiConfigurationBaseline = null
-            mutableState.update { it.copy(aiConfiguration = null, aiConfigurationChanged = false) }
-        }
+        if (!state.value.busy && !savePickerPending) resetAiEditor()
+    }
+
+    private fun resetAiEditor() {
+        aiConfigurationGeneration++
+        aiConfigurationBaseline = null
+        aiConfigurationSource = null; aiSaveCheck = null
+        mutableState.update { it.copy(aiConfiguration = null, aiConfigurationChanged = false,
+            aiConfigurationChoice = null, aiConfigurationOwner = null,
+            aiReplacesRetainedConfiguration = false, aiSaveNeedsCheck = false) }
     }
 
     fun chooseAiEdge(edgeId: String) = editAi { config ->
@@ -761,7 +965,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         }
     }
     private fun editAi(change: (AiPackageConfiguration) -> AiPackageConfiguration) {
-        if (state.value.busy || savePickerPending) return
+        if (state.value.busy || savePickerPending || state.value.aiSaveNeedsCheck) return
         val config = state.value.aiConfiguration ?: return
         if (config.fromDraft) { message("此计划随草稿封存，请回项目的动画计划调整后重新封存。"); return }
         try {
@@ -772,18 +976,75 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         catch (error: IllegalStateException) { message(error.message ?: "动画配置无效。") }
         catch (error: IllegalArgumentException) { message(error.message ?: "动画配置无效。") }
     }
-    fun prepareAiExport() = execute("生成并回读验证 AI 数据包") {
-        val config = state.value.aiConfiguration ?: error("请先选择固定版本。")
-        val plan = config.resolve()
-        exportDigest = null; exportLength = null; pendingExportFile = null; exportDeliverySelection = null
-        mutableState.update { it.copy(exportFile = null) }
-        val file = withContext(Dispatchers.IO) { store.exportAiRelease(config.scene.releaseId, plan) }
-        // The store has confirmed its local configuration write, before hashing or the system picker.
-        aiConfigurationBaseline = config
-        mutableState.update { it.copy(aiConfigurationChanged = false) }
-        exportDigest = withContext(Dispatchers.IO) { ViewerPackageCodec.sha256(file) }; exportLength = file.length()
-        mutableState.update { it.copy(exportFile = file) }
+    fun prepareAiExport() {
+        if (state.value.aiSaveNeedsCheck) { message("请先核对上次保存结果。"); return }
+        val source = aiConfigurationSource ?: run { message("请重新选择固定版本。"); return }
+        val config = state.value.aiConfiguration ?: return
+        val owner = state.value.aiConfigurationOwner ?: return
+        val plan = runCatching { config.resolve() }.getOrElse { message("请先选好播放顺序并检查效果。"); return }
+        val check = AiSaveCheck(owner, source, config, plan)
+        execute("生成并回读验证 AI 数据包", refreshLibrary = false, settle = { failure -> settleAiSave(check, failure) }) {
+            aiSaveCheck = check
+            mutableState.update { it.copy(aiSaveNeedsCheck = true, exportFile = null) }
+            exportDigest = null; exportLength = null; pendingExportFile = null; exportDeliverySelection = null
+            val file = withContext(Dispatchers.IO) {
+                if (source.summary.origin == "imported") {
+                    store.exportImportedAiRelease(source.summary, checkNotNull(source.importedSnapshot), plan)
+                } else {
+                    checkNotNull(source.localSnapshot) { "请重新打开本机版本并核对动画配置。" }
+                    store.exportAiRelease(config.scene.releaseId, plan, expectedLocal = source.summary)
+                }
+            }
+            exportDigest = withContext(Dispatchers.IO) { ViewerPackageCodec.sha256(file) }; exportLength = file.length()
+            mutableState.update { it.copy(exportFile = file) }
+        }
     }
+
+    fun recheckAiSave() {
+        val pending = aiSaveCheck ?: return
+        execute("核对本机动画配置", refreshLibrary = false, settle = { failure -> settleAiSave(pending, failure) }) {}
+    }
+
+    private suspend fun settleAiSave(check: AiSaveCheck, failure: Throwable?) {
+        val imported = check.source.summary.origin == "imported"
+        val result = runCatching {
+            if (imported) store.inspectImportedAiConfiguration(check.source.summary,
+                checkNotNull(check.source.importedSnapshot), check.plan)
+            else store.inspectLocalAiConfiguration(check.source.summary,
+                checkNotNull(check.source.localSnapshot), check.plan)
+        }.getOrNull()
+        withContext(Dispatchers.Main) {
+            if (state.value.aiConfigurationOwner != check.owner || aiSaveCheck !== check) return@withContext
+            val matches = result == ImportedAiConfigurationState.MATCHES_TARGET
+            val unchanged = result == ImportedAiConfigurationState.PREVIOUS_UNCHANGED
+            if (matches) {
+                val bytes = check.plan.toBytes()
+                val digest = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+                val snapshot = ImportedAiConfigurationSnapshot(bytes.size.toLong(), digest)
+                aiConfigurationSource = if (imported) check.source.copy(plan = check.plan, importedSnapshot = snapshot)
+                    else check.source.copy(plan = check.plan, localSnapshot = snapshot)
+                aiConfigurationBaseline = check.config
+            }
+            if (matches || unchanged) aiSaveCheck = null
+            if (!matches || failure != null) {
+                exportDigest = null; exportLength = null; pendingExportFile = null
+            }
+            val note = when {
+                matches && failure == null && state.value.exportFile != null -> "已核对，本机配置与本页一致；接下来选择保存位置。"
+                matches -> "已核对，本机配置与本页一致；动画包尚未另存。"
+                unchanged -> "已核对，本机配置仍是保存前的内容。本页输入保留，可检查后重试。"
+                result == ImportedAiConfigurationState.CHANGED_OR_REPLACED -> "版本或本机配置已变化，未继续覆盖。本页输入保留，请重新核对；返回后可重新选择配置来源。"
+                else -> "暂时无法核对本机配置的保存结果。本页输入保留，请重新核对；不要重复保存。"
+            }
+            mutableState.update { it.copy(aiSaveNeedsCheck = !matches && !unchanged,
+                aiConfigurationChanged = if (matches) false else it.aiConfigurationChanged,
+                aiReplacesRetainedConfiguration = (imported && matches) || it.aiReplacesRetainedConfiguration,
+                exportFile = it.exportFile.takeIf { matches && failure == null }, message = note) }
+        }
+    }
+
+    private data class AiSaveCheck(val owner: String, val source: AiConfigurationOpen,
+        val config: AiPackageConfiguration, val plan: RenderPlan)
 
     fun beginExportPicker(deliveryPageVisible: Boolean = true): Boolean {
         val selected = exportDeliverySelection
@@ -865,7 +1126,7 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         message(if (removed) reason else "$reason。所选位置可能仍有空文件，请手动删除")
     }
 
-    private suspend fun decode(scene: ViewerScene, stateId: String, candidateId: String?): Bitmap = withContext(Dispatchers.IO) {
+    private suspend fun decode(scene: ViewerScene, stateId: String, candidateId: String?, session: PlaybackSession? = null): Bitmap = withContext(Dispatchers.IO) {
         val item = scene.states.firstOrNull { it.id == stateId } ?: error("观看画面缺失")
         val file = if (candidateId != null) store.candidateAssetFile(candidateId, stateId) else store.releaseAssetFile(scene.releaseId, stateId)
         currentCoroutineContext().ensureActive()
@@ -875,6 +1136,12 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
         if (bitmap.width != item.width || bitmap.height != item.height) {
             bitmap.recycle()
             error("实际画面尺寸不一致，未切换画面")
+        }
+        // The file path may have been deleted/reimported while decoding. A post-read binding
+        // check prevents replacement pixels from being published under the previous graph.
+        if (session != null && !store.isPlaybackCurrent(session)) {
+            bitmap.recycle()
+            throw PlaybackSessionExpiredException()
         }
         currentCoroutineContext().ensureActive()
         bitmap
@@ -917,35 +1184,49 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     fun message(text: String) { mutableState.update { it.copy(message = text) } }
     fun clearMessage() { mutableState.update { it.copy(message = null) } }
 
-    private fun execute(label: String, block: suspend () -> Unit) {
+    private fun execute(label: String, refreshLibrary: Boolean = true, settle: (suspend (Throwable?) -> Unit)? = null, block: suspend () -> Unit) {
         if (state.value.busy || savePickerPending || state.value.shareChooserOpen || state.value.pendingShare != null || state.value.exportFile != null) return
         cancellationNote = null
         mutableState.update { it.copy(busy = true, stage = label, message = null) }
         task = viewModelScope.launch {
+            var failure: Throwable? = null
             try { block() }
             catch (cancelled: CancellationException) {
-                mutableState.update { it.copy(player = null, playerBitmap = null, pendingShare = null) }
-                message(cancellationNote ?: "已取消当前处理；完整保存的版本保留")
+                failure = cancelled
+                if (settle == null) {
+                    mutableState.update { it.copy(player = null, playerBitmap = null, playbackResume = null, pendingShare = null) }
+                    message(cancellationNote ?: "已取消当前处理；完整保存的版本保留")
+                }
                 throw cancelled
             } catch (error: Exception) {
+                failure = error
+                if (error is PlaybackSessionExpiredException) mutableState.update { it.copy(playbackResume = null) }
                 val detail = when (error) {
                     is DocumentSaveException -> error.message
                     is IllegalArgumentException, is IllegalStateException -> error.message?.takeIf { it.length <= 240 && '/' !in it && '\\' !in it }
                     is IOException -> null
                     else -> null
                 }
-                message(detail ?: "$label 未完成，请检查文件和可用空间后重试")
+                if (settle == null) message(detail ?: "$label 未完成，请检查文件和可用空间后重试")
             } finally {
                 // A cancellation can arrive after an atomic commit. Re-read library truth without
                 // deleting the successfully published version or manufacturing a success message.
                 withContext(NonCancellable + Dispatchers.IO) {
                     try {
-                        runCatching { store.listReleases() }.getOrNull()?.let { items -> mutableState.update { it.copy(releases = items) } }
-                        runCatching { store.listCandidates() }.getOrNull()?.let { candidates -> mutableState.update { it.copy(pendingCandidates = candidates) } }
+                        // AI configuration checks must not recreate missing storage or recover
+                        // unrelated library writes before deciding whether the result is unknown.
+                        if (refreshLibrary) {
+                            runCatching { store.listReleases() }.fold(
+                                onSuccess = { items -> mutableState.update { it.copy(releases = items, libraryReadFailed = false) } },
+                                onFailure = { mutableState.update { it.copy(libraryReadFailed = true) } },
+                            )
+                            runCatching { store.listCandidates() }.getOrNull()?.let { candidates -> mutableState.update { it.copy(pendingCandidates = candidates) } }
+                        }
                     } finally {
                         // Returning to a cancelled dispatcher can throw again. Clear inside this
                         // barrier, last: busy prevents another operation from starting before here.
-                        mutableState.update { it.copy(busy = false, stage = null) }
+                        try { settle?.invoke(failure) }
+                        finally { mutableState.update { it.copy(busy = false, stage = null) } }
                     }
                 }
             }
@@ -953,5 +1234,6 @@ class ReleaseWorkspace(application: Application) : AndroidViewModel(application)
     }
 
     private class DocumentSaveException(message: String) : Exception(message)
+    private class PlaybackSessionExpiredException : IllegalStateException("此观看会话已失效，请返回演示库重新打开。")
     private companion object { const val MAX_VISITS = 256 }
 }

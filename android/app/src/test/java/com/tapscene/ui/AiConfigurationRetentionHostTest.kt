@@ -15,6 +15,7 @@ import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -107,7 +108,9 @@ class AiConfigurationRetentionHostTest {
                     check(workspace.state.value.aiConfigurationChanged)
                     checkNotNull(workspace.state.value.aiConfiguration).resolve().toBytes().also { workspace.prepareAiExport() }
                 }
-                settled(workspace)
+                settled(workspace, allowSaveMessage = true)
+                check(!workspace.state.value.aiSaveNeedsCheck)
+                check(workspace.state.value.message == "已核对，本机配置与本页一致；接下来选择保存位置。")
                 check(!workspace.state.value.aiConfigurationChanged) { "The persisted plan must be clean before opening the system picker" }
                 val exported = checkNotNull(workspace.state.value.exportFile)
                 withContext(Dispatchers.Main) { workspace.leaveDeliveryPage() }
@@ -125,11 +128,26 @@ class AiConfigurationRetentionHostTest {
                 withContext(Dispatchers.Main) {
                     check(workspace.beginExportPicker())
                     check(workspace.state.value.exportFile == null && !workspace.state.value.aiConfigurationChanged)
+                    val pendingFile = ReleaseWorkspace::class.java.getDeclaredField("pendingExportFile").apply { isAccessible = true }
+                    val pickerPending = ReleaseWorkspace::class.java.getDeclaredField("savePickerPending").apply { isAccessible = true }
+                    val completedTask = task(workspace)
+                    check(pendingFile.get(workspace) === exported && pickerPending.getBoolean(workspace))
+                    workspace.leaveAiPage()
+                    check(workspace.state.value.aiConfiguration == null && workspace.state.value.aiConfigurationOwner == null)
+                    check(workspace.state.value.aiConfigurationChoice == null && !workspace.state.value.aiConfigurationChanged)
+                    check(!workspace.state.value.aiSaveNeedsCheck && !workspace.state.value.aiReplacesRetainedConfiguration)
+                    check(task(workspace) === completedTask)
+                    check(pendingFile.get(workspace) === exported && pickerPending.getBoolean(workspace)) {
+                        "Route departure must preserve the exact export already owned by the pending picker"
+                    }
+                    check(exported.isFile && !workspace.beginExportPicker())
+                    // Exercise the existing picker cancellation callback, not an external SAF provider.
                     workspace.cancelExportPicker()
-                    check(!workspace.state.value.aiConfigurationChanged)
-                    check(checkNotNull(workspace.state.value.aiConfiguration).resolve().toBytes().contentEquals(planBytes))
-                    workspace.clearAiConfiguration()
+                    check(pendingFile.get(workspace) == null && !pickerPending.getBoolean(workspace))
                     check(workspace.state.value.aiConfiguration == null && !workspace.state.value.aiConfigurationChanged)
+                }
+                withContext(Dispatchers.IO) {
+                    check(checkNotNull(ReleaseStore(app).readAiPlan(scene.releaseId)).toBytes().contentEquals(planBytes))
                 }
                 planBytes
             }
@@ -173,18 +191,26 @@ class AiConfigurationRetentionHostTest {
             check(workspace.state.value.aiConfiguration == null && !workspace.state.value.aiConfigurationChanged)
             withContext(Dispatchers.Main) { workspace.openAiPackage(scene.releaseId) }
             settled(workspace)
+            workspace.state.value.aiConfigurationChoice?.let { choice ->
+                check(workspace.state.value.aiConfiguration == null && choice.source.plan != null)
+                withContext(Dispatchers.Main) { workspace.chooseAiConfiguration(choice.owner, true) }
+            }
             check(workspace.state.value.aiConfiguration?.scene?.releaseId == scene.releaseId)
             return block(workspace)
         } finally {
-            val pending = withContext(Dispatchers.Main) { task(workspace).also { owner.clear() } }
-            pending?.join()
+            withContext(NonCancellable) {
+                val pending = withContext(Dispatchers.Main) { task(workspace).also { owner.clear() } }
+                pending?.join()
+            }
         }
     }
 
-    private suspend fun settled(workspace: ReleaseWorkspace) {
+    private suspend fun settled(workspace: ReleaseWorkspace, allowSaveMessage: Boolean = false) {
         checkNotNull(task(workspace)).join()
         check(!workspace.state.value.busy && workspace.state.value.stage == null)
-        check(workspace.state.value.message == null) { "Workspace operation failed: ${workspace.state.value.message}" }
+        if (!allowSaveMessage) check(workspace.state.value.message == null) {
+            "Workspace operation failed: ${workspace.state.value.message}"
+        }
     }
 
     private fun task(workspace: ReleaseWorkspace) = ReleaseWorkspace::class.java.getDeclaredField("task")

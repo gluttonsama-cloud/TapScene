@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -73,9 +74,15 @@ import com.tapscene.clickplan.ClickChainReviewTarget
 import com.tapscene.clickplan.nextRequiredReview
 import com.tapscene.clickplan.validationIssue
 import com.tapscene.clickplan.ClickChainStageRow
+import com.tapscene.clickplan.ClickChainThumbnailRequest
+import com.tapscene.clickplan.ClickChainThumbnailSource
+import com.tapscene.clickplan.visibleThumbnailRequests
 import com.tapscene.data.ProjectHotspot
 import com.tapscene.media.OpaqueMask
 import com.tapscene.ui.MaskDialog
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -106,30 +113,78 @@ internal data class ClickChainReviewCallbacks(
     val onActionLabelChange: (String) -> Unit = {},
     val onActionRectChange: (OpaqueMask) -> Unit = {},
     val onConfirmAction: () -> Unit = {},
-    val loadThumbnail: suspend (String, String) -> Bitmap? = { _, _ -> null },
+    val loadThumbnails: suspend (List<ClickChainThumbnailRequest>) -> Map<ClickChainThumbnailRequest, Bitmap> = { emptyMap() },
 )
 
 /** One workbench, with focused image/action subpanels rather than a multi-page wizard. */
 @Composable
 internal fun ClickChainReviewContent(state: ClickChainReviewUiState, callbacks: ClickChainReviewCallbacks) {
-    when {
-        state.frameEditor != null -> ClickChainFramePanel(state.frameEditor, state, callbacks)
-        state.actionEditor != null -> ClickChainActionPanel(state.actionEditor, state, callbacks)
-        else -> ClickChainWorkbench(state, callbacks)
+    // Editors replace the workbench, but must not discard this run's reading position.
+    // A different recording starts at its own beginning, even at the same navigation slot.
+    key(state.runId) {
+        val listState = rememberLazyListState()
+        when {
+            state.frameEditor != null -> ClickChainFramePanel(state.frameEditor, state, callbacks)
+            state.actionEditor != null -> ClickChainActionPanel(state.actionEditor, state, callbacks)
+            else -> ClickChainWorkbench(state, callbacks, listState)
+        }
     }
 }
 
 @Composable
-private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: ClickChainReviewCallbacks) {
+private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: ClickChainReviewCallbacks,
+    listState: LazyListState) {
     val editable = !state.busy && !state.loading && !state.editingLocked && state.createdProjectId == null && !state.outcomeUnknown
     val next = state.nextRequiredReview()
     val validation = state.validationIssue()
     val largeText = LocalDensity.current.fontScale > 1.2f
     var settingsExpanded by rememberSaveable(state.runId) { mutableStateOf(false) }
     LaunchedEffect(validation) { if (validation != null) settingsExpanded = true }
-    val listState = rememberLazyListState()
-    val visibleKeys by remember { derivedStateOf { listState.layoutInfo.visibleItemsInfo.map { it.key }.toSet() } }
+    val visibleKeys by remember(listState) { derivedStateOf { listState.layoutInfo.visibleItemsInfo.map { it.key }.toSet() } }
     val frames = remember(state.frames) { state.frames.associateBy { it.key } }
+    val nextFrame = (next as? ClickChainReviewTarget.Frame)?.let { frames[it.key] }
+    val nextStage = (next as? ClickChainReviewTarget.Frame)?.let { target ->
+        state.stages.firstOrNull { it.selectedKey == target.key }
+    }
+    val nameRepair = next is ClickChainReviewTarget.Frame &&
+        (if (state.framesOnly) nextFrame?.let { it.reviewed && it.title.isBlank() } == true
+            else nextStage?.let { it.reviewed && it.title.isBlank() } == true)
+    val nextFrameLabel = if (next is ClickChainReviewTarget.Frame) {
+        (if (state.framesOnly) nextFrame?.title else nextStage?.title)?.takeIf { it.isNotBlank() }
+            ?: "画面 ${if (state.framesOnly) state.frames.indexOfFirst { it.key == next.key } + 1 else (nextStage?.index ?: 0) + 1}"
+    } else null
+    val requests = state.visibleThumbnailRequests(visibleKeys)
+    val loader by rememberUpdatedState(callbacks.loadThumbnails)
+    val loaded by produceState<ClickChainThumbnailBatch?>(null, state.runId, requests) {
+        value = null
+        if (requests.isEmpty()) return@produceState
+        var pending: Map<ClickChainThumbnailRequest, Bitmap> = emptyMap()
+        var published = false
+        try {
+            pending = loader(requests)
+            // A non-cooperative loader may return after this run, output or viewport was replaced.
+            currentCoroutineContext().ensureActive()
+            value = ClickChainThumbnailBatch(state.runId, requests, pending)
+            published = true
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Missing thumbnails are not missing evidence; the original review control stays usable.
+        } finally {
+            // Published images can be shared by revisits and still belong to a rendered frame.
+            // Only never-published results are safe to recycle; displayed batches are left to GC.
+            if (!published) pending.values.distinct().forEach { if (!it.isRecycled) it.recycle() }
+        }
+    }
+    val thumbnails = loaded?.takeIf { it.runId == state.runId && it.requests == requests }?.bitmaps.orEmpty()
+    fun thumbnail(frame: ClickChainFrameRow?, visible: Boolean): Bitmap? {
+        // Only synthetic previews supply pixels directly; Layoutlib may not settle viewport state.
+        frame?.thumbnail?.let { return it }
+        if (!visible) return null
+        val source = frame?.thumbnailSource ?: return null
+        val request = ClickChainThumbnailRequest(frame.key, source)
+        return if (request in requests) thumbnails[request] else null
+    }
     BackHandler { if (!state.busy) callbacks.onBack() }
     Column(Modifier.fillMaxSize().imePadding()) {
         ShellTopBar("整理点击链", onBack = { if (!state.busy) callbacks.onBack() })
@@ -188,7 +243,7 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
             if (state.framesOnly) {
                 item { Text("选择要加入的画面", style = MaterialTheme.typography.titleSmall) }
                 items(state.frames, key = { "frame:${it.key}" }) { frame ->
-                    ClickChainFrameRowContent(frame, editable, "frame:${frame.key}" in visibleKeys, state.runId, callbacks)
+                    ClickChainFrameRowContent(frame, editable, thumbnail(frame, "frame:${frame.key}" in visibleKeys), callbacks)
                 }
                 if (state.frames.isEmpty() && !state.loading) item { Text("暂无可加入的画面。", style = MaterialTheme.typography.bodyMedium) }
             } else {
@@ -201,7 +256,7 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
                     item(key = "stage:${stage.index}") {
                         val revisit = stage.selectedKey != null && state.stages.take(position).any { it.selectedKey == stage.selectedKey }
                         ClickChainStageContent(stage, frames[stage.selectedKey], revisit, editable,
-                            "stage:${stage.index}" in visibleKeys, state.runId, callbacks)
+                            thumbnail(frames[stage.selectedKey], "stage:${stage.index}" in visibleKeys), callbacks)
                     }
                     state.actions.getOrNull(position)?.let { action ->
                         item(key = "action:${action.actionId}") { ClickChainActionRowContent(action, editable, callbacks) }
@@ -226,7 +281,7 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
                 if (state.framesOnly) " · 仅加入画面" else " · 动作 ${state.confirmedActionCount}/${state.actions.size}",
                 style = MaterialTheme.typography.labelLarge)
             if (editable && next != null) Text(when (next) {
-                is ClickChainReviewTarget.Frame -> "下一项：${frames[next.key]?.title ?: state.stages.firstOrNull { it.selectedKey == next.key }?.title.orEmpty()}"
+                is ClickChainReviewTarget.Frame -> "下一项：$nextFrameLabel${if (nameRepair) " · 补全名称" else ""}"
                 is ClickChainReviewTarget.Action -> "下一项：核对动作 ${state.actions.firstOrNull { it.actionId == next.actionId }?.number} 的点击区域与去向"
             }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (state.retryCreate && state.editingLocked && !state.busy && !state.loading && !state.outcomeUnknown)
@@ -237,7 +292,9 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
                 state.createdProjectId != null -> Button({ callbacks.onOpenProject(state.createdProjectId) }, button) { Text("打开新项目") }
                 state.outcomeUnknown -> Button(callbacks.onRetry, button) { Text("核对生成结果") }
                 state.issue?.startsWith("输入尚未保存") == true -> Button(callbacks.onRetry, button) { Text("重试保存输入") }
-                next is ClickChainReviewTarget.Frame -> Button({ callbacks.onReviewFrame(next.key) }, button) { Text("继续复核画面") }
+                next is ClickChainReviewTarget.Frame -> Button({ callbacks.onReviewFrame(next.key) }, button) {
+                    Text(if (nameRepair) "补全画面名称" else "继续复核画面")
+                }
                 next is ClickChainReviewTarget.Action -> Button({ callbacks.onReviewAction(next.actionId) }, button) { Text("继续核对动作") }
                 state.editingLocked && !state.retryCreate -> OutlinedButton(callbacks.onBack, button) { Text("返回录制") }
                 else -> Button(callbacks.onCreate, button, enabled = state.canCreate) {
@@ -250,16 +307,16 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
 
 @Composable
 private fun ClickChainStageContent(stage: ClickChainStageRow, frame: ClickChainFrameRow?, revisit: Boolean,
-    editable: Boolean, visible: Boolean, runId: String?, callbacks: ClickChainReviewCallbacks) {
+    editable: Boolean, thumbnail: Bitmap?, callbacks: ClickChainReviewCallbacks) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
-            ClickChainThumbnail(frame, stage.selectedKey == null, visible, runId, callbacks)
+            ClickChainThumbnail(frame, stage.selectedKey == null, thumbnail)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("画面 ${(stage.index + 1).toString().padStart(2, '0')}${if (revisit) " · 回访" else ""}",
                     style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                Text(stage.title.ifBlank { "待补画面" }, style = MaterialTheme.typography.titleSmall,
+                Text(stage.title.ifBlank { if (stage.selectedKey == null) "待补画面" else "未填写名称" }, style = MaterialTheme.typography.titleSmall,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Text(when { stage.selectedKey == null -> "缺少画面证据"; stage.reviewed -> "已复核"; else -> "待复核" },
+                Text(when { stage.selectedKey == null -> "缺少画面证据"; frame != null -> frame.thumbnailLabel(); stage.reviewed -> "已复核"; else -> "待复核" },
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 frame?.selectionNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 TextButton({ stage.selectedKey?.let(callbacks.onReviewFrame) }, enabled = editable && stage.selectedKey != null) {
@@ -278,14 +335,14 @@ private fun ClickChainStageContent(stage: ClickChainStageRow, frame: ClickChainF
 }
 
 @Composable
-private fun ClickChainFrameRowContent(frame: ClickChainFrameRow, editable: Boolean, visible: Boolean,
-    runId: String?, callbacks: ClickChainReviewCallbacks) {
+private fun ClickChainFrameRowContent(frame: ClickChainFrameRow, editable: Boolean, thumbnail: Bitmap?,
+    callbacks: ClickChainReviewCallbacks) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         Checkbox(frame.selected, { callbacks.onToggleFrame(frame.key, it) }, enabled = editable)
-        ClickChainThumbnail(frame, false, visible, runId, callbacks)
+        ClickChainThumbnail(frame, false, thumbnail)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(frame.title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Text(if (frame.reviewed) "已复核" else "待复核", style = MaterialTheme.typography.bodySmall,
+            Text(frame.title.ifBlank { "未填写名称" }, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(frame.thumbnailLabel(), style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             frame.selectionNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             TextButton({ callbacks.onReviewFrame(frame.key) }, enabled = editable) { Text(if (frame.reviewed) "查看画面" else "复核画面") }
@@ -293,23 +350,22 @@ private fun ClickChainFrameRowContent(frame: ClickChainFrameRow, editable: Boole
     }
 }
 
-/** Composed offscreen rows do not load images. No image cache survives leaving a visible row. */
-private data class ClickChainThumbnailResult(val runId: String?, val key: String, val digest: String, val bitmap: Bitmap)
+/** No batch survives a different run, source identity or set of visible requests. */
+private data class ClickChainThumbnailBatch(val runId: String?, val requests: List<ClickChainThumbnailRequest>,
+    val bitmaps: Map<ClickChainThumbnailRequest, Bitmap>)
+
+private fun ClickChainFrameRow.thumbnailLabel(): String = when (thumbnailSource) {
+    is ClickChainThumbnailSource.OriginalUnreviewed -> "原始画面 · 未复核"
+    is ClickChainThumbnailSource.ReviewedOutput -> "已复核画面"
+    null -> if (reviewed) "已复核" else "待复核"
+}
 
 @Composable
-private fun ClickChainThumbnail(frame: ClickChainFrameRow?, missing: Boolean, visible: Boolean,
-    runId: String?, callbacks: ClickChainReviewCallbacks) {
-    val loader by rememberUpdatedState(callbacks.loadThumbnail)
-    val loaded by produceState<ClickChainThumbnailResult?>(null, runId, frame?.key, frame?.thumbnailDigest, visible) {
-        value = null
-        val digest = frame?.thumbnailDigest
-        if (visible && frame != null && digest != null) loader(frame.key, digest)?.let { value = ClickChainThumbnailResult(runId, frame.key, digest, it) }
-    }
-    val bitmap = (frame?.thumbnail ?: loaded?.takeIf { visible && it.runId == runId && it.key == frame?.key &&
-        it.digest == frame?.thumbnailDigest }?.bitmap)?.takeUnless { it.isRecycled }
+private fun ClickChainThumbnail(frame: ClickChainFrameRow?, missing: Boolean, thumbnail: Bitmap?) {
+    val bitmap = thumbnail?.takeUnless { it.isRecycled }
     Box(Modifier.size(64.dp, 96.dp).background(MaterialTheme.colorScheme.surfaceContainerHighest)
         .border(1.dp, MaterialTheme.colorScheme.outlineVariant), contentAlignment = Alignment.Center) {
-        if (bitmap != null) Image(bitmap.asImageBitmap(), "${frame?.title}，已复核画面缩略图",
+        if (bitmap != null) Image(bitmap.asImageBitmap(), "${frame?.title}，${frame?.thumbnailLabel()}缩略图",
             Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
         else Text(when { missing -> "待补画面"; frame?.reviewed == true -> "已复核\n查看画面"; else -> "待复核\n打开画面" },
             Modifier.padding(4.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -373,7 +429,10 @@ private fun ClickChainFramePanel(editor: ClickChainFrameEditor, state: ClickChai
                 Column(modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     OutlinedTextField(editor.title, callbacks.onFrameTitleChange, Modifier.fillMaxWidth(),
-                        enabled = idle, label = { Text("画面标题") }, singleLine = true)
+                        enabled = idle, label = { Text("画面标题") }, singleLine = true, isError = editor.title.isBlank(),
+                        supportingText = if (editor.title.isBlank()) {
+                            { Text("请填写画面名称；已有画面复核与遮挡会保留。") }
+                        } else null)
                     editor.selectionNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                     if (reviewMode) Text("可双指放大检查完整输出，确认没有遗漏的敏感内容。", style = MaterialTheme.typography.bodySmall)
                     else {
@@ -468,6 +527,16 @@ private fun ClickChainActionPanel(editor: ClickChainActionEditor, state: ClickCh
     val bitmap = editor.bitmap?.takeUnless { it.isRecycled }
     val target = editor.targetThumbnail?.takeUnless { it.isRecycled }
     val idle = !state.busy
+    val precisionEnabled = idle && !state.loading && !state.editingLocked && !state.outcomeUnknown &&
+        state.createdProjectId == null && bitmap != null && target != null
+    // Only this editor opening and actual source image own the raw strings. They are not saved
+    // across configuration/process recreation, or borrowed by a replacement run/action/image.
+    var precisionForm by remember(state.runId, editor.actionId, editor.instanceKey, bitmap) {
+        mutableStateOf<ClickChainRectPercentages?>(null)
+    }
+    var precisionOriginal by remember(state.runId, editor.actionId, editor.instanceKey, bitmap) {
+        mutableStateOf(editor.rect)
+    }
     val close: () -> Unit = { if (idle) callbacks.onCloseEditor() }
     BackHandler(onBack = close)
     // Re-keying resets EditorCanvas's in-flight drag on a different action or safe image.
@@ -491,6 +560,8 @@ private fun ClickChainActionPanel(editor: ClickChainActionEditor, state: ClickCh
                 Column(modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("拖动区域移动，拖右下角调整大小。", style = MaterialTheme.typography.bodySmall)
+                    OutlinedButton({ precisionOriginal = editor.rect; precisionForm = ClickChainRectPercentages.from(editor.rect) },
+                        enabled = precisionEnabled, modifier = Modifier.heightIn(min = 48.dp)) { Text("范围精调") }
                     editor.selectionNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                     OutlinedTextField(editor.label, callbacks.onActionLabelChange, Modifier.fillMaxWidth(),
                         enabled = idle, label = { Text("动作名称") }, singleLine = true)
@@ -523,6 +594,16 @@ private fun ClickChainActionPanel(editor: ClickChainActionEditor, state: ClickCh
         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         ClickChainEditorFooter(state.busy, callbacks.onCancel, close, "确认点击区域与后继",
             idle && bitmap != null && target != null && editor.label.isNotBlank(), callbacks.onConfirmAction)
+    }
+    precisionForm?.let { form ->
+        ClickChainActionPrecisionDialog(precisionOriginal, form, precisionEnabled,
+            onChange = { precisionForm = it }, onDismiss = { precisionForm = null }, onApply = { rect ->
+                if (precisionEnabled && precisionForm != null) {
+                    precisionForm = null
+                    // Opening, dismissing and applying unchanged geometry must not clear confirmation.
+                    if (rect != editor.rect) callbacks.onActionRectChange(rect)
+                }
+            })
     }
 }
 
