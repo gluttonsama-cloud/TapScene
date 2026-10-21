@@ -774,9 +774,16 @@ class ClickEntryNavigationHostTest {
             title = "已生成的新项目", operationId = createdId))
         val fixture = DirtyPlanCreatedProjectFixture(saved, run, createdId, setOf(sourceId, createdId, decoyId), reviewDraft)
         compose.runOnIdle { projects.reload() }
-        waitFor("保留修改的原点击链")
+        compose.waitUntil(30_000) {
+            compose.waitForIdle()
+            !projects.state.value.busy && !projects.state.value.loadFailed &&
+                projects.state.value.projects.map { it.id }.toSet() == fixture.projectIds
+        }
         awaitProjectAndMediaIdle()
-        compose.onNodeWithText("保留修改的原点击链").performClick()
+        // Compact home viewports do not compose every project row until the real list scrolls.
+        compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("保留修改的原点击链"))
+        waitFor("保留修改的原点击链")
+        compose.onNodeWithText("保留修改的原点击链").performScrollTo().assertIsDisplayed().assertIsEnabled().performClick()
         waitFor("素材")
         awaitProjectAndMediaIdle()
         compose.onNodeWithText("素材").assertIsEnabled().performClick().assertIsSelected()
@@ -785,7 +792,7 @@ class ClickEntryNavigationHostTest {
             compose.onNodeWithText("手动录屏").performClick()
             waitFor("录制操作")
             compose.onNodeWithText("悬浮编排").performScrollTo().performClick()
-        } else compose.onNodeWithText("悬浮编排").performClick()
+        } else compose.onNodeWithText("悬浮编排").performScrollTo().assertIsDisplayed().assertIsEnabled().performClick()
         waitFor("保存计划")
         compose.waitUntil(30_000) {
             compose.onAllNodes(hasText("保存计划") and isEnabled()).fetchSemanticsNodes().size == 1
