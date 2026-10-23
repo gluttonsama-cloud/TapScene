@@ -1,16 +1,26 @@
 package com.tapscene.ui.shell
 
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import com.tapscene.MainActivity
 import com.tapscene.data.HostProjectFixture
 import com.tapscene.data.HostSqlite
 import com.tapscene.data.ReleaseSummary
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.ExternalResource
@@ -28,8 +38,17 @@ import org.robolectric.annotation.SQLiteMode
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class DeliveryProductPagesHostTest {
+    private var previousRequestedSize: String? = null
+
     @get:Rule(order = 0) val database = object : ExternalResource() {
-        override fun before() { HostSqlite.configure() }
+        override fun before() {
+            HostSqlite.configure()
+            previousRequestedSize = System.setProperty("robolectric.windowManager.useRequestedSize", "true")
+        }
+        override fun after() {
+            val key = "robolectric.windowManager.useRequestedSize"
+            previousRequestedSize?.let { System.setProperty(key, it) } ?: System.clearProperty(key)
+        }
     }
     @get:Rule(order = 1) val compose = createAndroidComposeRule<MainActivity>()
 
@@ -49,6 +68,7 @@ class DeliveryProductPagesHostTest {
         compose.onNodeWithText("尚未生成").assertDoesNotExist()
         compose.onNodeWithText("保存到文件").assertDoesNotExist()
         compose.onNodeWithText("系统分享").assertDoesNotExist()
+        compose.onNodeWithText("播放此版本").assertDoesNotExist()
         compose.onNodeWithText("继续成品复核").performClick()
         compose.onNodeWithText("AI 数据包").performScrollTo().performClick()
         compose.onNodeWithContentDescription("返回").performClick()
@@ -77,7 +97,8 @@ class DeliveryProductPagesHostTest {
                 currentDraftRevision = draftRevision.value, onBackToChecks = { checks++ })
         }
         compose.onNodeWithText(release.title).assertIsDisplayed()
-        compose.onNodeWithText("封存修订 7").assertIsDisplayed()
+        compose.onNodeWithText("封存修订 7").assertDoesNotExist()
+        compose.onNodeWithText("封存于", substring = true).assertDoesNotExist()
         compose.runOnIdle { draftRevision.value = 8L }
         compose.onNodeWithText("草稿已更新至修订 8，可能包含此版本未收录的后续修改。").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("封存修订 8").assertDoesNotExist()
@@ -87,20 +108,26 @@ class DeliveryProductPagesHostTest {
         assertEquals(emptyList<String>(), exported)
         assertEquals(emptyList<String>(), shared)
         compose.onNodeWithText("返回成品复核").assertDoesNotExist()
-        compose.onNodeWithText("查看封存成品").performScrollTo().performClick()
+        compose.onNodeWithText("播放此版本").performScrollTo().performClick()
         assertEquals(listOf(release.id), viewed)
         compose.onNodeWithText(release.id).assertDoesNotExist()
         compose.onNodeWithText(release.contentDigest).assertDoesNotExist()
         compose.onNodeWithText("版本详情").performScrollTo().performClick()
+        compose.onNodeWithText("封存修订 7").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("封存于", substring = true).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText(release.id).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("内容摘要").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText(release.contentDigest).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("版本详情").performScrollTo().performClick()
         compose.onNodeWithText(release.id).assertDoesNotExist()
         compose.onNodeWithText(release.contentDigest).assertDoesNotExist()
+        compose.onNodeWithText("封存修订 7").assertDoesNotExist()
+        compose.onNodeWithText("封存于", substring = true).assertDoesNotExist()
         compose.onNodeWithText("保存到文件").performScrollTo().performClick()
         compose.onNodeWithText("正在准备").assertIsNotEnabled().performClick()
         compose.onNodeWithText("系统分享").assertIsNotEnabled().performClick()
+        compose.onNodeWithText("播放此版本").performScrollTo().assertIsNotEnabled().performClick()
+        assertEquals(listOf(release.id), viewed)
         compose.onNodeWithText("返回项目检查").performScrollTo().assertIsNotEnabled().performClick()
         assertEquals(1, checks)
         assertEquals(listOf(release.id), exported)
@@ -108,6 +135,8 @@ class DeliveryProductPagesHostTest {
         compose.runOnIdle { busy.value = false }
         compose.onNodeWithText("系统分享").performScrollTo().performClick()
         compose.onNodeWithText("系统分享").assertIsNotEnabled().performClick()
+        compose.onNodeWithText("播放此版本").performScrollTo().assertIsNotEnabled().performClick()
+        assertEquals(listOf(release.id), viewed)
         assertEquals(listOf(release.id), shared)
         assertEquals(release.id, selected.value.id)
         compose.runOnIdle { busy.value = false }
@@ -127,11 +156,13 @@ class DeliveryProductPagesHostTest {
                 onExport = {}, onShare = {}, sealedRevision = sealedRevision.value,
                 currentDraftRevision = draftRevision.value, onBackToChecks = {})
         }
-        compose.onNodeWithText("封存修订 7").assertIsDisplayed()
         compose.onNodeWithText("此版本内容已固定，不会随项目草稿更新。").assertIsDisplayed()
+        compose.onNodeWithText("封存修订 7").assertDoesNotExist()
+        compose.onNodeWithText("版本详情").performScrollTo().performClick()
+        compose.onNodeWithText("封存修订 7").performScrollTo().assertIsDisplayed()
         assertNoDraftComparison()
         compose.runOnIdle { draftRevision.value = null }
-        compose.onNodeWithText("封存修订 7").assertIsDisplayed()
+        compose.onNodeWithText("封存修订 7").performScrollTo().assertIsDisplayed()
         assertNoDraftComparison()
         compose.runOnIdle { sealedRevision.value = null; draftRevision.value = 8L }
         compose.onNodeWithText("封存修订", substring = true).assertDoesNotExist()
@@ -169,7 +200,9 @@ class DeliveryProductPagesHostTest {
                 onExport = { exports++ }, onShare = {}, sealedRevision = 7L, currentDraftRevision = 8L,
                 onBackToChecks = { checks++ })
         }
+        compose.onNodeWithText("版本详情").performScrollTo().performClick()
         compose.onNodeWithText("封存修订 7").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("版本详情").performScrollTo().performClick()
         compose.onNodeWithText("草稿已更新至修订 8，可能包含此版本未收录的后续修改。").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("返回项目检查").performScrollTo().performClick()
         compose.onNodeWithText("版本详情").performScrollTo().performClick()
@@ -187,7 +220,9 @@ class DeliveryProductPagesHostTest {
             DeliveryOptionsScreen({}, {}, {}, { account++ }, { versions++ },
                 sealedSummary = release.copy(origin = "imported"), onExport = {}, onShare = {}, onHosting = { hosting++ })
         }
-        compose.onNodeWithText("导入于", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("导入于", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("版本详情").performScrollTo().performClick()
+        compose.onNodeWithText("导入于", substring = true).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("保存到文件").assertIsEnabled()
         compose.onNodeWithText("系统分享").assertIsNotEnabled()
         compose.onNodeWithText("选择本机封存版").performScrollTo().performClick()
@@ -244,8 +279,76 @@ class DeliveryProductPagesHostTest {
         }
     }
 
-    private fun content(block: @Composable () -> Unit) {
-        compose.runOnUiThread { compose.activity.setContent { TapSceneTheme(content = block) } }
+    @Test
+    @Config(qualifiers = "w320dp-h640dp-xhdpi")
+    fun smallDeliveryShowsBoundPlaybackBeforeScrollingAndBlocksUnavailableActions() {
+        val selected = mutableStateOf<ReleaseSummary?>(release)
+        val busy = mutableStateOf(false)
+        val playbackAvailable = mutableStateOf(true)
+        val played = mutableListOf<String>()
+        var exports = 0
+        var shares = 0
+        content(fontScale = 1.2f) {
+            val item = selected.value
+            DeliveryOptionsScreen({}, {}, {}, {}, {}, sealedSummary = item,
+                onExport = { exports++ }, onShare = { shares++ }, busy = busy.value,
+                onOpenSealed = if (playbackAvailable.value) ({ played += checkNotNull(item).id; busy.value = true }) else null,
+                sealedRevision = 7L, currentDraftRevision = 8L, onBackToChecks = {})
+        }
+        compose.onNodeWithTag("delivery-surface").assertWidthIsEqualTo(320.dp).assertHeightIsEqualTo(640.dp)
+        compose.onAllNodesWithText("播放此版本").assertCountEquals(1)
+        val play = compose.onNode(hasText("播放此版本") and hasClickAction()).assertIsEnabled()
+        val viewport = compose.onNode(SemanticsMatcher.keyIsDefined(SemanticsActions.ScrollBy))
+            .fetchSemanticsNode().boundsInRoot
+        val visible = play.fetchSemanticsNode().boundsInRoot.intersect(viewport)
+        val full = play.getUnclippedBoundsInRoot()
+        // Before ANY scroll: a visible label/sliver does not prove a usable playback action.
+        with(compose.density) {
+            assertTrue(visible.width >= 48.dp.toPx() && visible.height >= 48.dp.toPx())
+            assertEquals(full.left.toPx(), visible.left, 1f)
+            assertEquals(full.top.toPx(), visible.top, 1f)
+            assertEquals(full.right.toPx(), visible.right, 1f)
+            assertEquals(full.bottom.toPx(), visible.bottom, 1f)
+        }
+        val warning = compose.onNodeWithText("草稿已更新至修订 8，可能包含此版本未收录的后续修改。")
+        assertTrue(play.getUnclippedBoundsInRoot().bottom <= warning.getUnclippedBoundsInRoot().top)
+        assertTrue(warning.getUnclippedBoundsInRoot().bottom <=
+            compose.onNodeWithText("保存到文件").getUnclippedBoundsInRoot().top)
+        compose.onNodeWithText("封存修订 7").assertDoesNotExist()
+        compose.onNodeWithText("封存于", substring = true).assertDoesNotExist()
+        play.performTouchInput { click(center) }
+        compose.waitForIdle()
+        assertEquals(listOf(release.id), played)
+        play.assertIsNotEnabled().performTouchInput { click(center) }
+        assertEquals(listOf(release.id), played)
+
+        // The same visible title does not permit retaining the previous version's callback.
+        val other = release.copy(id = "other-selected-fixed-version", contentDigest = "1".repeat(64))
+        compose.runOnIdle { selected.value = other; busy.value = false }
+        play.assertIsEnabled().performTouchInput { click(center) }
+        compose.waitForIdle()
+        assertEquals(listOf(release.id, other.id), played)
+        assertEquals(0, exports)
+        assertEquals(0, shares)
+        compose.runOnIdle { playbackAvailable.value = false; busy.value = false }
+        compose.onNodeWithText("播放此版本").assertDoesNotExist()
+        compose.runOnIdle { playbackAvailable.value = true; selected.value = null }
+        compose.onNodeWithText("播放此版本").assertDoesNotExist()
+        compose.onNodeWithText("当前未选择封存版本").assertIsDisplayed()
+        assertEquals(listOf(release.id, other.id), played)
+    }
+
+    private fun content(fontScale: Float? = null, block: @Composable () -> Unit) {
+        compose.runOnUiThread {
+            compose.activity.setContent {
+                val density = LocalDensity.current
+                CompositionLocalProvider(LocalDensity provides Density(density.density, fontScale ?: density.fontScale)) {
+                    TapSceneTheme {
+                        Box(Modifier.fillMaxSize().testTag("delivery-surface")) { block() }
+                    }
+                }
+            }
+        }
         compose.waitForIdle()
     }
 

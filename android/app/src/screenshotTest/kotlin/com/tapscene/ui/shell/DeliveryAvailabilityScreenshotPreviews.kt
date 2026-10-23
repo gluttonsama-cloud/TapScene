@@ -36,6 +36,16 @@ fun DeliveryUpdatedDraftLandscapePreview() = AvailabilityPreviewSurface {
 }
 
 @PreviewTest
+@Preview(name = "delivery_playback_short_large_text", widthDp = 800, heightDp = 360, locale = "zh-rCN", fontScale = 1.5f, showBackground = true)
+@Composable
+fun DeliveryPlaybackShortLargeTextPreview() = AvailabilityPreviewSurface {
+    DeliveryOptionsScreen({}, {}, {}, {}, {},
+        sealedSummary = ReleasePreviewFixture.summary.copy(title = "活动报名：选择活动、核对报名信息并确认结果"),
+        onExport = {}, onShare = {}, onOpenSealed = {},
+        sealedRevision = 3L, currentDraftRevision = 4L, onBackToChecks = {})
+}
+
+@PreviewTest
 @Preview(name = "settings_supported_formats", widthDp = 320, heightDp = 1050, locale = "zh-rCN", fontScale = 1.2f, showBackground = true)
 @Composable
 fun SettingsSupportedFormatsPreview() = AvailabilityPreviewSurface {

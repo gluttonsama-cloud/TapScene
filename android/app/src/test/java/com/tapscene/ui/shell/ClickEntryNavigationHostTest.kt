@@ -657,7 +657,7 @@ class ClickEntryNavigationHostTest {
         compose.onNodeWithText("确认封存").performClick()
         waitFor("交付方式")
         compose.onNodeWithText("返回成品复核").assertDoesNotExist()
-        compose.onNodeWithText("查看封存成品").performScrollTo().performClick()
+        compose.onNodeWithText("播放此版本").performScrollTo().performClick()
         compose.waitUntil(30_000) { compose.waitForIdle(); !releases.state.value.busy && releases.state.value.player != null }
         assertEquals(fixed.scene.releaseId, releases.state.value.player?.scene?.releaseId)
         compose.onNodeWithText("还没有待复核成品").assertDoesNotExist()
@@ -718,12 +718,14 @@ class ClickEntryNavigationHostTest {
         waitFor("交付方式")
         compose.waitUntil(30_000) { compose.waitForIdle(); !releases.state.value.busy }
         assertEquals(sealed.id, releases.state.value.deliveryRelease?.id)
-        compose.onNodeWithText("查看封存成品").performScrollTo().performClick()
+        compose.onNodeWithText("播放此版本").performScrollTo().performClick()
         compose.waitUntil(30_000) { compose.waitForIdle(); !releases.state.value.busy && releases.state.value.player != null }
         assertEquals(sealed.id, releases.state.value.player?.scene?.releaseId)
         compose.onNodeWithText("退出").performClick()
         waitFor("交付方式")
         assertEquals(sealed.id, releases.state.value.deliveryRelease?.id)
+        assertEquals(sealed.id, releases.state.value.deliverySelection?.releaseId)
+        assertEquals(sealed.contentDigest, releases.state.value.deliverySelection?.contentDigest)
         // System Back must leave delivery just like its toolbar, not cancel a save already in progress.
         val writing = kotlinx.coroutines.Job()
         @Suppress("UNCHECKED_CAST") val releaseState = ReleaseWorkspace::class.java.getDeclaredField("mutableState")

@@ -286,7 +286,9 @@ class ProjectTextEditingHostTest {
         fun assertDeliveryAvailable() {
             assertEquals(fixed, releases.state.value.deliverySelection)
             assertEquals(sealed.summary, releases.state.value.deliveryRelease)
+            compose.onNodeWithText("版本详情").performScrollTo().performClick()
             compose.onNodeWithText("封存修订 ${sealed.projectRevision}").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("版本详情").performScrollTo().performClick()
             compose.onNodeWithText("保存到文件").performScrollTo().assertIsEnabled()
             compose.onNodeWithText("系统分享").performScrollTo().assertIsEnabled()
         }
@@ -296,7 +298,7 @@ class ProjectTextEditingHostTest {
         compose.onNodeWithText("演示库").performClick()
         waitForEnabled("交付此版本")
         compose.onNodeWithText("交付此版本").performScrollTo().performClick()
-        waitFor("封存修订 ${sealed.projectRevision}")
+        waitFor("播放此版本")
         awaitIdle()
         assertNull(projects.state.value.project)
         assertDeliveryAvailable()
