@@ -55,6 +55,29 @@ internal class ClickChainReviewStore(context: Context) {
         runCatching { cleanup(draft, File(root, draft.runId)) }.getOrDefault(draft)
     }
 
+    /** The caller has verified the immutable committed receipt and freshly loaded this source.
+     * Rotate the author owner as well as clearing the import identity: late saves from the
+     * completed work must never restore its operation or overwrite the new range. */
+    fun startAnotherSegment(expected: ClickChainReviewDraft, sourceSha: String, actionCount: Int,
+        isCurrent: () -> Boolean = { true }): ClickChainReviewDraft = synchronized(lock) {
+        check(isCurrent()) { "这次整理已停止。" }
+        hash(sourceSha); require(actionCount in 1..40)
+        check(expected.operationId != null) { "请先确认上一段的生成结果。" }
+        val previous = read(expected.runId) ?: error("复核记录已不存在，请重新读取。")
+        check(previous == expected) { "复核已在其他窗口更新，请重新读取，已有项目不受影响。" }
+        check(previous.sourceSha256 == sourceSha) { "原片已改变，上一段的生成结果仍保留。" }
+        val last = previous.lastAction.toIntOrNull()
+        val next = previous.copy(owner = UUID.randomUUID().toString(), serial = previous.serial + 1,
+            firstAction = if (last != null && last in 1 until actionCount) (last + 1).toString() else "1",
+            lastAction = actionCount.toString(), framesOnly = false, selectedFrameKeys = null,
+            markLastTerminal = false, operationId = null)
+        check(isCurrent()) { "这次整理已停止。" }
+        // Retain exact reviewed outputs and their cleanup journal. No receipt or copied project
+        // media is owned here, and restarting never marks newly selected content as reviewed.
+        write(next)
+        runCatching { cleanup(next, File(root, next.runId)) }.getOrDefault(next)
+    }
+
     fun beginOutput(draft: ClickChainReviewDraft): Pair<ClickChainReviewDraft, File> = synchronized(lock) {
         val request = UUID.randomUUID().toString()
         val next = draft.copy(serial = draft.serial + 1, outputJobs = draft.outputJobs + request)

@@ -2,6 +2,7 @@ package com.tapscene.ui.shell
 
 import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -11,6 +12,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -25,10 +28,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -60,8 +65,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -76,6 +84,7 @@ import com.tapscene.clickplan.validationIssue
 import com.tapscene.clickplan.ClickChainStageRow
 import com.tapscene.clickplan.ClickChainThumbnailRequest
 import com.tapscene.clickplan.ClickChainThumbnailSource
+import com.tapscene.clickplan.INITIAL_SNAPSHOT_NOTICE
 import com.tapscene.clickplan.visibleThumbnailRequests
 import com.tapscene.data.ProjectHotspot
 import com.tapscene.media.OpaqueMask
@@ -101,6 +110,7 @@ internal data class ClickChainReviewCallbacks(
     val onMarkLastTerminal: (Boolean) -> Unit = {},
     val onCreate: () -> Unit = {},
     val onOpenProject: (String) -> Unit = {},
+    val onStartAnotherSegment: () -> Unit = {},
     val onRetry: () -> Unit = {},
     val onReloadSaved: () -> Unit = {},
     val onCancel: () -> Unit = {},
@@ -120,26 +130,44 @@ internal data class ClickChainReviewCallbacks(
 @Composable
 internal fun ClickChainReviewContent(state: ClickChainReviewUiState, callbacks: ClickChainReviewCallbacks) {
     // Editors replace the workbench, but must not discard this run's reading position.
-    // A different recording starts at its own beginning, even at the same navigation slot.
-    key(state.runId) {
+    // A new review operation, including another segment of this recording, starts at the top.
+    key(state.runId, state.reviewSessionId) {
         val listState = rememberLazyListState()
+        var settingsExpanded by rememberSaveable { mutableStateOf(false) }
+        var expandedDetails by rememberSaveable { mutableStateOf(emptyList<String>()) }
         when {
             state.frameEditor != null -> ClickChainFramePanel(state.frameEditor, state, callbacks)
             state.actionEditor != null -> ClickChainActionPanel(state.actionEditor, state, callbacks)
-            else -> ClickChainWorkbench(state, callbacks, listState)
+            else -> ClickChainWorkbench(state, callbacks, listState, settingsExpanded, { settingsExpanded = it },
+                expandedDetails.toSet(), { detail ->
+                    expandedDetails = if (detail in expandedDetails) expandedDetails - detail else expandedDetails + detail
+                })
         }
     }
 }
 
 @Composable
 private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: ClickChainReviewCallbacks,
-    listState: LazyListState) {
+    listState: LazyListState, settingsExpanded: Boolean, onSettingsExpanded: (Boolean) -> Unit,
+    expandedDetails: Set<String>, onToggleDetails: (String) -> Unit) {
+    // Use this pane's remaining space, including IME insets, not the device configuration.
+    // A short pane can live inside a taller window without changing screenHeightDp.
+    BoxWithConstraints(Modifier.fillMaxSize().imePadding()) {
+        ClickChainWorkbenchBody(state, callbacks, listState, settingsExpanded, onSettingsExpanded,
+            expandedDetails, onToggleDetails, compactHeight = maxHeight < 480.dp && LocalDensity.current.fontScale <= 1.2f)
+    }
+}
+
+@Composable
+private fun ClickChainWorkbenchBody(state: ClickChainReviewUiState, callbacks: ClickChainReviewCallbacks,
+    listState: LazyListState, settingsExpanded: Boolean, onSettingsExpanded: (Boolean) -> Unit,
+    expandedDetails: Set<String>, onToggleDetails: (String) -> Unit, compactHeight: Boolean) {
     val editable = !state.busy && !state.loading && !state.editingLocked && state.createdProjectId == null && !state.outcomeUnknown
+    val hasResult = !state.outcomeUnknown && (state.createdProjectId != null || state.canStartAnotherSegment)
     val next = state.nextRequiredReview()
     val validation = state.validationIssue()
     val largeText = LocalDensity.current.fontScale > 1.2f
-    var settingsExpanded by rememberSaveable(state.runId) { mutableStateOf(false) }
-    LaunchedEffect(validation) { if (validation != null) settingsExpanded = true }
+    LaunchedEffect(validation) { if (validation != null) onSettingsExpanded(true) }
     val visibleKeys by remember(listState) { derivedStateOf { listState.layoutInfo.visibleItemsInfo.map { it.key }.toSet() } }
     val frames = remember(state.frames) { state.frames.associateBy { it.key } }
     val nextFrame = (next as? ClickChainReviewTarget.Frame)?.let { frames[it.key] }
@@ -153,7 +181,7 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
         (if (state.framesOnly) nextFrame?.title else nextStage?.title)?.takeIf { it.isNotBlank() }
             ?: "画面 ${if (state.framesOnly) state.frames.indexOfFirst { it.key == next.key } + 1 else (nextStage?.index ?: 0) + 1}"
     } else null
-    val requests = state.visibleThumbnailRequests(visibleKeys)
+    val requests = if (hasResult) emptyList() else state.visibleThumbnailRequests(visibleKeys)
     val loader by rememberUpdatedState(callbacks.loadThumbnails)
     val loaded by produceState<ClickChainThumbnailBatch?>(null, state.runId, requests) {
         value = null
@@ -186,49 +214,63 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
         return if (request in requests) thumbnails[request] else null
     }
     BackHandler { if (!state.busy) callbacks.onBack() }
-    Column(Modifier.fillMaxSize().imePadding()) {
+    Column(Modifier.fillMaxSize()) {
         ShellTopBar("整理点击链", onBack = { if (!state.busy) callbacks.onBack() })
         if (state.loading || state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-        LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState, contentPadding = PaddingValues(16.dp, 12.dp),
+        LazyColumn(Modifier.weight(1f).fillMaxWidth().testTag("click_chain_workbench"), state = listState, contentPadding = PaddingValues(16.dp, 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item(key = "setup") {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (state.runLabel.isNotBlank()) Text(state.runLabel, style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    TextButton({ settingsExpanded = validation != null || !settingsExpanded }, Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                        enabled = editable) {
-                        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text("项目与范围 · ${if (validation != null) "待完善" else if (settingsExpanded) "收起" else "修改"}",
-                                style = MaterialTheme.typography.labelLarge)
-                            Text("${state.title.ifBlank { "未填写名称" }} · 动作 ${state.firstAction}–${state.lastAction}",
-                                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface,
-                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    if (hasResult) ClickChainCommittedResult(state)
+                    else {
+                        if (state.runLabel.isNotBlank() && (!compactHeight || settingsExpanded)) Text(state.runLabel, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        TextButton({ onSettingsExpanded(validation != null || !settingsExpanded) },
+                            Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("click_chain_settings"),
+                            enabled = editable) {
+                            val summary = "${state.title.ifBlank { "未填写名称" }} · 动作 ${state.firstAction}–${state.lastAction}" +
+                                if (state.framesOnly) " · 仅加入画面" else ""
+                            if (compactHeight && !settingsExpanded && validation == null) Row(Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(summary, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("项目与范围 · 修改", style = MaterialTheme.typography.labelLarge)
+                            } else Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("项目与范围 · ${if (validation != null) "待完善" else if (settingsExpanded) "收起" else "修改"}",
+                                    style = MaterialTheme.typography.labelLarge)
+                                Text(summary, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            }
                         }
-                    }
-                    if (settingsExpanded || validation != null) {
-                        OutlinedTextField(state.title, callbacks.onTitleChange, Modifier.fillMaxWidth(),
-                            enabled = editable, label = { Text("新项目名称") }, singleLine = true, isError = state.title.isBlank())
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            OutlinedTextField(state.firstAction, { callbacks.onRangeChange(it, state.lastAction) }, Modifier.weight(1f),
-                                enabled = editable, label = { Text("起始动作") }, singleLine = true,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-                            Text("至", style = MaterialTheme.typography.bodySmall)
-                            OutlinedTextField(state.lastAction, { callbacks.onRangeChange(state.firstAction, it) }, Modifier.weight(1f),
-                                enabled = editable, label = { Text("最后动作") }, singleLine = true,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                        if (settingsExpanded || validation != null) {
+                            OutlinedTextField(state.title, callbacks.onTitleChange, Modifier.fillMaxWidth(),
+                                enabled = editable, label = { Text("新项目名称") }, singleLine = true, isError = state.title.isBlank())
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                OutlinedTextField(state.firstAction, { callbacks.onRangeChange(it, state.lastAction) }, Modifier.weight(1f),
+                                    enabled = editable, label = { Text("起始动作") }, singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                                Text("至", style = MaterialTheme.typography.bodySmall)
+                                OutlinedTextField(state.lastAction, { callbacks.onRangeChange(state.firstAction, it) }, Modifier.weight(1f),
+                                    enabled = editable, label = { Text("最后动作") }, singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                            }
+                            validation?.let { ClickChainMessage(it) }
+                            Text("整理方式", style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            val modeChip: @Composable (Boolean, Modifier) -> Unit = { framesOnly, modifier ->
+                                FilterChip(state.framesOnly == framesOnly, { callbacks.onFramesOnly(framesOnly) }, modifier = modifier,
+                                    label = { Text(if (framesOnly) "仅加入画面" else "按点击链") }, enabled = editable)
+                            }
+                            if (largeText) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                modeChip(false, Modifier.fillMaxWidth())
+                                modeChip(true, Modifier.fillMaxWidth())
+                            } else Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                modeChip(false, Modifier.weight(1f))
+                                modeChip(true, Modifier.weight(1f))
+                            }
+                            if (state.framesOnly) Text("仅加入已选画面，不生成点击连线；画面仍须逐张复核。",
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        validation?.let { ClickChainMessage(it) }
-                    }
-                    val modeChip: @Composable (Boolean, Modifier) -> Unit = { framesOnly, modifier ->
-                        FilterChip(state.framesOnly == framesOnly, { callbacks.onFramesOnly(framesOnly) }, modifier = modifier,
-                            label = { Text(if (framesOnly) "仅加入画面" else "按点击链") }, enabled = editable)
-                    }
-                    if (largeText) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        modeChip(false, Modifier.fillMaxWidth())
-                        modeChip(true, Modifier.fillMaxWidth())
-                    } else Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        modeChip(false, Modifier.weight(1f))
-                        modeChip(true, Modifier.weight(1f))
                     }
                     state.issue?.takeIf { it != validation }?.let { ClickChainMessage(it) }
                     state.message?.takeIf { it != state.issue && it != validation }?.let { ClickChainMessage(it) }
@@ -240,14 +282,17 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
                     }
                 }
             }
-            if (state.framesOnly) {
+            if (!hasResult && state.framesOnly) {
                 item { Text("选择要加入的画面", style = MaterialTheme.typography.titleSmall) }
                 items(state.frames, key = { "frame:${it.key}" }) { frame ->
-                    ClickChainFrameRowContent(frame, editable, thumbnail(frame, "frame:${frame.key}" in visibleKeys), callbacks)
+                    val detailKey = "frame:${frame.key}"
+                    ClickChainFrameRowContent(frame, editable, thumbnail(frame, detailKey in visibleKeys),
+                        next == ClickChainReviewTarget.Frame(frame.key), detailKey in expandedDetails,
+                        { onToggleDetails(detailKey) }, callbacks)
                 }
                 if (state.frames.isEmpty() && !state.loading) item { Text("暂无可加入的画面。", style = MaterialTheme.typography.bodyMedium) }
-            } else {
-                item {
+            } else if (!hasResult) {
+                if (!compactHeight || settingsExpanded) item {
                     Text("依次检查画面与点击", style = MaterialTheme.typography.titleSmall)
                     Text("回到同一画面时，路线仍保留这次访问。", style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -255,17 +300,28 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
                 state.stages.forEachIndexed { position, stage ->
                     item(key = "stage:${stage.index}") {
                         val revisit = stage.selectedKey != null && state.stages.take(position).any { it.selectedKey == stage.selectedKey }
+                        val detailKey = "stage:${stage.index}:${stage.selectedKey}"
                         ClickChainStageContent(stage, frames[stage.selectedKey], revisit, editable,
-                            thumbnail(frames[stage.selectedKey], "stage:${stage.index}" in visibleKeys), callbacks)
+                            thumbnail(frames[stage.selectedKey], "stage:${stage.index}" in visibleKeys),
+                            next is ClickChainReviewTarget.Frame && next.key == stage.selectedKey && !revisit,
+                            detailKey in expandedDetails, { onToggleDetails(detailKey) }, callbacks)
                     }
                     state.actions.getOrNull(position)?.let { action ->
-                        item(key = "action:${action.actionId}") { ClickChainActionRowContent(action, editable, callbacks) }
+                        item(key = "action:${action.actionId}") {
+                            val detailKey = "action:${action.actionId}"
+                            // A warning already attached to the selected source frame is not repeated
+                            // as another warning on its action. A different source keeps its own notice.
+                            val notice = action.selectionNotice?.takeUnless { it == frames[stage.selectedKey]?.selectionNotice }
+                            ClickChainActionRowContent(action, editable, notice,
+                                next == ClickChainReviewTarget.Action(action.actionId), detailKey in expandedDetails,
+                                { onToggleDetails(detailKey) }, callbacks)
+                        }
                     }
                 }
                 if (state.actions.isEmpty() && !state.loading && state.createdProjectId == null)
                     item { Text("请选择可用的动作范围。", style = MaterialTheme.typography.bodyMedium) }
             }
-            if (state.frameCount > 0) item {
+            if (!hasResult && state.frameCount > 0) item {
                 HorizontalDivider(Modifier.padding(top = 8.dp, bottom = 8.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(state.markLastTerminal, callbacks.onMarkLastTerminal, enabled = editable)
@@ -277,7 +333,7 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
         }
         HorizontalDivider()
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("画面 ${state.reviewedFrameCount}/${state.frameCount}" +
+            if (!hasResult) Text("画面 ${state.reviewedFrameCount}/${state.frameCount}" +
                 if (state.framesOnly) " · 仅加入画面" else " · 动作 ${state.confirmedActionCount}/${state.actions.size}",
                 style = MaterialTheme.typography.labelLarge)
             if (editable && next != null) Text(when (next) {
@@ -288,15 +344,20 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
                 TextButton(callbacks.onCancel) { Text("取消这次生成，继续编辑") }
             val button = Modifier.fillMaxWidth().heightIn(min = 56.dp)
             when {
-                state.busy || state.loading -> OutlinedButton(callbacks.onCancel, button) { Text("取消处理") }
-                state.createdProjectId != null -> Button({ callbacks.onOpenProject(state.createdProjectId) }, button) { Text("打开新项目") }
+                state.busy || state.loading -> ClickChainFooterAction("取消处理", callbacks.onCancel, button)
                 state.outcomeUnknown -> Button(callbacks.onRetry, button) { Text("核对生成结果") }
+                state.createdProjectId != null -> {
+                    Button({ callbacks.onOpenProject(state.createdProjectId) }, button) { Text("打开新项目") }
+                    if (state.canStartAnotherSegment) ClickChainFooterAction("再整理一段", callbacks.onStartAnotherSegment,
+                        Modifier.fillMaxWidth().heightIn(min = 48.dp))
+                }
+                state.canStartAnotherSegment -> Button(callbacks.onStartAnotherSegment, button) { Text("再整理一段") }
                 state.issue?.startsWith("输入尚未保存") == true -> Button(callbacks.onRetry, button) { Text("重试保存输入") }
                 next is ClickChainReviewTarget.Frame -> Button({ callbacks.onReviewFrame(next.key) }, button) {
                     Text(if (nameRepair) "补全画面名称" else "继续复核画面")
                 }
                 next is ClickChainReviewTarget.Action -> Button({ callbacks.onReviewAction(next.actionId) }, button) { Text("继续核对动作") }
-                state.editingLocked && !state.retryCreate -> OutlinedButton(callbacks.onBack, button) { Text("返回录制") }
+                state.editingLocked && !state.retryCreate -> ClickChainFooterAction("返回录制", callbacks.onBack, button)
                 else -> Button(callbacks.onCreate, button, enabled = state.canCreate) {
                     Text(when { state.retryCreate -> "重试生成同一项目"; state.canCreate -> "生成独立项目"; else -> "先处理上方待办" })
                 }
@@ -306,26 +367,64 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
 }
 
 @Composable
+private fun ClickChainCommittedResult(state: ClickChainReviewUiState) {
+    val exists = state.createdProjectId != null
+    Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainerLow, RoundedCornerShape(16.dp))
+        .padding(20.dp).testTag("click_chain_result"), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(if (exists) "新项目已生成" else "本段已生成过项目", style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary)
+        Text(state.title, style = MaterialTheme.typography.headlineSmall)
+        if (state.frameCount > 0) Text("${state.frameCount} 个画面" +
+            if (state.framesOnly) " · 仅加入画面" else " · ${state.actions.size} 个动作",
+            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(if (exists) "打开新项目，继续编辑和预览。原录屏项目保持原样。"
+            else "生成的项目已被删除。重试原操作不会重新创建旧项目。",
+            style = MaterialTheme.typography.bodyMedium)
+        if (state.canStartAnotherSegment) Text("“再整理一段”会开启独立整理，从选择范围和复核开始，不改变本段结果。",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
 private fun ClickChainStageContent(stage: ClickChainStageRow, frame: ClickChainFrameRow?, revisit: Boolean,
-    editable: Boolean, thumbnail: Bitmap?, callbacks: ClickChainReviewCallbacks) {
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    editable: Boolean, thumbnail: Bitmap?, current: Boolean, detailsExpanded: Boolean,
+    onToggleDetails: () -> Unit, callbacks: ClickChainReviewCallbacks) {
+    val complete = stage.reviewed && stage.title.isNotBlank()
+    val notice = frame?.selectionNotice
+    val showDetails = !complete || detailsExpanded
+    val shape = RoundedCornerShape(12.dp)
+    Column(Modifier.fillMaxWidth().testTag("click_chain_stage_${stage.index}")
+        .background(if (complete) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.surfaceContainerLow, shape)
+        .then(if (current) Modifier.border(1.dp, MaterialTheme.colorScheme.primary, shape) else Modifier)
+        .padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
-            ClickChainThumbnail(frame, stage.selectedKey == null, thumbnail)
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("画面 ${(stage.index + 1).toString().padStart(2, '0')}${if (revisit) " · 回访" else ""}",
-                    style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+            ClickChainThumbnail(frame, stage.selectedKey == null, thumbnail, compact = complete)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("画面 ${(stage.index + 1).toString().padStart(2, '0')}${if (revisit) " · 回访" else if (current) " · 当前" else ""}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(stage.title.ifBlank { if (stage.selectedKey == null) "待补画面" else "未填写名称" }, style = MaterialTheme.typography.titleSmall,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Text(when { stage.selectedKey == null -> "缺少画面证据"; frame != null -> frame.thumbnailLabel(); stage.reviewed -> "已复核"; else -> "待复核" },
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                frame?.selectionNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                TextButton({ stage.selectedKey?.let(callbacks.onReviewFrame) }, enabled = editable && stage.selectedKey != null) {
-                    Text(if (stage.reviewed) "查看画面" else "复核画面")
+                FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton({ stage.selectedKey?.let(callbacks.onReviewFrame) }, enabled = editable && stage.selectedKey != null,
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)) {
+                        Text(if (stage.reviewed) "查看画面" else "复核画面")
+                    }
+                    if (complete) ClickChainDetailsToggle("画面 ${stage.index + 1}", detailsExpanded, onToggleDetails,
+                        snapshot = notice == INITIAL_SNAPSHOT_NOTICE)
                 }
             }
         }
-        if (stage.choices.size > 1) Column(Modifier.padding(start = 76.dp)) {
-            Text("代表画面", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (notice != null && (showDetails || notice != INITIAL_SNAPSHOT_NOTICE))
+            Text(notice, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (complete && detailsExpanded) Text("已复核实际输出；查看画面可继续核对或修改。",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (stage.choices.size > 1 && showDetails) Column {
+            Text("代表画面 · 选择后须按当前画面核对", style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
             stage.choices.forEach { choice ->
                 FilterChip(stage.selectedKey == choice.frameKey, { callbacks.onStageChoice(stage.index, choice.frameKey) },
                     label = { Text(choice.label) }, enabled = editable)
@@ -334,19 +433,48 @@ private fun ClickChainStageContent(stage: ClickChainStageRow, frame: ClickChainF
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ClickChainFrameRowContent(frame: ClickChainFrameRow, editable: Boolean, thumbnail: Bitmap?,
-    callbacks: ClickChainReviewCallbacks) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Checkbox(frame.selected, { callbacks.onToggleFrame(frame.key, it) }, enabled = editable)
-        ClickChainThumbnail(frame, false, thumbnail)
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(frame.title.ifBlank { "未填写名称" }, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Text(frame.thumbnailLabel(), style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-            frame.selectionNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-            TextButton({ callbacks.onReviewFrame(frame.key) }, enabled = editable) { Text(if (frame.reviewed) "查看画面" else "复核画面") }
+    current: Boolean, detailsExpanded: Boolean, onToggleDetails: () -> Unit, callbacks: ClickChainReviewCallbacks) {
+    val complete = frame.reviewed && frame.title.isNotBlank()
+    val shape = RoundedCornerShape(12.dp)
+    Column(Modifier.fillMaxWidth().testTag("click_chain_frame_${frame.key}")
+        .background(if (complete) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.surfaceContainerLow, shape)
+        .then(if (current) Modifier.border(1.dp, MaterialTheme.colorScheme.primary, shape) else Modifier)
+        .padding(vertical = 8.dp, horizontal = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(frame.selected, { callbacks.onToggleFrame(frame.key, it) }, enabled = editable)
+            ClickChainThumbnail(frame, false, thumbnail, compact = complete)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(frame.title.ifBlank { "未填写名称" }, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(frame.thumbnailLabel(), style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton({ callbacks.onReviewFrame(frame.key) }, enabled = editable,
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)) { Text(if (frame.reviewed) "查看画面" else "复核画面") }
+                    if (complete) ClickChainDetailsToggle(frame.title, detailsExpanded, onToggleDetails,
+                        snapshot = frame.selectionNotice == INITIAL_SNAPSHOT_NOTICE)
+                }
+            }
         }
+        frame.selectionNotice?.takeIf { !complete || detailsExpanded || it != INITIAL_SNAPSHOT_NOTICE }?.let {
+            Text(it, Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (complete && detailsExpanded) Text("已复核实际输出；查看画面可继续核对或修改。",
+            Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun ClickChainDetailsToggle(subject: String, expanded: Boolean, onToggle: () -> Unit, snapshot: Boolean = false) {
+    TextButton(onToggle, Modifier.heightIn(min = 48.dp).semantics {
+        contentDescription = "${if (expanded) "收起" else "展开"}$subject 的详情${if (snapshot) "与初始快照提示" else ""}"
+        stateDescription = if (expanded) "已展开" else "已收起"
+    }, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)) {
+        Text(if (expanded) "收起详情" else if (snapshot) "初始快照" else "详情", style = MaterialTheme.typography.labelMedium)
     }
 }
 
@@ -361,9 +489,9 @@ private fun ClickChainFrameRow.thumbnailLabel(): String = when (thumbnailSource)
 }
 
 @Composable
-private fun ClickChainThumbnail(frame: ClickChainFrameRow?, missing: Boolean, thumbnail: Bitmap?) {
+private fun ClickChainThumbnail(frame: ClickChainFrameRow?, missing: Boolean, thumbnail: Bitmap?, compact: Boolean = false) {
     val bitmap = thumbnail?.takeUnless { it.isRecycled }
-    Box(Modifier.size(64.dp, 96.dp).background(MaterialTheme.colorScheme.surfaceContainerHighest)
+    Box(Modifier.size(if (compact) 56.dp else 76.dp, if (compact) 84.dp else 114.dp).background(MaterialTheme.colorScheme.surfaceContainerHighest)
         .border(1.dp, MaterialTheme.colorScheme.outlineVariant), contentAlignment = Alignment.Center) {
         if (bitmap != null) Image(bitmap.asImageBitmap(), "${frame?.title}，${frame?.thumbnailLabel()}缩略图",
             Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
@@ -372,18 +500,40 @@ private fun ClickChainThumbnail(frame: ClickChainFrameRow?, missing: Boolean, th
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ClickChainActionRowContent(action: ClickChainActionRow, editable: Boolean, callbacks: ClickChainReviewCallbacks) {
-    Row(Modifier.fillMaxWidth().padding(start = 20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Box(Modifier.width(1.dp).heightIn(min = 112.dp).background(MaterialTheme.colorScheme.outlineVariant))
+private fun ClickChainActionRowContent(action: ClickChainActionRow, editable: Boolean, notice: String?, current: Boolean,
+    detailsExpanded: Boolean, onToggleDetails: () -> Unit, callbacks: ClickChainReviewCallbacks) {
+    val complete = action.confirmed && action.detail == null
+    Row(Modifier.fillMaxWidth().testTag("click_chain_action_${action.actionId}").padding(start = 24.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Box(Modifier.width(2.dp).heightIn(min = if (complete) 64.dp else 112.dp)
+            .background(if (current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("动作 ${action.number.toString().padStart(2, '0')} · ${action.status}", style = MaterialTheme.typography.labelLarge)
-            Text("${action.fromTitle} → ${action.toTitle}", style = MaterialTheme.typography.bodyMedium,
-                maxLines = 3, overflow = TextOverflow.Ellipsis)
-            Text(action.detail ?: when { action.confirmed -> "点击区域与去向已确认"; action.enabled -> "点击区域与去向待确认"; else -> "先复核前后画面" },
+            if (complete) FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onToggleDetails, Modifier.heightIn(min = 48.dp).semantics {
+                    contentDescription = "${if (detailsExpanded) "收起" else "展开"}动作 ${action.number} 的详情"
+                    stateDescription = if (detailsExpanded) "已展开" else "已收起"
+                }, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)) {
+                    Text("动作 ${action.number.toString().padStart(2, '0')} · 已确认${if (detailsExpanded) " · 收起" else " · 详情"}",
+                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                TextButton({ callbacks.onReviewAction(action.actionId) }, enabled = editable && action.enabled,
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)) { Text("查看点击区域") }
+            } else Text("动作 ${action.number.toString().padStart(2, '0')} · ${action.status}${if (current) " · 当前" else ""}",
+                style = MaterialTheme.typography.labelLarge,
+                color = if (current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("${action.fromTitle.ifBlank { "未填写名称" }} → ${action.toTitle.ifBlank { "未填写名称" }}", style = MaterialTheme.typography.bodyMedium,
+                maxLines = if (complete && !detailsExpanded) 2 else 3, overflow = TextOverflow.Ellipsis)
+            if (!complete || detailsExpanded) {
+                if (complete) Text(action.status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(action.detail ?: when { action.confirmed -> "点击区域与去向已确认"; action.enabled -> "点击区域与去向待确认"; else -> "先复核前后画面" },
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (notice != null) Text(if (complete && !detailsExpanded && notice == INITIAL_SNAPSHOT_NOTICE)
+                "初始快照：展开动作详情查看提示。" else notice,
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            action.selectionNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-            TextButton({ callbacks.onReviewAction(action.actionId) }, enabled = editable && action.enabled) {
+            if (!complete) TextButton({ callbacks.onReviewAction(action.actionId) }, enabled = editable && action.enabled) {
                 Text(if (action.confirmed) "查看点击区域" else "核对点击区域")
             }
         }
@@ -612,12 +762,19 @@ private fun ClickChainEditorFooter(busy: Boolean, onCancel: () -> Unit, onClose:
     label: String, enabled: Boolean, onConfirm: () -> Unit) {
     HorizontalDivider()
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (busy) OutlinedButton(onCancel, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("取消处理") }
+        if (busy) ClickChainFooterAction("取消处理", onCancel, Modifier.fillMaxWidth().heightIn(min = 48.dp))
         else {
-            OutlinedButton(onClose, Modifier.heightIn(min = 48.dp)) { Text("返回整理") }
+            ClickChainFooterAction("返回整理", onClose, Modifier.heightIn(min = 48.dp))
             Button(onConfirm, Modifier.weight(1f).heightIn(min = 48.dp), enabled = enabled) { Text(label) }
         }
     }
+}
+
+/** These secondary exits remain available even when editing is locked. */
+@Composable
+private fun ClickChainFooterAction(label: String, onClick: () -> Unit, modifier: Modifier) {
+    OutlinedButton(onClick, modifier, border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) { Text(label) }
 }
 
 @Composable

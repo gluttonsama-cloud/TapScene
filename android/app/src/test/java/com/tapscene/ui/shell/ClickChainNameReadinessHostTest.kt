@@ -21,6 +21,7 @@ import com.tapscene.MainActivity
 import com.tapscene.clickplan.*
 import com.tapscene.data.HostFileSyncShadow
 import com.tapscene.data.HostSqlite
+import com.tapscene.data.ClickChainImportInput
 import com.tapscene.data.ProjectStore
 import com.tapscene.data.WorkspaceStore
 import com.tapscene.media.ImportedSource
@@ -168,6 +169,212 @@ class ClickChainNameReadinessHostTest {
         assertFalse(f.workspace.state.value.canCreate)
     }
 
+    @Test fun fortyActionRecordingBuildsTwoIndependentSegmentsWithoutResettingOldReceipt() {
+        val f = fixture(actionCount = 40, blankAlternative = false, unreviewedIndexes = setOf(40))
+        f.mount()
+        val original = f.projects.readProject(f.run.projectId)
+        val sourceFiles = f.evidenceBytes()
+        assertEquals(41, f.workspace.state.value.frameCount)
+        assertFalse(f.workspace.state.value.canCreate)
+        compose.runOnIdle { f.workspace.range("1", "20") }
+        f.settled()
+        // The new segment endpoint is the actual after-frame, not the next action's before-frame.
+        val endpointAction = f.run.plan.actions[19].actionId
+        assertFalse(f.workspace.state.value.canCreate)
+        assertFalse(f.workspace.state.value.actions.single { it.actionId == endpointAction }.confirmed)
+        compose.runOnIdle { f.workspace.reviewAction(endpointAction) }
+        f.settled()
+        compose.runOnIdle { f.workspace.confirmAction() }
+        f.settled()
+        assertEquals(21, f.workspace.state.value.frameCount)
+        assertTrue(f.workspace.state.value.canCreate)
+        compose.runOnIdle { f.workspace.createProject() }
+        f.settled()
+        val firstId = checkNotNull(f.workspace.state.value.createdProjectId)
+        val firstDraft = f.saved()
+        val first = checkNotNull(f.projects.readProject(firstId))
+        val firstInput = ClickChainWorkspace::class.java.getDeclaredMethod("importInput", String::class.java)
+            .apply { isAccessible = true }.invoke(f.workspace, firstId) as ClickChainImportInput
+        assertEquals(21, first.steps.size)
+        assertTrue(f.workspace.state.value.canStartAnotherSegment)
+        compose.runOnIdle { f.workspace.createProject() }
+        assertEquals(2, f.projects.listProjects().size)
+
+        f.reopen()
+        assertEquals(firstId, f.workspace.state.value.createdProjectId)
+        assertTrue(f.workspace.state.value.canStartAnotherSegment)
+        assertEquals(firstDraft, f.saved())
+        // Rapid repeated intent creates one new authoring owner, not a new project.
+        compose.runOnIdle { f.workspace.startAnotherSegment(); f.workspace.startAnotherSegment() }
+        f.settled()
+        val next = f.saved()
+        assertNotEquals(firstDraft.owner, next.owner)
+        assertNull(next.operationId)
+        assertEquals("21", next.firstAction)
+        assertEquals("40", next.lastAction)
+        assertEquals(firstDraft.frames, next.frames)
+        assertEquals(firstDraft.actions, next.actions)
+        assertEquals(firstDraft.outputJobs, next.outputJobs)
+        assertEquals(2, f.projects.listProjects().size)
+        assertNull(f.workspace.state.value.createdProjectId)
+        // A frame outside A was never reviewed: retained confirmations must not silently approve it.
+        val pending = f.keys[40]
+        assertFalse(f.workspace.state.value.canCreate)
+        assertFalse(next.frames.getValue(pending).reviewed)
+        assertEquals(ClickChainReviewTarget.Frame(pending), f.workspace.state.value.nextRequiredReview())
+        compose.runOnIdle { f.workspace.createProject() }
+        assertEquals(2, f.projects.listProjects().size)
+        assertNull(f.saved().operationId)
+        compose.runOnIdle { f.workspace.reviewFrame(pending) }
+        f.settled()
+        compose.runOnIdle { f.workspace.confirmFrame(checkNotNull(f.saved().frames.getValue(pending).output).sha256) }
+        f.settled()
+        assertTrue(f.workspace.state.value.canCreate)
+        compose.runOnIdle { f.workspace.createProject() }
+        f.settled()
+        val secondId = checkNotNull(f.workspace.state.value.createdProjectId)
+        val second = checkNotNull(f.projects.readProject(secondId))
+        assertNotEquals(firstId, secondId)
+        assertEquals(21, second.steps.size)
+        assertEquals(setOf(f.run.projectId, firstId, secondId), f.projects.listProjects().map { it.id }.toSet())
+        assertEquals(original, f.projects.readProject(f.run.projectId))
+        assertEquals(first, f.projects.readProject(firstId))
+        assertEquals(sourceFiles, f.evidenceBytes())
+        assertNotEquals(first.steps.first().sourceId, second.steps.first().sourceId)
+        assertTrue(first.steps.map { it.asset.id }.toSet().intersect(second.steps.map { it.asset.id }.toSet()).isEmpty())
+        val receipt = f.projects.readClickChainImport(firstId)
+        assertEquals(receipt, runBlocking { f.projects.importReviewedClickChain(firstInput, f.accessor) })
+        f.projects.deleteProject(firstId)
+        val deleted = runBlocking { f.projects.importReviewedClickChain(firstInput, f.accessor) }
+        assertEquals("committed", deleted.status)
+        assertFalse(deleted.projectStillExists)
+        assertNull(f.projects.readProject(firstId))
+        assertEquals(second, f.projects.readProject(secondId))
+    }
+
+    @Test fun completedProjectCanOpenWithoutOriginalButRestartCannotDiscardItsResult() {
+        val f = fixture(blankAlternative = false)
+        f.mount()
+        compose.runOnIdle { f.workspace.createProject() }
+        f.settled()
+        val projectId = checkNotNull(f.workspace.state.value.createdProjectId)
+        val completed = f.saved()
+        val project = f.projects.readProject(projectId)
+        check(File(f.app.noBackupFilesDir, f.source.privateRelativePath).delete())
+        f.reopen()
+        assertEquals(projectId, f.workspace.state.value.createdProjectId)
+        compose.runOnIdle { f.workspace.startAnotherSegment() }
+        f.settled()
+        assertEquals(projectId, f.workspace.state.value.createdProjectId)
+        assertTrue(f.workspace.state.value.canStartAnotherSegment)
+        assertFalse(f.workspace.state.value.outcomeUnknown)
+        assertTrue(f.workspace.state.value.message?.contains("原片") == true)
+        assertEquals(completed, f.saved())
+        assertEquals(project, f.projects.readProject(projectId))
+        compose.onNodeWithText("打开新项目").assertIsEnabled()
+    }
+
+    @Test fun deletedGeneratedProjectAllowsExplicitNewSegmentButNeverAutomaticRecreation() {
+        val f = fixture(blankAlternative = false)
+        f.mount()
+        compose.runOnIdle { f.workspace.createProject() }
+        f.settled()
+        val projectId = checkNotNull(f.workspace.state.value.createdProjectId)
+        f.projects.deleteProject(projectId)
+        f.reopen()
+        assertNull(f.workspace.state.value.createdProjectId)
+        assertTrue(f.workspace.state.value.canStartAnotherSegment)
+        assertEquals(1, f.projects.listProjects().size)
+        compose.onNodeWithText("再整理一段").assertIsEnabled().performClick()
+        f.settled()
+        assertNull(f.saved().operationId)
+        assertFalse(f.workspace.state.value.editingLocked)
+        assertEquals(1, f.projects.listProjects().size)
+        assertEquals("committed", f.projects.readClickChainImport(projectId)?.status)
+        assertFalse(checkNotNull(f.projects.readClickChainImport(projectId)).projectStillExists)
+    }
+
+    @Test fun cancellationAroundNewSegmentSavePreservesTheActualJournal() {
+        val f = fixture(blankAlternative = false)
+        f.mount()
+        compose.runOnIdle { f.workspace.createProject() }
+        f.settled()
+        val projectId = checkNotNull(f.workspace.state.value.createdProjectId)
+        val completed = f.saved()
+        val receipt = f.projects.readClickChainImport(projectId)
+        // Stop during fresh source validation, before the new owner can be persisted.
+        field(f.workspace, "sourceAccessor", FrameSourceAccessor { owner, session, src ->
+            (field(f.workspace, "task") as Job).cancel()
+            f.accessor.registeredSource(owner, session, src)
+        })
+        compose.runOnIdle { f.workspace.startAnotherSegment() }
+        f.settled()
+        assertEquals(completed, f.saved())
+        assertEquals(projectId, f.workspace.state.value.createdProjectId)
+        assertFalse(f.workspace.state.value.outcomeUnknown)
+        assertEquals(2, f.projects.listProjects().size)
+        f.reopen()
+        assertEquals(completed, f.saved())
+        assertEquals(projectId, f.workspace.state.value.createdProjectId)
+
+        // Stop just after the replacement really reached its directory sync. Its actual draft,
+        // rather than the old completed owner, must survive dispatch back to the UI and reopen.
+        HostFileSyncShadow.afterNextDirectorySync(
+            File(f.app.noBackupFilesDir, "click-chain-reviews/${f.run.runId}")) {
+            (field(f.workspace, "task") as Job).cancel()
+        }
+        compose.runOnIdle { f.workspace.startAnotherSegment() }
+        f.settled()
+        val restarted = f.saved()
+        assertNotEquals(completed.owner, restarted.owner)
+        assertNull(restarted.operationId)
+        assertFalse(f.workspace.state.value.outcomeUnknown)
+        assertFalse(f.workspace.state.value.editingLocked)
+        assertTrue(f.workspace.state.value.canCreate)
+        assertEquals(restarted.owner, f.workspace.state.value.reviewSessionId)
+        assertEquals(2, f.projects.listProjects().size)
+        f.reopen()
+        assertNull(f.saved().operationId)
+        assertEquals(restarted.frames, f.saved().frames)
+        assertEquals(restarted.actions, f.saved().actions)
+        assertTrue(f.workspace.state.value.canCreate)
+        assertEquals(receipt, f.projects.readClickChainImport(projectId))
+        assertEquals(2, f.projects.listProjects().size)
+    }
+
+    @Test fun uncertainNewSegmentSaveLocksInputUntilActualDraftIsReloaded() {
+        val f = fixture(blankAlternative = false)
+        f.mount()
+        compose.runOnIdle { f.workspace.createProject() }
+        f.settled()
+        val projectId = checkNotNull(f.workspace.state.value.createdProjectId)
+        val completed = f.saved()
+        compose.runOnIdle {
+            HostFileSyncShadow.failNextDirectorySyncAfterWrite(File(f.app.noBackupFilesDir, "click-chain-reviews/${f.run.runId}"))
+            f.workspace.startAnotherSegment()
+        }
+        f.settled()
+        assertTrue(f.workspace.state.value.outcomeUnknown)
+        assertTrue(f.workspace.state.value.editingLocked)
+        assertFalse(f.workspace.state.value.canStartAnotherSegment)
+        assertFalse(f.workspace.state.value.canCreate)
+        val actual = f.saved()
+        assertNotEquals(completed.owner, actual.owner)
+        assertNull(actual.operationId)
+        compose.runOnIdle { f.workspace.startAnotherSegment(); f.workspace.createProject() }
+        assertEquals(actual, f.saved())
+        compose.runOnIdle { f.workspace.retry() }
+        f.settled()
+        assertFalse(f.workspace.state.value.outcomeUnknown)
+        assertFalse(f.workspace.state.value.editingLocked)
+        assertTrue(f.workspace.state.value.canCreate)
+        assertEquals(completed.frames, f.saved().frames)
+        assertEquals(completed.outputJobs, f.saved().outputJobs)
+        assertNull(f.saved().operationId)
+        assertEquals(2, f.projects.listProjects().size)
+        assertEquals("committed", f.projects.readClickChainImport(projectId)?.status)
+    }
+
     private fun exerciseRepair(f: Fixture, key: String, blank: String, ordinal: Int, expectedFrames: Int) {
         val original = f.saved()
         val bytes = f.outputBytes(original)
@@ -249,7 +456,8 @@ class ClickChainNameReadinessHostTest {
     }
 
     private fun fixture(framesOnly: Boolean = false, shared: Boolean = false,
-        unreviewedFirst: Boolean = false): Fixture = runBlocking {
+        unreviewedFirst: Boolean = false, actionCount: Int = 2, blankAlternative: Boolean = true,
+        unreviewedIndexes: Set<Int> = emptySet()): Fixture = runBlocking {
         compose.waitForIdle()
         val app: Application = RuntimeEnvironment.getApplication()
         // Own the store before setup can fail, not just after Fixture has been returned.
@@ -263,16 +471,16 @@ class ClickChainNameReadinessHostTest {
             SourceMetadata("video/mp4", raw.length(), sha(raw), 32, 48, 0, 1_000_000))
         WorkspaceStore(app, project).append(source)
         val plan = ClickPlan.create(project, "com.example.synthetic", 64, 96, 0,
-            List(2) { ClickAction(x = 20, y = 30) })
+            List(actionCount) { ClickAction(x = 20, y = 30) })
         val runs = ClickPlanStore(app)
         var run = ClickRun.create(plan, id(), sourceId, 1, 1)
         runs.beginRun(run)
-        repeat(2) { index ->
+        repeat(actionCount) { index ->
             listOf(ClickActionStatus.Intent to ClickRunEventType.DispatchIntent,
                 ClickActionStatus.Accepted to ClickRunEventType.DispatchAccepted,
                 ClickActionStatus.Completed to ClickRunEventType.GestureCompleted).forEach { (status, event) ->
                 val completed = status == ClickActionStatus.Completed
-                run = run.copy(phase = if (completed && index == 1) ClickRunPhase.Completed else ClickRunPhase.Running,
+                run = run.copy(phase = if (completed && index == actionCount - 1) ClickRunPhase.Completed else ClickRunPhase.Running,
                     nextActionIndex = if (completed) index + 1 else index,
                     outcomes = run.outcomes.mapIndexed { n, value -> if (n == index) value.copy(status = status) else value },
                     events = run.events + ClickRunEvent(event, plan.actions[index].actionId, run.journalRevision + 1),
@@ -283,7 +491,7 @@ class ClickChainNameReadinessHostTest {
         val evidence = FrameEvidenceStore(app)
         evidence.createSession(project, run.recordingSessionId, sourceId)
         val geometry = FrameGeometry.fitCenter(64, 96, 32, 48)
-        val frameIds = if (shared) listOf(0L, 1L, 1L, 1L) else listOf(0L, 1L, 2L, 3L)
+        val frameIds = if (shared) listOf(0L, 1L, 1L, 1L) else List(actionCount * 2) { it.toLong() }
         val tickets = plan.actions.flatMapIndexed { index, action -> FrameBoundary.entries.map { boundary ->
             val position = index * 2 + boundary.ordinal
             val frame = frameIds[position]
@@ -316,7 +524,7 @@ class ClickChainNameReadinessHostTest {
                 candidates[index * 2 + 1], null, null)
         })
         val reviews = ClickChainReviewStore(app)
-        var saved = reviews.open(run.runId, source.metadata.sha256, 2)
+        var saved = reviews.open(run.runId, source.metadata.sha256, actionCount)
         capture.frames.values.forEachIndexed { index, candidate ->
             val (working, folder) = reviews.beginOutput(saved)
             val masks = listOf(OpaqueMask(.05f, .05f, .25f, .25f))
@@ -326,11 +534,11 @@ class ClickChainNameReadinessHostTest {
             val output = reviews.output(working, png.file, png.sha256, png.width, png.height)
             saved = reviews.save(working.copy(serial = working.serial + 1, frames = working.frames +
                 (candidate.key to ClickChainFrameDraft(candidate.key, candidate.pngSha256,
-                    if (!shared && index == 1) " " else "合成画面 ${index + 1}", masks, output,
-                    reviewed = !unreviewedFirst || index != 0))))
+                    if (blankAlternative && !shared && index == 1) " " else "合成画面 ${index + 1}", masks, output,
+                    reviewed = (!unreviewedFirst || index != 0) && index !in unreviewedIndexes))))
             saved = reviews.finishOutput(saved, folder)
         }
-        val path = ClickChainRoutePolicy.route(capture, 1, 2, emptyMap())
+        val path = ClickChainRoutePolicy.route(capture, 1, actionCount, emptyMap())
         saved = reviews.save(saved.copy(serial = saved.serial + 1, framesOnly = framesOnly,
             selectedFrameKeys = if (framesOnly) setOf(candidates.first().key, candidates.last().key) else null,
             actions = path.actions.mapIndexed { index, action ->
@@ -376,7 +584,7 @@ class ClickChainNameReadinessHostTest {
             compose.waitUntil(30_000) {
                 compose.waitForIdle()
                 workspace.state.value.runId == run.runId && !workspace.state.value.loading &&
-                    !workspace.state.value.busy && workspace.state.value.frames.isNotEmpty()
+                    !workspace.state.value.busy && (workspace.state.value.frames.isNotEmpty() || workspace.state.value.canStartAnotherSegment)
             }
         }
         fun reopen() {

@@ -104,4 +104,65 @@ class ClickChainReviewStoreHostTest {
         check(cancelled && file.readBytes().contentEquals(bytes) && store.readExisting(run) == saved)
     }
 
+    @Test fun anotherSegmentRotatesOwnerAndRetainsExactReviewedOutputOwnership() {
+        val store = ClickChainReviewStore(RuntimeEnvironment.getApplication())
+        val run = UUID.randomUUID().toString()
+        val initial = store.open(run, "a".repeat(64), 4)
+        val (working, folder) = store.beginOutput(initial)
+        check(folder.mkdir())
+        val file = File(folder, "candidate-${UUID.randomUUID()}.png")
+        val bitmap = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLACK) }
+        try { FileOutputStream(file).use { check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) } }
+        finally { bitmap.recycle() }
+        val sha = java.security.MessageDigest.getInstance("SHA-256").digest(file.readBytes())
+            .joinToString("") { "%02x".format(it.toInt() and 255) }
+        val output = store.output(working, file, sha, 4, 4)
+        val frame = ClickChainFrameDraft("$run:1", "b".repeat(64), "已复核画面", output = output, reviewed = true)
+        val committed = store.save(working.copy(serial = working.serial + 1, lastAction = "2",
+            frames = mapOf(frame.key to frame), operationId = UUID.randomUUID().toString(),
+            framesOnly = true, selectedFrameKeys = setOf(frame.key), markLastTerminal = true))
+        val next = store.startAnotherSegment(committed, committed.sourceSha256, 4)
+        check(next.owner != committed.owner && next.serial > committed.serial && next.operationId == null)
+        check(next.firstAction == "3" && next.lastAction == "4" && !next.framesOnly && !next.markLastTerminal)
+        check(next.selectedFrameKeys == null && next.frames == committed.frames && next.actions == committed.actions)
+        check(next.outputJobs == committed.outputJobs && store.outputFile(run, output) == file)
+        check(runCatching { store.startAnotherSegment(committed, committed.sourceSha256, 4) }.isFailure)
+        check(runCatching { store.save(committed.copy(serial = next.serial + 100)) }.isFailure)
+        store.finishOutput(committed, folder)
+        check(store.readExisting(run) == next && file.isFile)
+        check(store.open(run, committed.sourceSha256, 4).frames == next.frames)
+    }
+
+    @Test fun anotherSegmentRejectsUnfrozenChangedCancelledAndStaleInputsWithoutMutation() {
+        val store = ClickChainReviewStore(RuntimeEnvironment.getApplication())
+        val initial = store.open(UUID.randomUUID().toString(), "a".repeat(64), 2)
+        check(runCatching { store.startAnotherSegment(initial, initial.sourceSha256, 2) }.isFailure)
+        val committed = store.save(initial.copy(serial = initial.serial + 1,
+            operationId = UUID.randomUUID().toString()))
+        check(runCatching { store.startAnotherSegment(committed, "b".repeat(64), 2) }.isFailure)
+        check(runCatching { store.startAnotherSegment(committed, committed.sourceSha256, 2) { false } }.isFailure)
+        check(store.readExisting(initial.runId) == committed)
+        val newer = store.open(initial.runId, initial.sourceSha256, 2)
+        check(runCatching { store.startAnotherSegment(committed, committed.sourceSha256, 2) }.isFailure)
+        check(store.readExisting(initial.runId) == newer)
+        val restarted = store.startAnotherSegment(newer, newer.sourceSha256, 2)
+        check(restarted.firstAction == "1" && restarted.lastAction == "2")
+    }
+
+    @Test fun uncertainRestartIsRecoveredFromActualJournalAndCannotReplayCompletedWriter() {
+        val store = ClickChainReviewStore(RuntimeEnvironment.getApplication())
+        val initial = store.open(UUID.randomUUID().toString(), "a".repeat(64), 2)
+        val committed = store.save(initial.copy(serial = initial.serial + 1, lastAction = "1",
+            operationId = UUID.randomUUID().toString()))
+        HostFileSyncShadow.failNextDirectorySyncAfterWrite(File(RuntimeEnvironment.getApplication().noBackupFilesDir,
+            "click-chain-reviews/${initial.runId}"))
+        check(runCatching { store.startAnotherSegment(committed, committed.sourceSha256, 2) }.isFailure)
+        val actual = checkNotNull(store.readExisting(initial.runId))
+        check(actual.owner != committed.owner && actual.operationId == null && actual.firstAction == "2")
+        check(runCatching { store.save(committed.copy(serial = actual.serial + 10)) }.isFailure)
+        check(runCatching { store.startAnotherSegment(committed, committed.sourceSha256, 2) }.isFailure)
+        val reopened = store.open(initial.runId, initial.sourceSha256, 2)
+        check(reopened.operationId == null && reopened.firstAction == "2" && reopened.lastAction == "2")
+    }
+
 }

@@ -131,7 +131,8 @@ internal data class ClickChainReviewUiState(val runId: String? = null, val title
     val loading: Boolean = false, val busy: Boolean = false, val message: String? = null,
     val frameEditor: ClickChainFrameEditor? = null, val actionEditor: ClickChainActionEditor? = null,
     val createdProjectId: String? = null, val outcomeUnknown: Boolean = false,
-    val canCreate: Boolean = false, val editingLocked: Boolean = false, val retryCreate: Boolean = false)
+    val canCreate: Boolean = false, val editingLocked: Boolean = false, val retryCreate: Boolean = false,
+    val canStartAnotherSegment: Boolean = false, val reviewSessionId: String? = null)
 
 internal sealed interface ClickChainReviewTarget {
     data class Frame(val key: String) : ClickChainReviewTarget
