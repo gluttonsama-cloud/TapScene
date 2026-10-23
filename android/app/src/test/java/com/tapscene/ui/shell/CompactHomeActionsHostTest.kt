@@ -6,9 +6,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -285,7 +285,7 @@ class CompactHomeActionsHostTest {
                 CompositionLocalProvider(LocalDensity provides Density(LocalDensity.current.density, fontScale)) {
                     TapSceneTheme {
                         val home = rememberProjectHomeState()
-                        remember(home) { home.query = query }
+                        LaunchedEffect(home, query) { home.query = query }
                         Box(Modifier.fillMaxSize().testTag("compact-home-window")) {
                             Box(Modifier.fillMaxSize().testTag("compact-home-surface")) {
                                 ProjectHomeFrame(
