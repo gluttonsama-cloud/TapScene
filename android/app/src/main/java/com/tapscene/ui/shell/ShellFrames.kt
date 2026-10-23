@@ -18,9 +18,12 @@ import androidx.compose.ui.unit.dp
 
 enum class ProjectTab(val label: String) { STEPS("步骤"), SOURCES("素材"), CHECKS("检查与交付") }
 
+/** Only presentation changes; the frame keeps the single creation sheet and its callbacks. */
+enum class ProjectHomeCreationLayout { INTRODUCTION, COMPACT }
+
 /** Shared production chrome, also used by the host-side layout previews. */
 @Composable
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 fun ProjectHomeFrame(
     onRecord: () -> Unit,
     onImportVideo: () -> Unit,
@@ -29,7 +32,7 @@ fun ProjectHomeFrame(
     onImportScreenshot: () -> Unit = {},
     onImportAi: () -> Unit = {},
     onClickPlan: () -> Unit,
-    content: @Composable (@Composable () -> Unit) -> Unit,
+    content: @Composable (@Composable (ProjectHomeCreationLayout) -> Unit) -> Unit,
 ) {
     var showCreateOptions by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
@@ -38,12 +41,25 @@ fun ProjectHomeFrame(
         }
         // A single scrolling body keeps projects reachable on short screens and with IME insets.
         Box(Modifier.weight(1f)) {
-            content {
-                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = onClickPlan, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("悬浮编排") }
-                    Text("在目标 App 上放置点位，再按顺序播放并录屏。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-                    OutlinedButton(onClick = { showCreateOptions = true }, shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("其他创建方式") }
+            content { layout ->
+                if (layout == ProjectHomeCreationLayout.INTRODUCTION) {
+                    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = onClickPlan, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("悬浮编排") }
+                        TextButton(onClick = { showCreateOptions = true },
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("其他创建方式") }
+                    }
+                } else {
+                    // Natural widths keep full labels and touch targets; large text wraps the
+                    // second control instead of squeezing two equal-width, truncated buttons.
+                    FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onClickPlan, shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
+                            modifier = Modifier.heightIn(min = 48.dp)) { Text("悬浮编排") }
+                        OutlinedButton(onClick = { showCreateOptions = true }, shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
+                            modifier = Modifier.heightIn(min = 48.dp)) { Text("其他创建方式") }
+                    }
                 }
             }
         }
