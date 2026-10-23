@@ -60,3 +60,21 @@ fun ProjectHomeExistingPreview() {
         }
     }
 }
+
+@PreviewTest
+@Preview(name = "project_home_long_and_empty_cards", widthDp = 360, heightDp = 800, fontScale = 1.3f, locale = "zh-rCN", showBackground = true)
+@Composable
+fun ProjectHomeLongAndEmptyCardsPreview() {
+    val projects = listOf(
+        ProjectSummary("sample-registration", "活动报名 Registration · 确认场次与参加者",
+            "选择适合的场次，核对参加者信息，再确认报名结果。", 3, 1_761_120_000_000L, 5, null),
+        ProjectSummary("sample-empty", "产品介绍", "", 1, 1_761_116_400_000L, 0, null),
+    )
+    TapSceneTheme {
+        Surface(color = ShellColors.Background) {
+            ProjectHomeFrame({}, {}, {}, {}, onClickPlan = {}) { creationActions ->
+                ProjectHomeContent(ProjectUiState(projects = projects), {}, {}, {}, creationActions = creationActions)
+            }
+        }
+    }
+}
