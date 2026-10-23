@@ -98,14 +98,17 @@ class HomeMaterialPagesHostTest {
     @Test fun healthyHomeEmptyStateDoesNotReplaceLoadingOrFailure() {
         val state = mutableStateOf(ProjectUiState())
         content { ProjectHomeContent(state.value, {}, {}, {}) }
-        compose.onNodeWithText("还没有项目").assertIsDisplayed()
-        compose.onNodeWithText("创建的项目会在这里保留，方便继续编辑。").assertIsDisplayed()
+        compose.onNodeWithText("制作第一份可点击演示").assertIsDisplayed()
+        compose.onNodeWithText("选 App、编排点位并录屏，再整理和复核画面与点击路线。").assertIsDisplayed()
         compose.runOnIdle { state.value = state.value.copy(busy = true) }
         compose.onNodeWithText("正在读取本机项目").assertIsDisplayed()
-        compose.onNodeWithText("还没有项目").assertDoesNotExist()
+        compose.onNodeWithText("制作第一份可点击演示").assertDoesNotExist()
         compose.runOnIdle { state.value = state.value.copy(loadFailed = true) }
         compose.onNodeWithText("暂时无法读取项目").assertIsDisplayed()
-        compose.onNodeWithText("还没有项目").assertDoesNotExist()
+        compose.onNodeWithText("正在读取本机项目").assertDoesNotExist()
+        compose.onNodeWithText("制作第一份可点击演示").assertDoesNotExist()
+        compose.runOnIdle { state.value = ProjectUiState() }
+        compose.onNodeWithText("制作第一份可点击演示").assertIsDisplayed()
     }
 
     @Test fun acquisitionSheetDismissesAndKeepsEachCallbackSeparate() {

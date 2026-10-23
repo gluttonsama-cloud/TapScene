@@ -122,7 +122,7 @@ class ScreenshotCreationJourneyHostTest {
     }
 
     @Test fun homeCancellationThenTwoReviewedScreenshotsCreateOneProjectAndKeepBothSteps() {
-        waitFor("还没有项目")
+        waitFor("制作第一份可点击演示")
         val app = RuntimeEnvironment.getApplication()
         val provider = ViewModelProvider(compose.activity)
         val projects = provider[ProjectWorkspace::class.java]
@@ -185,7 +185,7 @@ class ScreenshotCreationJourneyHostTest {
         assertEquals(1, launches)
         deliver(null)
         settled()
-        compose.onNodeWithText("还没有项目").assertIsDisplayed()
+        compose.onNodeWithText("制作第一份可点击演示").assertIsDisplayed()
         assertNull(screenshots.state.value.sessionId)
         assertNull(projects.state.value.project)
         assertEquals(0, opens.get())

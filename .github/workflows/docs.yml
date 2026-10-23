@@ -265,7 +265,9 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 155, f"Expected 155 Compose review images, found {len(images)}"
+          assert len(images) == 157, f"Expected 157 Compose review images, found {len(images)}"
+          project_home_images = [image for image in images if "ProjectHomeReturnScreenshotPreviewsKt" in str(image)]
+          assert len(project_home_images) == 5, f"Expected five home introduction/project/search images, found {len(project_home_images)}"
           project_deletion_images = [image for image in images if "ProjectDeletionScreenshotPreviewsKt" in str(image)]
           assert len(project_deletion_images) == 3, f"Expected three project deletion confirmation images, found {len(project_deletion_images)}"
           screenshot_import_images = [image for image in images if "ScreenshotImportPreviewsKt" in str(image)]
@@ -881,6 +883,9 @@ jobs:
               ("com.tapscene.ui.shell.ProjectHomeReturnContextHostTest", "openingFilteredProjectAndReturningKeepsSearchAndActualRowPosition"): 1,
               ("com.tapscene.ui.shell.ProjectHomeReturnContextHostTest", "copyingFromFilteredHomeAndReturningKeepsContextAndAddsOnlyIndependentCopy"): 1,
               ("com.tapscene.ui.shell.CompactHomeActionsHostTest", "landscapeLargeTextKeepsSearchProjectsAndCreationTouchableWhenContentHeightShrinks"): 1,
+              ("com.tapscene.ui.shell.CompactHomeActionsHostTest", "smallHomeShowsCompleteFirstProjectBeforeAnyScrolling"): 1,
+              ("com.tapscene.ui.shell.CompactHomeActionsHostTest", "retainedHomeProjectsStayDisabledDuringBusyOrFailedReads"): 1,
+              ("com.tapscene.ui.shell.CompactHomeActionsHostTest", "loadingIntoHealthyEmptyHomeKeepsIntroductionAtTheTop"): 1,
               ("com.tapscene.ui.shell.ReviewRegionCorrectionHostTest", "fixedRegionReviewRepairsExactSourceAndReturnsToUnchangedCandidate"): 1,
               ("com.tapscene.ui.shell.ReviewRegionCorrectionHostTest", "missingSourceAndPendingStepEditsCannotRetargetRegionCorrection"): 1,
           }

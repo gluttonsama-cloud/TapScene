@@ -100,9 +100,10 @@ fun ProjectHomeContent(
     modifier: Modifier = Modifier,
     onCopyProject: (String) -> Unit = {},
     homeState: ProjectHomeState = rememberProjectHomeState(),
-    creationActions: (@Composable () -> Unit)? = null,
+    creationActions: (@Composable (ProjectHomeCreationLayout) -> Unit)? = null,
 ) {
     val query = homeState.query
+    val healthyEmpty = state.projects.isEmpty() && !state.busy && !state.loadFailed
     val visibleProjects = remember(state.projects, query) {
         val term = query.trim()
         state.projects.filter { term.isEmpty() || it.title.contains(term, ignoreCase = true) ||
@@ -114,7 +115,25 @@ fun ProjectHomeContent(
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        if (creationActions != null) item(key = "create_actions") { creationActions() }
+        if (healthyEmpty || creationActions != null) {
+            // Keep one stable first item across the initial busy -> empty transition. Inserting
+            // an introduction before create_actions would retain the old item as a scroll anchor
+            // and silently put the new introduction above the viewport on a short window.
+            item(key = "create_actions") {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    if (healthyEmpty) {
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Text("制作第一份可点击演示", style = MaterialTheme.typography.headlineMedium,
+                                modifier = Modifier.semantics { heading() })
+                            Text("选 App、编排点位并录屏，再整理和复核画面与点击路线。",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                    creationActions?.invoke(if (healthyEmpty) ProjectHomeCreationLayout.INTRODUCTION else ProjectHomeCreationLayout.COMPACT)
+                }
+            }
+        }
         if (state.projects.isNotEmpty()) {
             item(key = "search") {
                 OutlinedTextField(
@@ -142,10 +161,9 @@ fun ProjectHomeContent(
             item(key = "loading") { WorkspaceEmpty("正在读取本机项目", "读取完成后，项目会显示在这里。") }
         } else if (state.projects.isEmpty()) {
             item(key = "empty") {
-                Column {
-                    EmptyProjectFrames()
-                    WorkspaceEmpty("还没有项目", "创建的项目会在这里保留，方便继续编辑。")
-                }
+                Text("项目与原素材保存在这台设备，交付前仍需复核实际输出。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else if (visibleProjects.isEmpty()) {
             item(key = "no_matches") { WorkspaceEmpty("没有找到匹配项目", "换个关键词，或清除搜索查看全部项目。") }
@@ -196,7 +214,7 @@ private fun ProjectRow(
                             color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1,
                             overflow = TextOverflow.Ellipsis)
                     }
-                    Text("${project.stepCount} 个步骤 · 修订 ${project.revision}",
+                    Text("${project.stepCount} 个步骤",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text("修改于 ${formatProjectDate(project.updatedAt)}", style = MaterialTheme.typography.bodySmall,
@@ -695,31 +713,6 @@ private fun DerivedStepThumbnail(
                     size = Size(width * .7f, height * .54f), style = Stroke(stroke))
                 drawLine(placeholderInk, Offset(width * .25f, height * .65f),
                     Offset(width * .7f, height * .35f), stroke)
-            }
-        }
-    }
-}
-
-/** Decorative empty state only: no media, progress, or example projects. */
-@Composable
-private fun EmptyProjectFrames() {
-    val frameColor = MaterialTheme.colorScheme.outlineVariant
-    val connectionColor = MaterialTheme.colorScheme.onSurfaceVariant
-    Canvas(Modifier.size(width = 120.dp, height = 64.dp)) {
-        val stroke = 1.dp.toPx()
-        val frameWidth = 28.dp.toPx()
-        val frameHeight = 40.dp.toPx()
-        val top = 12.dp.toPx()
-        repeat(3) { index ->
-            val left = (2 + index * 44).dp.toPx()
-            drawRect(frameColor, Offset(left, top), Size(frameWidth, frameHeight), style = Stroke(stroke))
-            if (index < 2) {
-                val start = left + frameWidth + 4.dp.toPx()
-                val end = left + 40.dp.toPx()
-                val center = size.height / 2
-                drawLine(connectionColor, Offset(start, center), Offset(end, center), stroke)
-                drawLine(connectionColor, Offset(end - 3.dp.toPx(), center - 3.dp.toPx()), Offset(end, center), stroke)
-                drawLine(connectionColor, Offset(end - 3.dp.toPx(), center + 3.dp.toPx()), Offset(end, center), stroke)
             }
         }
     }

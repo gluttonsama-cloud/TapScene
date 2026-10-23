@@ -30,3 +30,33 @@ fun ProjectHomeSearchSmallPreview() {
         }
     }
 }
+
+@PreviewTest
+@Preview(name = "project_home_introduction_small", widthDp = 320, heightDp = 568, fontScale = 1.3f, locale = "zh-rCN", showBackground = true)
+@Composable
+fun ProjectHomeIntroductionSmallPreview() {
+    TapSceneTheme {
+        Surface(color = ShellColors.Background) {
+            ProjectHomeFrame({}, {}, {}, {}, onClickPlan = {}) { creationActions ->
+                ProjectHomeContent(ProjectUiState(), {}, {}, {}, creationActions = creationActions)
+            }
+        }
+    }
+}
+
+@PreviewTest
+@Preview(name = "project_home_existing", widthDp = 360, heightDp = 800, locale = "zh-rCN", showBackground = true)
+@Composable
+fun ProjectHomeExistingPreview() {
+    val projects = listOf(
+        ProjectSummary("sample-registration", "报名流程", "核对场次和参加者后确认提交", 3, 1_761_120_000_000L, 5, null),
+        ProjectSummary("sample-address", "修改地址", "确认收件信息", 1, 1_761_116_400_000L, 2, null),
+    )
+    TapSceneTheme {
+        Surface(color = ShellColors.Background) {
+            ProjectHomeFrame({}, {}, {}, {}, onClickPlan = {}) { creationActions ->
+                ProjectHomeContent(ProjectUiState(projects = projects), {}, {}, {}, creationActions = creationActions)
+            }
+        }
+    }
+}
