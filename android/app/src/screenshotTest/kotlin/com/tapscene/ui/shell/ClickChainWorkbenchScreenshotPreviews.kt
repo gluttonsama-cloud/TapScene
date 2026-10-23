@@ -1,20 +1,27 @@
 package com.tapscene.ui.shell
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
 import com.android.tools.screenshot.PreviewTest
+import com.tapscene.clickplan.ClickChainActionEditor
 import com.tapscene.clickplan.ClickChainActionRow
+import com.tapscene.clickplan.ClickChainFrameEditor
 import com.tapscene.clickplan.ClickChainFrameRow
 import com.tapscene.clickplan.ClickChainReviewUiState
 import com.tapscene.clickplan.ClickChainStageChoice
 import com.tapscene.clickplan.ClickChainStageRow
 import com.tapscene.clickplan.ClickChainThumbnailSource
 import com.tapscene.clickplan.INITIAL_SNAPSHOT_NOTICE
+import com.tapscene.media.OpaqueMask
 
 /** Synthetic layout fixtures calling the production workbench, not a separately drawn mock screen. */
 @PreviewTest
@@ -36,6 +43,43 @@ fun ClickChainWorkbenchMixedLargePreview() {
 @Composable
 fun ClickChainWorkbenchLandscapePreview() {
     WorkbenchPreviewSurface { ClickChainReviewContent(workbenchFixture(), ClickChainReviewCallbacks()) }
+}
+
+@PreviewTest
+@Preview(name = "click_chain_workbench_short_pane", widthDp = 800, heightDp = 800, locale = "zh-rCN", showBackground = true)
+@Composable
+fun ClickChainWorkbenchShortPanePreview() {
+    WorkbenchPreviewSurface {
+        // Surface propagates its own minimum size; this outer Box gives the pane loose minima.
+        Box(Modifier.fillMaxSize()) {
+            Box(Modifier.fillMaxWidth().height(360.dp)) {
+                ClickChainReviewContent(workbenchFixture(), ClickChainReviewCallbacks())
+            }
+        }
+    }
+}
+
+@PreviewTest
+@Preview(name = "click_chain_frame_busy_large", widthDp = 320, heightDp = 640, fontScale = 1.3f, locale = "zh-rCN", showBackground = true)
+@Composable
+fun ClickChainFrameBusyLargePreview() {
+    WorkbenchPreviewSurface {
+        ClickChainReviewContent(ClickChainReviewUiState(busy = true, frameEditor = ClickChainFrameEditor(
+            "synthetic-frame", "活动报名", remember { ShellPreviewFixture.bitmap(0) }, emptyList(), null, null, false),
+            message = "正在生成脱敏输出"), ClickChainReviewCallbacks())
+    }
+}
+
+@PreviewTest
+@Preview(name = "click_chain_action_busy_large", widthDp = 320, heightDp = 640, fontScale = 1.3f, locale = "zh-rCN", showBackground = true)
+@Composable
+fun ClickChainActionBusyLargePreview() {
+    WorkbenchPreviewSurface {
+        ClickChainReviewContent(ClickChainReviewUiState(busy = true, actionEditor = ClickChainActionEditor(
+            "synthetic-action", "确认报名", OpaqueMask(.1f, .78f, .9f, .89f),
+            remember { ShellPreviewFixture.bitmap(1) }, remember { ShellPreviewFixture.bitmap(2) }, "报名完成",
+            .5f to .835f, false, 1), message = "正在保存点击区域"), ClickChainReviewCallbacks())
+    }
 }
 
 @PreviewTest

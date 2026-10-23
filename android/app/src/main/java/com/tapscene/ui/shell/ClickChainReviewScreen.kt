@@ -2,6 +2,7 @@ package com.tapscene.ui.shell
 
 import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -32,6 +33,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -62,7 +64,6 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -149,12 +150,23 @@ internal fun ClickChainReviewContent(state: ClickChainReviewUiState, callbacks: 
 private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: ClickChainReviewCallbacks,
     listState: LazyListState, settingsExpanded: Boolean, onSettingsExpanded: (Boolean) -> Unit,
     expandedDetails: Set<String>, onToggleDetails: (String) -> Unit) {
+    // Use this pane's remaining space, including IME insets, not the device configuration.
+    // A short pane can live inside a taller window without changing screenHeightDp.
+    BoxWithConstraints(Modifier.fillMaxSize().imePadding()) {
+        ClickChainWorkbenchBody(state, callbacks, listState, settingsExpanded, onSettingsExpanded,
+            expandedDetails, onToggleDetails, compactHeight = maxHeight < 480.dp && LocalDensity.current.fontScale <= 1.2f)
+    }
+}
+
+@Composable
+private fun ClickChainWorkbenchBody(state: ClickChainReviewUiState, callbacks: ClickChainReviewCallbacks,
+    listState: LazyListState, settingsExpanded: Boolean, onSettingsExpanded: (Boolean) -> Unit,
+    expandedDetails: Set<String>, onToggleDetails: (String) -> Unit, compactHeight: Boolean) {
     val editable = !state.busy && !state.loading && !state.editingLocked && state.createdProjectId == null && !state.outcomeUnknown
     val hasResult = !state.outcomeUnknown && (state.createdProjectId != null || state.canStartAnotherSegment)
     val next = state.nextRequiredReview()
     val validation = state.validationIssue()
     val largeText = LocalDensity.current.fontScale > 1.2f
-    val compactHeight = LocalConfiguration.current.screenHeightDp < 480 && !largeText
     LaunchedEffect(validation) { if (validation != null) onSettingsExpanded(true) }
     val visibleKeys by remember(listState) { derivedStateOf { listState.layoutInfo.visibleItemsInfo.map { it.key }.toSet() } }
     val frames = remember(state.frames) { state.frames.associateBy { it.key } }
@@ -202,7 +214,7 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
         return if (request in requests) thumbnails[request] else null
     }
     BackHandler { if (!state.busy) callbacks.onBack() }
-    Column(Modifier.fillMaxSize().imePadding()) {
+    Column(Modifier.fillMaxSize()) {
         ShellTopBar("整理点击链", onBack = { if (!state.busy) callbacks.onBack() })
         if (state.loading || state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         LazyColumn(Modifier.weight(1f).fillMaxWidth().testTag("click_chain_workbench"), state = listState, contentPadding = PaddingValues(16.dp, 12.dp),
@@ -332,12 +344,12 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
                 TextButton(callbacks.onCancel) { Text("取消这次生成，继续编辑") }
             val button = Modifier.fillMaxWidth().heightIn(min = 56.dp)
             when {
-                state.busy || state.loading -> OutlinedButton(callbacks.onCancel, button) { Text("取消处理") }
+                state.busy || state.loading -> ClickChainFooterAction("取消处理", callbacks.onCancel, button)
                 state.outcomeUnknown -> Button(callbacks.onRetry, button) { Text("核对生成结果") }
                 state.createdProjectId != null -> {
                     Button({ callbacks.onOpenProject(state.createdProjectId) }, button) { Text("打开新项目") }
-                    if (state.canStartAnotherSegment) OutlinedButton(callbacks.onStartAnotherSegment,
-                        Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("再整理一段") }
+                    if (state.canStartAnotherSegment) ClickChainFooterAction("再整理一段", callbacks.onStartAnotherSegment,
+                        Modifier.fillMaxWidth().heightIn(min = 48.dp))
                 }
                 state.canStartAnotherSegment -> Button(callbacks.onStartAnotherSegment, button) { Text("再整理一段") }
                 state.issue?.startsWith("输入尚未保存") == true -> Button(callbacks.onRetry, button) { Text("重试保存输入") }
@@ -345,7 +357,7 @@ private fun ClickChainWorkbench(state: ClickChainReviewUiState, callbacks: Click
                     Text(if (nameRepair) "补全画面名称" else "继续复核画面")
                 }
                 next is ClickChainReviewTarget.Action -> Button({ callbacks.onReviewAction(next.actionId) }, button) { Text("继续核对动作") }
-                state.editingLocked && !state.retryCreate -> OutlinedButton(callbacks.onBack, button) { Text("返回录制") }
+                state.editingLocked && !state.retryCreate -> ClickChainFooterAction("返回录制", callbacks.onBack, button)
                 else -> Button(callbacks.onCreate, button, enabled = state.canCreate) {
                     Text(when { state.retryCreate -> "重试生成同一项目"; state.canCreate -> "生成独立项目"; else -> "先处理上方待办" })
                 }
@@ -511,7 +523,7 @@ private fun ClickChainActionRowContent(action: ClickChainActionRow, editable: Bo
             } else Text("动作 ${action.number.toString().padStart(2, '0')} · ${action.status}${if (current) " · 当前" else ""}",
                 style = MaterialTheme.typography.labelLarge,
                 color = if (current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("${action.fromTitle} → ${action.toTitle}", style = MaterialTheme.typography.bodyMedium,
+            Text("${action.fromTitle.ifBlank { "未填写名称" }} → ${action.toTitle.ifBlank { "未填写名称" }}", style = MaterialTheme.typography.bodyMedium,
                 maxLines = if (complete && !detailsExpanded) 2 else 3, overflow = TextOverflow.Ellipsis)
             if (!complete || detailsExpanded) {
                 if (complete) Text(action.status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -750,12 +762,19 @@ private fun ClickChainEditorFooter(busy: Boolean, onCancel: () -> Unit, onClose:
     label: String, enabled: Boolean, onConfirm: () -> Unit) {
     HorizontalDivider()
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (busy) OutlinedButton(onCancel, Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("取消处理") }
+        if (busy) ClickChainFooterAction("取消处理", onCancel, Modifier.fillMaxWidth().heightIn(min = 48.dp))
         else {
-            OutlinedButton(onClose, Modifier.heightIn(min = 48.dp)) { Text("返回整理") }
+            ClickChainFooterAction("返回整理", onClose, Modifier.heightIn(min = 48.dp))
             Button(onConfirm, Modifier.weight(1f).heightIn(min = 48.dp), enabled = enabled) { Text(label) }
         }
     }
+}
+
+/** These secondary exits remain available even when editing is locked. */
+@Composable
+private fun ClickChainFooterAction(label: String, onClick: () -> Unit, modifier: Modifier) {
+    OutlinedButton(onClick, modifier, border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) { Text(label) }
 }
 
 @Composable

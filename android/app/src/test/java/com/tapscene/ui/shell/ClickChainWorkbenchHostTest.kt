@@ -3,14 +3,20 @@ package com.tapscene.ui.shell
 import android.graphics.Bitmap
 
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModelProvider
 import com.tapscene.MainActivity
+import com.tapscene.clickplan.ClickChainActionEditor
 import com.tapscene.clickplan.ClickChainActionRow
 import com.tapscene.clickplan.ClickChainFrameEditor
 import com.tapscene.clickplan.ClickChainFrameRow
@@ -20,6 +26,7 @@ import com.tapscene.clickplan.ClickChainStageRow
 import com.tapscene.clickplan.ClickChainThumbnailSource
 import com.tapscene.clickplan.INITIAL_SNAPSHOT_NOTICE
 import com.tapscene.data.HostSqlite
+import com.tapscene.media.OpaqueMask
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -167,17 +174,120 @@ class ClickChainWorkbenchHostTest {
         val state = mutableStateOf(ready.copy(busy = true))
         var newSegments = 0
         var retries = 0
-        show(state, ClickChainReviewCallbacks(onStartAnotherSegment = { newSegments++ }, onRetry = { retries++ }))
+        var cancels = 0
+        var opensOrWrites = 0
+        show(state, ClickChainReviewCallbacks(onStartAnotherSegment = { newSegments++ }, onRetry = { retries++ },
+            onCancel = { cancels++ }, onOpenProject = { opensOrWrites++ }, onCreate = { opensOrWrites++ },
+            onConfirmFrame = { opensOrWrites++ }, onConfirmAction = { opensOrWrites++ }))
         compose.onNodeWithText("再整理一段").assertDoesNotExist()
-        compose.onNodeWithText("取消处理").assertIsEnabled()
+        compose.onNodeWithText("取消处理").assertIsEnabled().performClick()
         compose.runOnIdle { state.value = ready.copy(loading = true) }
         compose.onNodeWithText("再整理一段").assertDoesNotExist()
+        compose.onNodeWithText("取消处理").assertIsEnabled().performClick()
         compose.runOnIdle { state.value = ready.copy(outcomeUnknown = true) }
         compose.onNodeWithTag("click_chain_result").assertDoesNotExist()
         compose.onNodeWithText("打开新项目").assertDoesNotExist()
         compose.onNodeWithText("再整理一段").assertDoesNotExist()
+        compose.onNodeWithText("取消处理").assertDoesNotExist()
         compose.onNodeWithText("核对生成结果").performClick()
-        compose.runOnIdle { assertEquals(0, newSegments); assertEquals(1, retries) }
+        compose.runOnIdle {
+            assertEquals(0, newSegments); assertEquals(1, retries)
+            assertEquals(2, cancels); assertEquals(0, opensOrWrites)
+        }
+    }
+
+    @Test fun bothBusyEditorsKeepCancelDistinctFromIdleReturnAndNeverConfirm() {
+        val frame = ClickChainFrameEditor("frame-0", "合成画面", null, emptyList(), null, null, false)
+        val action = ClickChainActionEditor("action-0", "合成动作", OpaqueMask(.1f, .1f, .3f, .2f),
+            null, null, "合成后继", .2f to .15f, false, 1)
+        val editors = listOf(fixture().copy(frameEditor = frame), fixture().copy(actionEditor = action))
+        val state = mutableStateOf(editors.first().copy(busy = true))
+        var cancels = 0
+        var returns = 0
+        var writes = 0
+        show(state, ClickChainReviewCallbacks(onCancel = { cancels++ }, onCloseEditor = { returns++ },
+            onGenerateFrame = { writes++ }, onConfirmFrame = { writes++ }, onConfirmAction = { writes++ },
+            onFrameTitleChange = { writes++ }, onActionLabelChange = { writes++ }, onCreate = { writes++ }))
+        editors.forEachIndexed { index, editorState ->
+            compose.runOnIdle { state.value = editorState.copy(busy = true) }
+            compose.onNodeWithText("返回整理").assertDoesNotExist()
+            // Disabled text fields intentionally expose no SetText action; find the merged field by its label.
+            compose.onNodeWithText(if (index == 0) "画面标题" else "动作名称").assertIsNotEnabled()
+            compose.onNodeWithContentDescription("返回").performClick()
+            compose.runOnIdle { assertEquals(index, returns) }
+            compose.onNodeWithText("取消处理").assertIsDisplayed().assertIsEnabled().performClick()
+            compose.runOnIdle { assertEquals(index + 1, cancels); assertEquals(0, writes); state.value = editorState }
+            compose.onNodeWithText("取消处理").assertDoesNotExist()
+            compose.onNodeWithText("返回整理").assertIsEnabled().performClick()
+            compose.runOnIdle { assertEquals(index + 1, returns); assertEquals(index + 1, cancels); assertEquals(0, writes) }
+        }
+    }
+
+    @Test fun blankRouteLabelsStayVisibleWithoutRepairingOrConfirmingTheDraft() {
+        val ready = fixture(complete = true)
+        fun withNames(from: String, to: String) = ready.copy(canCreate = false,
+            frames = ready.frames.mapIndexed { index, frame -> frame.copy(title = if (index == 0) from else to) },
+            stages = ready.stages.mapIndexed { index, stage -> stage.copy(title = if (index == 0) from else to) },
+            actions = ready.actions.map { it.copy(fromTitle = from, toTitle = to) })
+        val state = mutableStateOf(withNames("", "合成后继"))
+        val opened = mutableListOf<String>()
+        var writes = 0
+        show(state, ClickChainReviewCallbacks(onReviewFrame = { opened += it }, onFrameTitleChange = { writes++ },
+            onConfirmFrame = { writes++ }, onConfirmAction = { writes++ }, onCreate = { writes++ }))
+        listOf("" to "合成后继", "合成起点" to " \t", "" to "").forEach { (from, to) ->
+            compose.runOnIdle { state.value = withNames(from, to) }
+            compose.onNodeWithTag("click_chain_workbench").performScrollToKey("action:action-0")
+            compose.onNodeWithText("${from.ifBlank { "未填写名称" }} → ${to.ifBlank { "未填写名称" }}").assertIsDisplayed()
+            compose.onNodeWithText("生成独立项目").assertDoesNotExist()
+            compose.onNodeWithText("补全画面名称").assertIsEnabled().performClick()
+            compose.runOnIdle {
+                assertEquals(from, state.value.actions.single().fromTitle)
+                assertEquals(to, state.value.actions.single().toTitle)
+                assertTrue(!state.value.canCreate); assertEquals(0, writes)
+            }
+        }
+        compose.runOnIdle { assertEquals(listOf("frame-0", "frame-1", "frame-0"), opened) }
+    }
+
+    @Test
+    @Config(qualifiers = "w800dp-h800dp-mdpi")
+    fun shortParentInsideTallConfigurationUsesActualAvailableHeight() {
+        val bitmap = Bitmap.createBitmap(32, 48, Bitmap.Config.ARGB_8888)
+        val ready = fixture(complete = true)
+        val state = ready.copy(
+            frames = ready.frames.mapIndexed { index, frame -> if (index == 0) frame.copy(thumbnail = bitmap)
+                else frame.copy(reviewed = false, thumbnailSource = ClickChainThumbnailSource.OriginalUnreviewed("pending")) },
+            stages = ready.stages.mapIndexed { index, stage -> stage.copy(reviewed = index == 0) },
+            actions = ready.actions.map { it.copy(confirmed = false, enabled = false) },
+            reviewedFrameCount = 1, confirmedActionCount = 0, canCreate = false)
+        val paneHeight = mutableStateOf(800.dp)
+        var confirms = 0
+        compose.runOnUiThread {
+            compose.activity.setContent {
+                TapSceneTheme {
+                    Box(Modifier.fillMaxWidth().height(paneHeight.value)) {
+                        ClickChainReviewContent(state, ClickChainReviewCallbacks(onConfirmFrame = { confirms++ }, onConfirmAction = { confirms++ }))
+                    }
+                }
+            }
+        }
+        compose.onNodeWithText("合成运行").assertIsDisplayed()
+        compose.runOnIdle { paneHeight.value = 360.dp }
+        assertTrue("The configuration must remain tall while the available pane shrinks",
+            compose.activity.resources.configuration.screenHeightDp >= 800)
+        val picture = compose.onNodeWithContentDescription("合成画面 0，已复核画面缩略图")
+            .assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        val progress = compose.onNodeWithText("画面 1/2 · 动作 0/1").fetchSemanticsNode().boundsInRoot
+        assertEquals("The entire picture must fit in the constrained pane", 84f, picture.height, .5f)
+        assertTrue(picture.bottom <= progress.top)
+        compose.onNodeWithText("合成运行").assertDoesNotExist()
+        compose.onNodeWithText("继续复核画面").assertIsDisplayed().assertIsEnabled()
+        compose.onNodeWithTag("click_chain_settings").assertIsDisplayed().performClick()
+        compose.onNodeWithText("合成运行").assertIsDisplayed()
+        compose.onNodeWithTag("click_chain_settings").performClick()
+        compose.runOnIdle { paneHeight.value = 800.dp }
+        compose.onNodeWithText("合成运行").assertIsDisplayed()
+        compose.runOnIdle { assertEquals(0, confirms) }
     }
 
     @Test

@@ -265,7 +265,7 @@ jobs:
 
           root = Path("android/app/src/screenshotTestDebug/reference")
           images = sorted(root.rglob("*.png"))
-          assert len(images) == 152, f"Expected 152 Compose review images, found {len(images)}"
+          assert len(images) == 155, f"Expected 155 Compose review images, found {len(images)}"
           project_deletion_images = [image for image in images if "ProjectDeletionScreenshotPreviewsKt" in str(image)]
           assert len(project_deletion_images) == 3, f"Expected three project deletion confirmation images, found {len(project_deletion_images)}"
           screenshot_import_images = [image for image in images if "ScreenshotImportPreviewsKt" in str(image)]
@@ -287,7 +287,7 @@ jobs:
           click_review_images = [image for image in images if "ClickChainReviewScreenshotPreviewsKt" in str(image)]
           assert len(click_review_images) == 10, f"Expected ten click-chain author review images, found {len(click_review_images)}"
           click_workbench_images = [image for image in images if "ClickChainWorkbenchScreenshotPreviewsKt" in str(image)]
-          assert len(click_workbench_images) == 5, f"Expected five compact workbench/result images, found {len(click_workbench_images)}"
+          assert len(click_workbench_images) == 8, f"Expected eight workbench/result/editor window images, found {len(click_workbench_images)}"
           click_precision_images = [image for image in images if "ClickChainActionPrecisionScreenshotPreviewsKt" in str(image)]
           assert len(click_precision_images) == 3, f"Expected three click-region precision images, found {len(click_precision_images)}"
           click_exit_images = [image for image in images if "ClickPlanCreatedProjectExitScreenshotPreviewsKt" in str(image)]
@@ -707,6 +707,9 @@ jobs:
               ("com.tapscene.ui.shell.ClickChainWorkbenchHostTest", "busyLoadingAndUnknownOutcomesCannotStartAnotherSegment"): 1,
               ("com.tapscene.ui.shell.ClickChainWorkbenchHostTest", "editorReturnPreservesExpandedReadingPositionAndNewSessionResetsIt"): 1,
               ("com.tapscene.ui.shell.ClickChainWorkbenchHostTest", "shortLandscapeShowsTheFirstPictureBeforeScrollingAndKeepsSettingsReachable"): 1,
+              ("com.tapscene.ui.shell.ClickChainWorkbenchHostTest", "shortParentInsideTallConfigurationUsesActualAvailableHeight"): 1,
+              ("com.tapscene.ui.shell.ClickChainWorkbenchHostTest", "blankRouteLabelsStayVisibleWithoutRepairingOrConfirmingTheDraft"): 1,
+              ("com.tapscene.ui.shell.ClickChainWorkbenchHostTest", "bothBusyEditorsKeepCancelDistinctFromIdleReturnAndNeverConfirm"): 1,
               ("com.tapscene.ui.shell.ClickChainRectPercentagesTest", "acceptsFullBoundsAndDecimalPercentages"): 1,
               ("com.tapscene.ui.shell.ClickChainRectPercentagesTest", "preservesOriginalInstanceOnUnchangedInput"): 1,
               ("com.tapscene.ui.shell.ClickChainRectPercentagesTest", "equivalentFormattingIsNoOp"): 1,
