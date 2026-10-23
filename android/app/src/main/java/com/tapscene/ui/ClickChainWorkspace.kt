@@ -80,9 +80,12 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
                 val previous = withContext(Dispatchers.IO) { reviews.readExisting(runId) }
                 val receipt = previous?.operationId?.let { withContext(Dispatchers.IO) { projects.readClickChainImport(it) } }
                 if (receipt?.status == "committed") {
+                    draft = previous; persistedSerial = previous.serial
                     resultStatus = "committed"
                     if (request == generation) mutable.value = ClickChainReviewUiState(runId = runId,
-                        title = previous.title, editingLocked = true, createdProjectId = receipt.projectId.takeIf { receipt.projectStillExists },
+                        title = previous.title, firstAction = previous.firstAction, lastAction = previous.lastAction,
+                        reviewSessionId = previous.owner, canStartAnotherSegment = true,
+                        editingLocked = true, createdProjectId = receipt.projectId.takeIf { receipt.projectStillExists },
                         message = if (receipt.projectStillExists) "这段点击链已建为独立项目。" else "生成的项目已被删除；这次重试不会重新创建。")
                     return@launch
                 }
@@ -256,6 +259,7 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
         val reviewedCount = keys.count(::frameReviewed)
         val confirmedCount = if (saved.framesOnly) 0 else actions.count { it.confirmed }
         mutable.update { previous -> previous.copy(title = saved.title,runLabel = "${current.run.plan.actions.size} 个编排动作 · 录屏保存在本机",
+            reviewSessionId = saved.owner, canStartAnotherSegment = resultStatus == "committed" && !previous.outcomeUnknown,
             firstAction = saved.firstAction,lastAction = saved.lastAction,totalActions = current.actions.size,framesOnly = saved.framesOnly,
             stages = path.stages.map { stage -> ClickChainStageRow(stage.index,stage.selectedKey?.let(::titleForFrame) ?: "画面待补",
                 stage.choices,stage.selectedKey,stage.selectedKey?.let(::frameReviewed) == true) },actions = actions,
@@ -427,7 +431,61 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
     fun closeEditor() = execute(null) { selectedFrame = null;selectedAction = null;editorBitmap = null;outputBitmap = null;actionBitmap = null;targetBitmap = null;refresh() }
     fun leave(action: () -> Unit) = execute(null) { action() }
 
+    /** A new authoring operation is explicit. Retry/reopen keep the old immutable receipt. */
+    fun startAnotherSegment() {
+        if (!state.value.canStartAnotherSegment || state.value.busy || state.value.loading || state.value.outcomeUnknown) return
+        val runId = state.value.runId ?: return
+        val request = generation
+        execute("正在读取原录屏，准备整理新一段", flushFirst = false) {
+            var transitionStarted = false
+            try {
+                writes.withLock {
+                    val expected = checkNotNull(draft) { "请重新读取上一段的生成结果。" }
+                    val loadingJob = checkNotNull(currentCoroutineContext()[Job])
+                    // Observe cancellation during source IO, but never lose a successful draft
+                    // replacement to prompt cancellation while returning from the IO dispatcher.
+                    withContext(NonCancellable) {
+                        val (loaded, saved) = withContext(Dispatchers.IO) {
+                            WorkspaceStore.withProjectCopyLock {
+                                loadingJob.ensureActive()
+                                val receipt = expected.operationId?.let(projects::readClickChainImport)
+                                check(receipt?.status == "committed") { "请先核对上一段的生成结果。" }
+                                val loaded = loadCapture(runId) { loadingJob.ensureActive() }
+                                loadingJob.ensureActive()
+                                transitionStarted = true
+                                val saved = reviews.startAnotherSegment(expected, loaded.source.metadata.sha256, loaded.actions.size) {
+                                    loadingJob.isActive && request == generation
+                                }
+                                loaded to saved
+                            }
+                        }
+                        capture = loaded; draft = saved; persistedSerial = saved.serial
+                        resultStatus = null; stagingFailure = false
+                        selectedFrame = null; selectedAction = null
+                        editorBitmap = null; outputBitmap = null; actionBitmap = null; targetBitmap = null
+                        mutable.value = ClickChainReviewUiState(runId = runId, busy = true,
+                            message = "正在整理新一段。已有项目不变；相同画面的复核保留，新画面仍需复核。")
+                        refresh()
+                    }
+                }
+            } catch (failure: Exception) {
+                if (transitionStarted) {
+                    // rename may have succeeded before fsync failed. Never save the completed
+                    // in-memory draft over that uncertain replacement; reload the actual journal.
+                    capture = null; draft = null; persistedSerial = -1L; resultStatus = null; stagingFailure = false
+                    mutable.update { it.copy(createdProjectId = null, canStartAnotherSegment = false,
+                        editingLocked = true, canCreate = false, outcomeUnknown = true,
+                        issue = "新一段的保存状态尚未确认，请重新读取。已有项目不会因此改变。",
+                        message = failure.message) }
+                } else mutable.update { it.copy(message = if (failure is CancellationException)
+                    "已停止读取，上一段的生成结果仍保留。" else failure.message ?: "原录屏暂时无法读取，上一段的生成结果仍保留。") }
+                if (failure is CancellationException) throw failure
+            }
+        }
+    }
+
     fun createProject() {
+        if (resultStatus == "committed" || state.value.outcomeUnknown) return
         if (!state.value.canCreate && draft?.operationId == null) return
         execute("正在建立独立项目") {
             var current = checkNotNull(draft)
@@ -438,7 +496,7 @@ internal class ClickChainWorkspace(application: Application) : AndroidViewModel(
             val operationId = checkNotNull(draft?.operationId)
             try {
                 val input = importInput(operationId)
-                val result = withContext(Dispatchers.IO) { projects.importReviewedClickChain(input) }
+                val result = withContext(Dispatchers.IO) { projects.importReviewedClickChain(input, sourceAccessor) }
                 resultStatus = result.status
             } finally {
                 withContext(NonCancellable) {

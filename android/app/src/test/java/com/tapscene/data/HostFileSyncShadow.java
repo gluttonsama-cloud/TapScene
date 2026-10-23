@@ -33,6 +33,9 @@ public final class HostFileSyncShadow {
     private static final Map<FileDescriptor, FileChannel> open = new IdentityHashMap<>();
     private static final Set<FileDescriptor> closed = Collections.newSetFromMap(new IdentityHashMap<>());
     private static int directorySyncs, fileSyncs;
+    private static Path nextDirectorySyncTarget;
+    private static Runnable nextDirectorySyncAction;
+    private static boolean failNextDirectorySync;
 
     public static synchronized void begin(File privateRoot) throws IOException {
         if (root != null || !open.isEmpty()) throw new IllegalStateException("Host FD scope already active");
@@ -42,6 +45,8 @@ public final class HostFileSyncShadow {
         if (!Files.isDirectory(root)) throw new IllegalStateException("Fixture root is not a directory");
         closed.clear();
         directorySyncs = fileSyncs = 0;
+        failNextDirectorySync = false;
+        nextDirectorySyncTarget = null; nextDirectorySyncAction = null;
     }
 
     public static synchronized void beginProductionEvidence() {
@@ -67,6 +72,23 @@ public final class HostFileSyncShadow {
                 + " directFileDescriptorSync=not-counted openDescriptors=0");
     }
 
+    /** Inject a lost success after the real rename/sync, not fake filesystem durability. */
+    public static synchronized void failNextDirectorySyncAfterWrite(File directory) throws IOException {
+        afterNextDirectorySync(directory, null);
+        failNextDirectorySync = true;
+    }
+
+    /** Test-only boundary hook, restricted to one exact existing fixture directory. */
+    public static synchronized void afterNextDirectorySync(File directory, Runnable action) throws IOException {
+        if (root == null) throw new IllegalStateException("No host FD scope");
+        Path target = directory.toPath().toRealPath();
+        if (!target.startsWith(root) || !Files.isDirectory(target) || nextDirectorySyncTarget != null)
+            throw new IllegalStateException("Invalid or already armed directory sync hook");
+        nextDirectorySyncTarget = target;
+        nextDirectorySyncAction = action;
+        failNextDirectorySync = false;
+    }
+
     public static synchronized void reset() throws IOException {
         boolean leaked = !open.isEmpty();
         IOException failure = null;
@@ -75,7 +97,8 @@ public final class HostFileSyncShadow {
                 if (failure == null) failure = e; else failure.addSuppressed(e);
             }
         }
-        open.clear(); closed.clear(); root = null;
+        open.clear(); closed.clear(); root = null; failNextDirectorySync = false;
+        nextDirectorySyncTarget = null; nextDirectorySyncAction = null;
         if (failure != null) throw failure;
         if (leaked) throw new IllegalStateException("Closed leaked host descriptors after failed test");
     }
@@ -120,6 +143,18 @@ public final class HostFileSyncShadow {
         if (!OsConstants.S_ISDIR(mode) && !OsConstants.S_ISREG(mode)) throw new ErrnoException("fsync", OsConstants.EINVAL);
         try { descriptor.sync(); } catch (IOException e) { throw new ErrnoException("fsync", OsConstants.EIO, e); }
         if (OsConstants.S_ISDIR(mode)) directorySyncs++; else fileSyncs++;
+        if (OsConstants.S_ISDIR(mode) && nextDirectorySyncTarget != null) {
+            boolean matches;
+            try { matches = Files.isSameFile(descriptorPath(descriptor), nextDirectorySyncTarget); }
+            catch (IOException e) { throw new ErrnoException("sync hook target", OsConstants.EIO, e); }
+            if (matches) {
+                Runnable action = nextDirectorySyncAction;
+                boolean fail = failNextDirectorySync;
+                nextDirectorySyncTarget = null; nextDirectorySyncAction = null; failNextDirectorySync = false;
+                if (action != null) action.run();
+                if (fail) throw new ErrnoException("injected lost directory-sync result", OsConstants.EIO);
+            }
+        }
     }
 
     @Implementation protected static synchronized void close(FileDescriptor descriptor) throws ErrnoException {
@@ -142,13 +177,18 @@ public final class HostFileSyncShadow {
 
     private static Map<String, Object> attributes(FileDescriptor descriptor) throws ErrnoException {
         try {
+            // Follow the held FD, not its old pathname (which may have been renamed/deleted).
+            return Files.readAttributes(descriptorPath(descriptor), "unix:*");
+        } catch (Exception e) { throw new ErrnoException("fstat", OsConstants.EIO, e); }
+    }
+    private static Path descriptorPath(FileDescriptor descriptor) throws IOException {
+        try {
             Field field = FileDescriptor.class.getDeclaredField("fd");
             field.setAccessible(true);
             int number = field.getInt(descriptor);
             if (number < 0) throw new IOException("Invalid native file descriptor");
-            // Follow the held FD, not its old pathname (which may have been renamed/deleted).
-            return Files.readAttributes(Path.of("/proc/self/fd/" + number), "unix:*");
-        } catch (Exception e) { throw new ErrnoException("fstat", OsConstants.EIO, e); }
+            return Path.of("/proc/self/fd/" + number);
+        } catch (ReflectiveOperationException e) { throw new IOException(e); }
     }
     private static long number(Map<String, Object> values, String key) { return ((Number) values.get(key)).longValue(); }
     private static long seconds(Map<String, Object> values, String key) { return ((FileTime) values.get(key)).to(TimeUnit.SECONDS); }
