@@ -302,7 +302,7 @@ class ReviewDeliveryJourneyHostTest {
             assertEquals(fixed.projectRevision, retained.projectRevision)
             assertArrayEquals(ViewerPackageCodec.writeScene(actual.scene), ViewerPackageCodec.writeScene(retained.scene))
         }
-        compose.onNodeWithText("查看封存成品").performScrollTo().assertIsEnabled().performClick()
+        compose.onNodeWithText("播放此版本").performScrollTo().assertIsEnabled().performClick()
         waitForEnabled("下一步")
         settled()
         assertEquals(fixed.id, releases.state.value.player?.scene?.releaseId)

@@ -1,6 +1,7 @@
 package com.tapscene.ui.shell
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
@@ -20,6 +21,7 @@ import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -334,17 +336,14 @@ fun DeliveryOptionsScreen(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(sealedSummary.title, style = MaterialTheme.typography.headlineMedium,
                     modifier = Modifier.semantics { heading() })
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("${sealedSummary.stepCount} 个步骤 · ${formatShellBytes(sealedSummary.byteLength)}",
-                        style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-                    Text("${if (sealedSummary.origin == "local") "封存" else "导入"}于 ${formatReleaseDate(sealedSummary.sealedAt)}",
-                        style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-                    sealedRevision?.let { revision ->
-                        Text("封存修订 $revision", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
-                    }
-                }
+                Text("${sealedSummary.stepCount} 个步骤 · ${formatShellBytes(sealedSummary.byteLength)}",
+                    style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
                 Text("此版本内容已固定，不会随项目草稿更新。", style = MaterialTheme.typography.bodyMedium,
                     color = ShellColors.Muted)
+                onOpenSealed?.let { openSelectedVersion ->
+                    Button(onClick = openSelectedVersion, enabled = !busy, shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("播放此版本") }
+                }
                 if (sealedRevision != null && currentDraftRevision != null && currentDraftRevision != sealedRevision) {
                     Column(Modifier.fillMaxWidth().background(ShellColors.Quiet, RoundedCornerShape(8.dp)).padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -358,23 +357,37 @@ fun DeliveryOptionsScreen(
                         }
                     }
                 }
+            }
+            DetailSection("离线观看包", "接收方用 TapScene 导入。") {
+                val exportEnabled = onExport != null && !busy
+                val shareEnabled = sealedSummary.origin == "local" && onShare != null && !busy
+                val secondaryColors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = { onExport?.invoke() }, enabled = exportEnabled,
+                        colors = secondaryColors,
+                        border = BorderStroke(1.dp, if (exportEnabled) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface.copy(alpha = .12f)),
+                        modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text(if (busy) "正在准备" else "保存到文件") }
+                    OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = { onShare?.invoke() }, enabled = shareEnabled,
+                        colors = secondaryColors,
+                        border = BorderStroke(1.dp, if (shareEnabled) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface.copy(alpha = .12f)),
+                        modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text("系统分享") }
+                }
+                Text("临时分享入口 24 小时有效，已发送副本无法收回。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 ShellActionRow("版本详情", value = if (showVersionDetails) "收起" else "展开",
                     onClick = { showVersionDetails = !showVersionDetails })
                 if (showVersionDetails) {
+                    Text("${if (sealedSummary.origin == "local") "封存" else "导入"}于 ${formatReleaseDate(sealedSummary.sealedAt)}",
+                        style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    sealedRevision?.let { revision ->
+                        Text("封存修订 $revision", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
+                    }
                     Text("版本标识", style = MaterialTheme.typography.labelMedium, color = ShellColors.Muted)
                     Text(sealedSummary.id, style = MaterialTheme.typography.bodyMedium)
                     Text("内容摘要", style = MaterialTheme.typography.labelMedium, color = ShellColors.Muted)
                     Text(sealedSummary.contentDigest, style = MaterialTheme.typography.bodyMedium)
                 }
-            }
-            DetailSection("离线观看包", "接收方用 TapScene 导入。") {
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Button(shape = RoundedCornerShape(8.dp), onClick = { onExport?.invoke() }, enabled = onExport != null && !busy,
-                        modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text(if (busy) "正在准备" else "保存到文件") }
-                    OutlinedButton(shape = RoundedCornerShape(8.dp), onClick = { onShare?.invoke() }, enabled = sealedSummary.origin == "local" && onShare != null && !busy,
-                        modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text("系统分享") }
-                }
-                Text("临时分享入口 24 小时有效，已发送副本无法收回。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
             }
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -407,7 +420,6 @@ fun DeliveryOptionsScreen(
         } else {
             Text("托管链接尚未接入。", style = MaterialTheme.typography.bodySmall, color = ShellColors.Muted)
         }
-        if (sealedSummary != null && onOpenSealed != null) ShellActionRow("查看封存成品", enabled = !busy, onClick = onOpenSealed)
     }
 }
 
