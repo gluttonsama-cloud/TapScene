@@ -9,6 +9,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -47,6 +49,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -56,6 +59,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.heading
@@ -169,7 +173,7 @@ fun ProjectHomeContent(
             item(key = "no_matches") { WorkspaceEmpty("没有找到匹配项目", "换个关键词，或清除搜索查看全部项目。") }
         }
         items(visibleProjects, key = { it.id }) { project ->
-            ProjectRow(
+            ProjectCard(
                 project = project,
                 enabled = !state.busy && !state.loadFailed,
                 onOpen = { onOpenProject(project.id) },
@@ -180,7 +184,7 @@ fun ProjectHomeContent(
         }
         if (state.projects.isNotEmpty()) {
             item(key = "local_notice") {
-                Text("项目与原素材保存在这台设备。封面使用中性图形，不读取原录屏。",
+                Text("项目与原素材保存在这台设备。",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
@@ -188,7 +192,8 @@ fun ProjectHomeContent(
 }
 
 @Composable
-private fun ProjectRow(
+@OptIn(ExperimentalLayoutApi::class)
+private fun ProjectCard(
     project: ProjectSummary,
     enabled: Boolean,
     onOpen: () -> Unit,
@@ -197,29 +202,25 @@ private fun ProjectRow(
     onDelete: () -> Unit,
 ) {
     var menuOpen by rememberSaveable(project.id) { mutableStateOf(false) }
-    Column {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Row(
-                modifier = Modifier.weight(1f).clickable(enabled = enabled, role = Role.Button,
-                    onClickLabel = "打开项目", onClick = onOpen).padding(vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                NeutralProjectCover(Modifier.size(width = 64.dp, height = 80.dp))
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(project.title, style = MaterialTheme.typography.titleMedium,
-                        maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    if (project.goal.isNotBlank()) {
-                        Text(project.goal, style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1,
-                            overflow = TextOverflow.Ellipsis)
-                    }
-                    Text("${project.stepCount} 个步骤",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("修改于 ${formatProjectDate(project.updatedAt)}", style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+    val shape = MaterialTheme.shapes.large
+    val titleColor = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+    val actionColor = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+    // Metadata is the content: no placeholder screenshot, media read or inferred review status.
+    Column(
+        modifier = Modifier.fillMaxWidth().clip(shape)
+            .background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, shape)
+            .clickable(enabled = enabled, role = Role.Button, onClickLabel = "继续创作", onClick = onOpen)
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(project.title, style = MaterialTheme.typography.titleLarge, color = titleColor,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text("修改于 ${formatProjectDate(project.updatedAt)}", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Box {
                 MoreButton("${project.title}，项目更多操作", enabled) { menuOpen = true }
@@ -231,7 +232,25 @@ private fun ProjectRow(
                 }
             }
         }
-        HorizontalDivider(Modifier.padding(top = 12.dp), color = MaterialTheme.colorScheme.outlineVariant)
+        if (project.goal.isNotBlank()) {
+            Text(project.goal, style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2,
+                overflow = TextOverflow.Ellipsis)
+        }
+        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+            verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Box(Modifier.padding(end = 12.dp)) {
+                Text("${project.stepCount} 个步骤",
+                    modifier = Modifier.background(MaterialTheme.colorScheme.primaryContainer,
+                        MaterialTheme.shapes.extraSmall).padding(horizontal = 8.dp, vertical = 2.dp),
+                    style = MaterialTheme.typography.labelMedium, color = titleColor)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("继续创作", style = MaterialTheme.typography.labelLarge, color = actionColor)
+                Text("›", modifier = Modifier.clearAndSetSemantics {},
+                    style = MaterialTheme.typography.labelLarge, color = actionColor)
+            }
+        }
     }
 }
 
@@ -715,24 +734,6 @@ private fun DerivedStepThumbnail(
                     Offset(width * .7f, height * .35f), stroke)
             }
         }
-    }
-}
-
-/** Deliberately neutral: project covers must not decode originals or imply a reviewed release. */
-@Composable
-private fun NeutralProjectCover(modifier: Modifier = Modifier) {
-    val border = MaterialTheme.colorScheme.outlineVariant
-    val ink = MaterialTheme.colorScheme.onSurfaceVariant
-    val background = MaterialTheme.colorScheme.surfaceContainerLow
-    Canvas(modifier.background(background).border(1.dp, border)) {
-        val stroke = 1.dp.toPx()
-        val x = size.width * .22f
-        val y = size.height * .22f
-        val w = size.width * .56f
-        val h = size.height * .25f
-        drawRect(ink.copy(alpha = .65f), Offset(x, y), Size(w, h), style = Stroke(stroke))
-        drawLine(ink.copy(alpha = .55f), Offset(x, size.height * .61f), Offset(x + w, size.height * .61f), stroke)
-        drawLine(ink.copy(alpha = .35f), Offset(x, size.height * .72f), Offset(x + w * .62f, size.height * .72f), stroke)
     }
 }
 

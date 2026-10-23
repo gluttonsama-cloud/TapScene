@@ -90,6 +90,52 @@ class CompactHomeActionsHostTest {
     }
 
     @Test
+    @Config(qualifiers = "w360dp-h800dp-xhdpi")
+    fun sameNamedCardsKeepContinueAndNestedMenusBoundToExactProject() {
+        val empty = homeProject().copy(id = "home-empty", goal = "", stepCount = 0)
+        val populated = homeProject().copy(id = "home-populated", updatedAt = 360_000L)
+        val state = mutableStateOf(ProjectUiState(projects = listOf(empty, populated)))
+        val calls = mutableListOf<String>()
+        setHome(state, calls)
+
+        // Titles are intentionally identical. Neither the visible continuation nor the nested
+        // overflow menu may select by title, or dispatch both the child and the card action.
+        val cards = listOf(empty, populated).map { project ->
+            compose.onNode(hasText(project.title) and hasText("${project.stepCount} 个步骤") and hasClickAction())
+        }
+        cards.forEach { card ->
+            assertTouchArea(card, homeViewport(), fullyVisible = true)
+            assertEquals("继续创作", card.fetchSemanticsNode().config[SemanticsActions.OnClick].label)
+        }
+        compose.onAllNodesWithText("修改于 ", substring = true).assertCountEquals(2)
+        compose.onNodeWithText(populated.goal).assertIsDisplayed()
+        val continuations = compose.onAllNodesWithText("继续创作", useUnmergedTree = true)
+        continuations.assertCountEquals(2)
+        continuations.onFirst().assertIsDisplayed().performTouchInput { click(center) }
+        continuations.onLast().assertIsDisplayed().performTouchInput { click(center) }
+        compose.waitForIdle()
+        assertEquals(listOf("open:${empty.id}", "open:${populated.id}"), calls)
+
+        val menus = compose.onAllNodesWithContentDescription("${empty.title}，项目更多操作")
+        menus.assertCountEquals(2)
+        val expectedCalls = calls.toMutableList()
+        listOf(Triple(0, "复制项目", "copy:${empty.id}"),
+            Triple(1, "项目文字", "rename:${populated.id}"),
+            Triple(0, "删除本机项目", "delete:${empty.id}")).forEach { (index, label, expected) ->
+            touch(menus[index], homeViewport(), fullyVisible = true)
+            assertEquals("Opening the nested menu must not open the card", expectedCalls, calls)
+            val item = button(label)
+            item.performScrollTo()
+            touch(item, rootBounds(item), fullyVisible = true)
+            expectedCalls += expected
+            assertEquals(expectedCalls, calls)
+            compose.onNodeWithText(label).assertDoesNotExist()
+        }
+        compose.onNodeWithText("搜索项目").assertTextContains("报名")
+        assertEquals(listOf(empty, populated), state.value.projects)
+    }
+
+    @Test
     @Config(qualifiers = "w320dp-h568dp-xhdpi")
     fun retainedHomeProjectsStayDisabledDuringBusyOrFailedReads() {
         val project = homeProject()

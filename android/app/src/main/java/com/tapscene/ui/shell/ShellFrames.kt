@@ -55,9 +55,11 @@ fun ProjectHomeFrame(
                         verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = onClickPlan, shape = RoundedCornerShape(8.dp),
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                             modifier = Modifier.heightIn(min = 48.dp)) { Text("悬浮编排") }
                         OutlinedButton(onClick = { showCreateOptions = true }, shape = RoundedCornerShape(8.dp),
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                             modifier = Modifier.heightIn(min = 48.dp)) { Text("其他创建方式") }
                     }
                 }
